@@ -11,13 +11,13 @@ from config.deepseek_config import (
 )
 
 APP_NAME = "ByteProof"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
 SUPPORT_EMAIL = "bytemind.nz@gmail.com"
 
-STRIPE_PAYMENT_URL = "https://buy.stripe.com/5kQ14ngJX7qvf1f24p3Nm04"  # TEMP TEST ($1)
+STRIPE_PAYMENT_URL = "https://buy.stripe.com/3cIcN50KZfX1bP3dN73Nm05"
 
 LOCAL_MODEL_PROVIDER = "ByteProof Local (Qwen3)"
 
@@ -36,6 +36,8 @@ def get_app_support_dir() -> str:
 
 APP_SUPPORT_DIR = get_app_support_dir()
 SETTINGS_FILE = os.path.join(APP_SUPPORT_DIR, "settings.json")
+LOCAL_MODEL_DIR = os.path.join(APP_SUPPORT_DIR, "local-models")
+RUNTIME_DIR = os.path.join(APP_SUPPORT_DIR, "runtime")
 
 # Define available providers
 PROVIDERS = {
@@ -51,7 +53,7 @@ PROVIDERS = {
             "ByteProof downloads a small local model (Phi-4 Mini or Qwen3) to "
             "your computer and runs it privately — no API key, no account, "
             "and it stays available in the limited free mode after your "
-            "7-day trial. The $20 license unlocks unlimited use.\n\n"
+            "7-day trial. The $35 license unlocks unlimited use.\n\n"
             "Open the Local AI tab to pick a model and download it. The "
             "recommended size depends on your RAM."
         ),

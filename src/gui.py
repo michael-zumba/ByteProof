@@ -69,6 +69,7 @@ from .activation import (
 )
 from .app_version import check_for_updates, download_update
 from .autostart import set_launch_at_login
+from .cache_cleanup import cleanup_cache, local_storage_usage
 from .generic_editing import get_generic_editor, normalize_selection_text
 from .licensing import (
     ensure_trial_started,
@@ -700,6 +701,21 @@ class LicenseValidationWorker(QThread):
         self.done.emit(result)
 
 
+class CacheCleanupWorker(QThread):
+    done = pyqtSignal(dict)  # pyright: ignore[reportAny]
+
+    def __init__(self, active_model_id: str | None = None) -> None:
+        super().__init__()
+        self.active_model_id = active_model_id
+
+    def run(self) -> None:
+        try:
+            result = cleanup_cache(self.active_model_id)
+        except Exception as e:
+            result = {"error": str(e)}
+        self.done.emit(result)
+
+
 class SettingsDialog(QDialog):
     settings: dict[str, Any]
     sidebar: QListWidget
@@ -1270,11 +1286,35 @@ class SettingsDialog(QDialog):
         subtitle = QLabel(
             "Private, offline proofreading on your computer. Download once and "
             "run it locally — no account, no API key, no internet needed. "
-            "The $20 license unlocks unlimited use."
+            "The $35 license unlocks unlimited use."
         )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
         layout.addWidget(subtitle)
+
+        storage_row = QHBoxLayout()
+        self.storage_label = QLabel()
+        self.storage_label.setStyleSheet("color: #78716C; font-size: 12px;")
+        storage_row.addWidget(self.storage_label)
+        storage_row.addStretch()
+        self.btn_cleanup = QPushButton("Clean Up Unused Files")
+        self.btn_cleanup.setFlat(True)
+        self.btn_cleanup.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cleanup.setStyleSheet("""
+            QPushButton {
+                color: #1A3A2A;
+                text-align: right;
+                border: none;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                text-decoration: underline;
+            }
+        """)
+        self.btn_cleanup.clicked.connect(self._clean_up_cache_now)
+        storage_row.addWidget(self.btn_cleanup)
+        layout.addLayout(storage_row)
+        self._update_storage_label()
 
         hw = detect_hardware()
         recommended = recommend_model(hw)
@@ -1441,6 +1481,44 @@ class SettingsDialog(QDialog):
         self._refresh_connect_tab()
         self._refresh_local_tab()
 
+    def _update_storage_label(self) -> None:
+        try:
+            usage = local_storage_usage()
+            total_gb = usage["total"] / (1024 ** 3)
+            self.storage_label.setText(f"Storage used: {total_gb:.2f} GB")
+        except Exception:
+            self.storage_label.setText("Storage used: —")
+
+    def _clean_up_cache_now(self) -> None:
+        if getattr(self, "_cache_cleanup_running", False):
+            return
+        self._cache_cleanup_running = True
+        self.btn_cleanup.setEnabled(False)
+        active = self.settings.get("local_model", {}).get("active_model")
+        worker = CacheCleanupWorker(active)
+        self._cache_cleanup_worker = worker
+        worker.done.connect(self._on_cache_cleanup_done)
+        worker.start()
+
+    def _on_cache_cleanup_done(self, result: dict) -> None:
+        self._cache_cleanup_running = False
+        self.btn_cleanup.setEnabled(True)
+        self._update_storage_label()
+        if result.get("error"):
+            self.local_status_label.setText("Cleanup failed. Files may be in use.")
+            return
+        freed = sum(
+            int(v)
+            for k, v in result.items()
+            if k.endswith("_freed") and isinstance(v, (int, float))
+        )
+        if freed > 0:
+            self.local_status_label.setText(
+                f"Cleanup complete — freed {freed / (1024 ** 3):.2f} GB."
+            )
+        else:
+            self.local_status_label.setText("Storage is already tidy — nothing to clean.")
+
     def _download_local_model(self, model_id: str) -> None:
         if self._download_in_progress():
             self.local_status_label.setText("A download is already in progress.")
@@ -1603,6 +1681,8 @@ class SettingsDialog(QDialog):
     def _refresh_local_tab(self) -> None:
         if not hasattr(self, "local_model_cards"):
             return
+        if hasattr(self, "storage_label"):
+            self._update_storage_label()
         active_model = resolve_model_id(self.settings.get("local_model", {}).get("active_model"))
         self.settings["local_model"]["active_model"] = active_model
         self.settings["providers"][LOCAL_MODEL_PROVIDER]["model"] = active_model
@@ -1791,7 +1871,7 @@ class SettingsDialog(QDialog):
         vbox.addWidget(self.lbl_msg)
         layout.addWidget(self.status_frame)
         
-        self.btn_buy = QPushButton("Purchase License ($1 Test)")
+        self.btn_buy = QPushButton("Purchase License ($35)")
         self.btn_buy.setMinimumHeight(42)
         self.btn_buy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_buy.setStyleSheet("""
@@ -2403,6 +2483,7 @@ class ProofreaderApp(QMainWindow):
         QTimer.singleShot(600, self._sync_launch_at_login)
         QTimer.singleShot(1200, self._check_trial_status_at_startup)
         QTimer.singleShot(1800, self._validate_license_at_startup)
+        QTimer.singleShot(2500, self._run_cache_cleanup)
         QTimer.singleShot(3000, self._check_for_app_updates)
 
     def _copy_corrected_text(self) -> None:
@@ -2944,6 +3025,13 @@ class ProofreaderApp(QMainWindow):
         worker = LicenseValidationWorker()
         self._license_validation_worker = worker
         worker.done.connect(self._on_license_validation_result)
+        worker.start()
+
+    def _run_cache_cleanup(self) -> None:
+        """Silently tidy logs, partials, and old models in the background."""
+        active = self.settings.get("local_model", {}).get("active_model")
+        worker = CacheCleanupWorker(active)
+        self._cache_cleanup_worker = worker
         worker.start()
 
     def _on_license_validation_result(self, result: dict) -> None:

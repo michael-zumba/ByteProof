@@ -85,12 +85,12 @@ identity; losing it means granting Accessibility once more.
 Done. The ByteMind Stripe payment link is live in `src/settings.py`:
 
 ```python
-STRIPE_PAYMENT_URL = "https://buy.stripe.com/00w7sLeBP3af6uJ24p3Nm03"
+STRIPE_PAYMENT_URL = "https://buy.stripe.com/3cIcN50KZfX1bP3dN73Nm05"
 ```
 
 The purchase button and trial-expired flow open this link directly. If you
 later want to change the price, update the button label in `src/gui.py`
-(`Purchase License ($20)` and the trial-expired copy).
+(`Purchase License ($35)` and the trial-expired copy).
 
 #### Automatic activation after payment
 
@@ -146,7 +146,7 @@ the app silently skips update checks.
   when 3 days or fewer remain.
 - After the trial expires, ByteProof enters a limited free mode: Local AI only,
   3 proofreads per day, and no reviewer comments. Cloud providers and unlimited
-  use require the $20 license.
+  use require the $35 license.
 - Hitting the daily cap or trying a cloud provider shows a purchase dialog with
   a recap of how many selections were proofread during the trial, plus
   **Purchase**, **Activate License**, and **I've Paid — Activate Automatically**.

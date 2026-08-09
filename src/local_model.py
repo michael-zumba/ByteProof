@@ -5,7 +5,7 @@ entirely on the user's machine through llama.cpp's OpenAI-compatible server.
 The first run downloads the runtime (~30 MB) and the model (~1.2-9 GB) with
 progress, resume, and SHA-256 verification. After that, proofreading is
 private and offline. Local AI remains available in the limited free mode after
-the 7-day trial (3 proofreads/day); the $20 license unlocks unlimited use.
+the 7-day trial (3 proofreads/day); the $35 license unlocks unlimited use.
 
 The catalog is intentionally small and conservative: Qwen3 models are Apache
 2.0 and Phi-4 Mini is MIT, which are both safe to bundle and redistribute in a
@@ -33,10 +33,8 @@ from typing import Any
 
 import certifi
 
-from .settings import APP_SUPPORT_DIR
+from .settings import APP_SUPPORT_DIR, LOCAL_MODEL_DIR, RUNTIME_DIR
 
-LOCAL_MODEL_DIR = os.path.join(APP_SUPPORT_DIR, "local-models")
-RUNTIME_DIR = os.path.join(APP_SUPPORT_DIR, "runtime")
 LOCAL_SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 17881
 
@@ -528,6 +526,13 @@ def ensure_local_model(
 ) -> str:
     """Download the runtime and model if needed; return the model file path."""
     ensure_runtime(progress_callback, cancel_event=cancel_event)
+    # Keep the app lightweight: free old unused models if storage is over budget.
+    try:
+        from .cache_cleanup import enforce_storage_budget
+
+        enforce_storage_budget(model_id)
+    except Exception:
+        pass
     model = get_model(model_id)
     path = model_path(model_id)
     if not is_model_installed(model_id):

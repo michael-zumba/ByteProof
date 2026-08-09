@@ -308,6 +308,84 @@ def test_server_activation_core_two_machine_limit() -> None:
     assert state["device_limit"] == 2
 
 
+def test_cache_cleanup_logs_and_stale_partials() -> None:
+    import src.cache_cleanup as cc
+
+    tmpdir = tempfile.mkdtemp()
+    log = os.path.join(tmpdir, "big.log")
+    with open(log, "w") as f:
+        f.write("x" * (cc.MAX_LOG_BYTES + 1000))
+
+    original_logs = cc.LOG_PATHS
+    cc.LOG_PATHS = (log,)
+    try:
+        freed = cc.cleanup_logs()
+        assert freed > 0
+        assert os.path.getsize(log) <= cc.LOG_TAIL_BYTES + 1
+    finally:
+        cc.LOG_PATHS = original_logs
+
+    models_dir = os.path.join(tmpdir, "models")
+    os.makedirs(models_dir)
+    old_part = os.path.join(models_dir, "old.gguf.part")
+    fresh_part = os.path.join(models_dir, "fresh.gguf.part")
+    with open(old_part, "wb") as f:
+        f.write(b"a" * 100)
+    with open(fresh_part, "wb") as f:
+        f.write(b"b" * 100)
+    old_ts = time.time() - (8 * 86400)
+    os.utime(old_part, (old_ts, old_ts))
+
+    original_model_dir = cc.LOCAL_MODEL_DIR
+    original_runtime_dir = cc.RUNTIME_DIR
+    cc.LOCAL_MODEL_DIR = models_dir
+    cc.RUNTIME_DIR = os.path.join(tmpdir, "runtime")
+    try:
+        freed = cc.cleanup_stale_partials()
+        assert freed == 100
+        assert not os.path.exists(old_part)
+        assert os.path.exists(fresh_part)
+    finally:
+        cc.LOCAL_MODEL_DIR = original_model_dir
+        cc.RUNTIME_DIR = original_runtime_dir
+
+
+def test_cache_cleanup_keeps_only_two_models() -> None:
+    import src.cache_cleanup as cc
+    from src import local_model
+
+    tmpdir = tempfile.mkdtemp()
+    paths = {}
+    removed: list[str] = []
+    for mid in ("a", "b", "c"):
+        path = os.path.join(tmpdir, mid + ".gguf")
+        with open(path, "wb") as f:
+            f.write(mid.encode() * 100)
+        paths[mid] = path
+
+    original_installed = cc.installed_model_ids
+    original_mtime = cc._model_mtime
+    original_path = local_model.model_path
+    original_remove = local_model.remove_model
+    try:
+        cc.installed_model_ids = lambda: ["a", "b", "c"]
+        cc._model_mtime = lambda mid: {"a": 1.0, "b": 2.0, "c": 3.0}[mid]
+        local_model.model_path = lambda mid: paths[mid]
+        local_model.remove_model = lambda mid: removed.append(mid) or True
+
+        freed = cc.remove_oldest_inactive_models(
+            active_model_id="c",
+            max_models=2,
+        )
+        assert removed == ["a"]
+        assert freed == len("a".encode() * 100)
+    finally:
+        cc.installed_model_ids = original_installed
+        cc._model_mtime = original_mtime
+        local_model.model_path = original_path
+        local_model.remove_model = original_remove
+
+
 def test_conversational_reply_guard() -> None:
     from src.logic import _looks_like_conversational_reply
 
@@ -1659,6 +1737,10 @@ def main() -> None:
     print("PASS secure store fallback restores license")
     test_server_activation_core_two_machine_limit()
     print("PASS server two-machine limit")
+    test_cache_cleanup_logs_and_stale_partials()
+    print("PASS cache cleanup logs + partials")
+    test_cache_cleanup_keeps_only_two_models()
+    print("PASS cache cleanup keeps only two models")
     test_trial_expired_enters_free_mode()
     print("PASS trial expiry enters free mode")
     test_free_mode_daily_cap()

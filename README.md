@@ -38,7 +38,7 @@ touching an API key:
    xAI, Groq, Perplexity, or the user's own Ollama server for maximum quality
    or context.
 
-The one-time $20 license remains the core purchase. A subscription is
+The one-time $35 license remains the core purchase. A subscription is
 deliberately not part of the core model (a managed cloud option can be added
 later if needed).
 
