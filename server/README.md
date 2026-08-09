@@ -28,6 +28,11 @@ The repository already contains `render.yaml` and `Dockerfile`:
    `-----END PRIVATE KEY-----` (including both lines), and paste it in. Render
    stores it as a secret; it is never committed to the repo.
 
+Note: the free Render tier does not support persistent disks. Payment and
+license records live in the container filesystem, which resets on redeploys.
+That is fine for testing. For production, either upgrade the service (a small
+persistent disk) or move the registry to a managed Postgres database.
+
 ## Local development
 
 1. `pip install -r server/requirements.txt`

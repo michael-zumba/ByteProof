@@ -15,7 +15,3 @@ services:
         sync: false
       - key: BYTEPROOF_DATA_DIR
         value: /data
-    disk:
-      name: byteproof-data
-      mountPath: /data
-      sizeGB: 1
