@@ -6,7 +6,9 @@
 # It requires a dedicated x86_64 Python virtual environment.
 #
 # One-time setup (run once):
-#   arch -x86_64 /usr/bin/python3 -m venv .venv_x86
+#   # Use a universal2 Python 3.11+ (e.g. python.org installer). The system
+#   # /usr/bin/python3 on macOS is 3.9 and cannot run this codebase.
+#   arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m venv .venv_x86
 #   source .venv_x86/bin/activate
 #   pip install -r requirements.txt
 #   deactivate
@@ -35,7 +37,7 @@ if [ ! -f "$VENV_PYTHON" ]; then
     echo "Error: x86_64 virtual environment not found at .venv_x86/"
     echo ""
     echo "One-time setup required. Run these commands:"
-    echo "  arch -x86_64 /usr/bin/python3 -m venv .venv_x86"
+    echo "  arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m venv .venv_x86"
     echo "  source .venv_x86/bin/activate"
     echo "  pip install -r requirements.txt"
     echo "  deactivate"

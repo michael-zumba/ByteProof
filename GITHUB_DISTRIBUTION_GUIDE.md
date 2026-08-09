@@ -24,7 +24,9 @@ and Intel) and Windows, and how to distribute it via GitHub Releases.
 **One-time setup** (run once):
 
 ```bash
-arch -x86_64 /usr/bin/python3 -m venv .venv_x86
+# Use a universal2 Python 3.11+ (e.g. python.org installer); the system
+# /usr/bin/python3 on macOS is 3.9 and cannot run this codebase.
+arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m venv .venv_x86
 source .venv_x86/bin/activate
 pip install -r requirements.txt
 deactivate
