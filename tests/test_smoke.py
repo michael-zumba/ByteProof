@@ -67,7 +67,7 @@ def test_open_purchase_url_uses_live_link() -> None:
         open_purchase_url(None)
     finally:
         webbrowser.open = original_open
-    assert opened == [settings.STRIPE_PAYMENT_URL]
+    assert opened == [settings.POLAR_CHECKOUT_URL]
 
 
 def test_licensing_roundtrip() -> None:
@@ -278,8 +278,10 @@ def test_legacy_email_and_signed_key_fallback() -> None:
     generator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generator)
     original_post = activation._post_json
+    original_org = activation.POLAR_ORGANIZATION_ID
     try:
         # Polar is not configured: support-issued signed keys still work.
+        activation.POLAR_ORGANIZATION_ID = ""
         key = generator.generate_license_key("paid@example.com", "unlimited", "")
         result = activation.activate_with_key(key)
         assert result["ok"], result
@@ -296,6 +298,7 @@ def test_legacy_email_and_signed_key_fallback() -> None:
         assert email_result["ok"], email_result
         assert email_result["email"] == "paid@example.com"
     finally:
+        activation.POLAR_ORGANIZATION_ID = original_org
         activation._post_json = original_post
         _restore_license_storage(originals)
 

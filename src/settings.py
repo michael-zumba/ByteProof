@@ -11,7 +11,7 @@ from config.deepseek_config import (
 )
 
 APP_NAME = "ByteProof"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -25,10 +25,12 @@ STRIPE_PAYMENT_URL = "https://buy.stripe.com/3cIcN50KZfX1bP3dN73Nm05"
 POLAR_API_URL = "https://api.polar.sh"
 POLAR_ORGANIZATION_ID = os.environ.get(
     "BYTEPROOF_POLAR_ORGANIZATION_ID", ""
-).strip()  # TODO: set from Polar dashboard
+).strip() or "710df3ef-fa69-4904-98f7-676fad519615"
 POLAR_CHECKOUT_URL = os.environ.get(
     "BYTEPROOF_POLAR_CHECKOUT_URL", ""
-).strip()  # TODO: set from Polar dashboard, e.g. https://polar.sh/...
+).strip() or (
+    "https://buy.polar.sh/polar_cl_m1VuSWJu14vqCyvzt13bLpTfKEV20qfRTdaNy1ApIIR"
+)
 
 # Developer-only email addresses that unlock full access without a Polar key.
 # These are for the app owner / beta testers; customers always use Polar keys.
