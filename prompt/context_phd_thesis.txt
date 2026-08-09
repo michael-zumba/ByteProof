@@ -1,0 +1,9 @@
+ADDITIONAL CONTEXT: The text is from a PhD thesis chapter in Accounting, Finance, or Economics. The work is in progress. The intended audience is the candidate's supervisory panel and thesis examiners.
+
+PhD theses at this level typically include: a clear research question or hypothesis near the start of each chapter, a detailed methodology section, a thorough literature review positioning the work within existing debates, empirical results with robustness checks, and a discussion linking findings back to the research question. Some redundancy or over-explaining is expected as the candidate develops their ideas: do not try to compress or summarise heavily.
+
+When editing:
+- Preserve the candidate's voice. Do not standardise every sentence to a single tone.
+- Methodology descriptions should be precise but do not need to be elegant.
+- Literature review passages should show clear links between cited works and the candidate's argument, but do not invent connections that are not present.
+- Tables and figures are common and their captions may need proofreading too.

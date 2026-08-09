@@ -1,0 +1,10 @@
+certifi
+cryptography>=41.0.0
+PyQt6
+pyinstaller
+pyobjc-framework-Cocoa; sys_platform == 'darwin'
+pyobjc-framework-ApplicationServices; sys_platform == 'darwin'
+pyobjc-framework-Quartz; sys_platform == 'darwin'
+pynput
+pywin32; sys_platform == 'win32'
+uiautomation; sys_platform == 'win32'

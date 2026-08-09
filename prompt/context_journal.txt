@@ -1,0 +1,12 @@
+ADDITIONAL CONTEXT: The text is from a manuscript being prepared for submission to a top-tier academic journal in Accounting, Finance, or Economics (targeting ABS 4/4*, ABDC A/A*). The intended audience is experienced researchers, editors, and reviewers.
+
+Writing at this level must be clear, precise, and accessible. Avoid jargon where a plain word works. Each paragraph should state a clear point and support it effectively.
+
+When editing:
+- Every sentence should earn its place. Remove filler, redundancy, and throat-clearing.
+- The introduction should state the research question and contribution within the first few paragraphs.
+- Hypothesis development should follow a clear logical chain: theory, prediction, rationale.
+- Results sections should report findings plainly without overclaiming.
+- The conclusion should not simply repeat the introduction.
+
+Typical weaknesses to watch for in journal submissions: vague motivation statements, overuse of passive voice, hedging that undermines the argument, and findings described as "interesting" or "important" without explaining why.

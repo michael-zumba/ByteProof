@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+
+# Environments
+.env
+.venv
+.venv_x86/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+.Python
+build/
+build_intel/
+develop-eggs/
+dist/
+dist_intel/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+# *.spec  <-- Commented out to allow committing spec files
+
+# Installer
+*.dmg
+*.pkg
+*.zip
+
+# Local upload scratch
+.uploads/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+error report.txt
+
+# Mac
+.DS_Store
+
+# Licensing (private keys)
+tools/

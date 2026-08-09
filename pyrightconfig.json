@@ -1,0 +1,17 @@
+{
+  "include": [
+    "."
+  ],
+  "venvPath": ".",
+  "venv": "venv",
+  "exclude": [
+    "venv",
+    ".venv_x86",
+    "dist",
+    "dist_intel",
+    "build",
+    "build_intel",
+    "pyinstaller_config",
+    "__pycache__"
+  ]
+}

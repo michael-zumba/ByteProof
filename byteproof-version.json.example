@@ -1,0 +1,8 @@
+{
+  "version": "1.0.1",
+  "release_date": "2026-08-09",
+  "release_notes": "Describe what changed in this release.",
+  "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
+  "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
+  "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
+}

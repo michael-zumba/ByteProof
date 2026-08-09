@@ -1,0 +1,6 @@
+# ByteProof is a defensive desktop GUI app: broad exception handling keeps
+# hotkey registration, Accessibility/AppleScript calls, clipboard helpers,
+# and background workers non-fatal when the OS or a target app misbehaves.
+# These lint rules are therefore intentionally not enforced.
+[lint]
+ignore = ["BLE001", "S110", "S112", "SIM102"]
