@@ -118,14 +118,16 @@ def activate(req: ActivateRequest) -> dict[str, str]:
                 status_code=400,
                 detail=f"Could not verify checkout session: {exc.user_message or exc}",
             )
-        if session.get("payment_status") != "paid":
+        if getattr(session, "payment_status", None) != "paid":
             raise HTTPException(
                 status_code=402,
                 detail="Payment is not complete yet. Please try again after checkout.",
             )
-        details = session.get("customer_details") or {}
+        details = getattr(session, "customer_details", None) or {}
         email = (
-            details.get("email") or session.get("customer_email") or ""
+            getattr(details, "email", None)
+            or getattr(session, "customer_email", None)
+            or ""
         ).strip().lower()
         if not email:
             raise HTTPException(status_code=400, detail="Checkout session has no email.")
