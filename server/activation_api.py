@@ -44,7 +44,7 @@ from .activation_core import (
     register_machine,
     validate_machine,
 )
-from .license_signer import generate_license_key
+from .license_signer import generate_license_key, is_configured
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("BYTEPROOF_DATA_DIR", BASE_DIR / "data"))
@@ -59,7 +59,10 @@ app = FastAPI(title="ByteProof Activation API")
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "license_signer_configured": is_configured(),
+    }
 
 
 @app.post("/api/byteproof/stripe-webhook")
@@ -139,12 +142,24 @@ def activate(req: ActivateRequest) -> dict[str, str]:
     else:
         raise HTTPException(status_code=400, detail="Email or session_id is required.")
 
-    ok, key, error = register_machine(
-        LICENSES_FILE,
-        email,
-        machine_fp,
-        lambda e, fp: generate_license_key(e, "unlimited", fp),
-    )
+    try:
+        ok, key, error = register_machine(
+            LICENSES_FILE,
+            email,
+            machine_fp,
+            lambda e, fp: generate_license_key(e, "unlimited", fp),
+        )
+    except Exception as exc:
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "License signing failed on the server. "
+                "Check BYTEPROOF_LICENSE_PRIVATE_KEY."
+            ),
+        ) from exc
     if not ok:
         raise HTTPException(status_code=403, detail=error)
     return {"license_key": key}

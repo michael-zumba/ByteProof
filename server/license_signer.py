@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,41 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 
+def _normalize_pem(value: str) -> bytes:
+    """Accept PEM text in any pasted format: real newlines, literal \\n, or
+    a single continuous line. Returns a clean 64-column PEM block."""
+    cleaned = (
+        value.strip()
+        .replace("\\n", "\n")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+    # Remove the PEM markers first (their words are also base64 characters),
+    # then extract only real base64 content, ignoring any whitespace quirks.
+    without_markers = re.sub(r"-----BEGIN[^-]*?-----", "", cleaned, flags=re.S)
+    without_markers = re.sub(r"-----END[^-]*?-----", "", without_markers, flags=re.S)
+    body = "".join(re.findall(r"[A-Za-z0-9+/=]+", without_markers))
+    wrapped = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
+    return (
+        "-----BEGIN PRIVATE KEY-----\n"
+        + wrapped
+        + "\n-----END PRIVATE KEY-----\n"
+    ).encode("utf-8")
+
+
 def _load_private_key() -> Any:
     pem_text = os.environ.get("BYTEPROOF_LICENSE_PRIVATE_KEY", "").strip()
     if pem_text:
-        pem = pem_text.replace("\\n", "\n").encode("utf-8")
-        return serialization.load_pem_private_key(pem, password=None)
+        try:
+            return serialization.load_pem_private_key(
+                _normalize_pem(pem_text),
+                password=None,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "BYTEPROOF_LICENSE_PRIVATE_KEY is set but could not be parsed: "
+                f"{exc}"
+            ) from exc
 
     generator_path = os.environ.get("BYTEPROOF_GENERATOR_PATH", "")
     if generator_path and Path(generator_path).exists():
@@ -49,6 +80,14 @@ def _get_private_key() -> Any:
     if _private_key is None:
         _private_key = _load_private_key()
     return _private_key
+
+
+def is_configured() -> bool:
+    try:
+        _get_private_key()
+        return True
+    except Exception:
+        return False
 
 
 def generate_license_key(
