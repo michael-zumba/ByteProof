@@ -104,7 +104,7 @@ ByteProof supports two automatic activation paths:
    "I've Paid — Activate Automatically" button (also in the trial-expired
    dialog) asks for the checkout email, then POSTs it with the machine
    fingerprint to `ACTIVATION_API_URL` in `src/activation.py`:
-   `https://api.bytemind.co.nz/api/byteproof/activate`. The server must verify
+   `https://byteproof-api.onrender.com/api/byteproof/activate`. The server must verify
    the Stripe payment and return `{"license_key": "..."}`. Send buyers a
    fallback link `byteproof://activate?email=<email>` in the fulfilment email.
 
@@ -112,7 +112,8 @@ ByteProof supports two automatic activation paths:
 (FastAPI + Stripe webhook + license generation). Use the included
 `render.yaml` blueprint on Render, set the three secrets (`STRIPE_SECRET_KEY`,
 `STRIPE_WEBHOOK_SECRET`, `BYTEPROOF_LICENSE_PRIVATE_KEY`), and point
-`api.bytemind.co.nz` at the service. Follow `server/README.md`.
+the app at the Render service URL (currently
+`https://byteproof-api.onrender.com`). Follow `server/README.md`.
 Until that endpoint is live, path 1 (emailed key link) works fully and path 2
 shows a clear "server not reachable" message.
 

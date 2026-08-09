@@ -35,9 +35,9 @@ from .licensing import (
 )
 from .settings import APP_NAME
 
-ACTIVATION_API_URL = "https://api.bytemind.co.nz/api/byteproof/activate"
-ACTIVATION_DEACTIVATE_URL = "https://api.bytemind.co.nz/api/byteproof/deactivate"
-ACTIVATION_VALIDATE_URL = "https://api.bytemind.co.nz/api/byteproof/validate"
+ACTIVATION_API_URL = "https://byteproof-api.onrender.com/api/byteproof/activate"
+ACTIVATION_DEACTIVATE_URL = "https://byteproof-api.onrender.com/api/byteproof/deactivate"
+ACTIVATION_VALIDATE_URL = "https://byteproof-api.onrender.com/api/byteproof/validate"
 URL_SCHEME = "byteproof"
 
 

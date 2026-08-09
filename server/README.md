@@ -46,8 +46,10 @@ persistent disk) or move the registry to a managed Postgres database.
 - Add a webhook endpoint pointing to
   `https://<your-domain>/api/byteproof/stripe-webhook` and subscribe to
   `checkout.session.completed`.
-- Recommended domain: `https://api.bytemind.co.nz` (add a `CNAME api` record
-  pointing at your Render service, e.g. `byteproof-api.onrender.com`).
+- Current deployment (free plan): the app points at
+  `https://byteproof-api.onrender.com`. If you later move to a custom domain
+  (`api.bytemind.co.nz`), update `ACTIVATION_API_URL` in `src/activation.py`
+  and the Stripe webhook endpoint URL, then rebuild the app.
 - Set the payment link's success URL to
   `byteproof://activate?session={CHECKOUT_SESSION_ID}` (Stripe replaces the
   placeholder). When ByteProof is installed, checkout returns straight into
