@@ -33,7 +33,7 @@ from typing import Any
 
 import certifi
 
-from .settings import APP_SUPPORT_DIR, LOCAL_MODEL_DIR, RUNTIME_DIR
+from .settings import LOCAL_MODEL_DIR, RUNTIME_DIR
 
 LOCAL_SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 17881

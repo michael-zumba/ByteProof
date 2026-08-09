@@ -279,12 +279,13 @@ class ToastNotification(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(
-            "#ToastNotification { background-color: rgba(17, 24, 39, 235); "
+            "#ToastNotification { background-color: #000000; "
+            "border: 1px solid rgba(255, 255, 255, 70); "
             "border-radius: 22px; }"
         )
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setContentsMargins(18, 12, 18, 12)
         layout.setSpacing(10)
 
         self.waveform = WaveformBars()
@@ -298,13 +299,13 @@ class ToastNotification(QFrame):
 
         self.label = QLabel()
         self.label.setStyleSheet(
-            "color: #FFFFFF; font-size: 13px; font-weight: 600; background: transparent;"
+            "color: #FFFFFF; font-size: 14px; font-weight: 600; background: transparent;"
         )
         layout.addWidget(self.label)
 
         self.time_label = QLabel("0:00")
         self.time_label.setStyleSheet(
-            "color: rgba(255, 255, 255, 180); font-size: 12px; "
+            "color: rgba(255, 255, 255, 200); font-size: 13px; "
             "font-family: Menlo, Consolas, monospace; background: transparent;"
         )
         layout.addWidget(self.time_label)
@@ -988,66 +989,134 @@ class SettingsDialog(QDialog):
         layout.addWidget(temp_group)
         
         spelling_group = QGroupBox("Proofreading Settings")
-        spelling_layout = QFormLayout(spelling_group)
-        spelling_layout.setSpacing(12)
-        spelling_layout.setContentsMargins(12, 18, 12, 12)
-        
+        spelling_layout = QVBoxLayout(spelling_group)
+        spelling_layout.setSpacing(14)
+        spelling_layout.setContentsMargins(14, 18, 14, 16)
+
+        def make_setting_row(title: str, hint: str, combo: QComboBox) -> QWidget:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(16)
+
+            text_col = QVBoxLayout()
+            text_col.setSpacing(2)
+            title_lbl = QLabel(title)
+            title_lbl.setStyleSheet(
+                "font-size: 13px; font-weight: 620; color: #292524; "
+                "background: transparent; border: none;"
+            )
+            hint_lbl = QLabel(hint)
+            hint_lbl.setWordWrap(True)
+            hint_lbl.setStyleSheet(
+                "font-size: 11px; color: #A89F9A; "
+                "background: transparent; border: none;"
+            )
+            text_col.addWidget(title_lbl)
+            text_col.addWidget(hint_lbl)
+            row_layout.addLayout(text_col, 1)
+
+            combo.setMinimumWidth(220)
+            combo.setMaximumWidth(250)
+            combo.setCursor(Qt.CursorShape.PointingHandCursor)
+            row_layout.addWidget(combo, 0, Qt.AlignmentFlag.AlignVCenter)
+            return row
+
         self.combo_spelling = QComboBox()
         self.combo_spelling.addItems(["UK/AU/NZ", "US English"])
-        
         current_spelling = self.settings.get("general", {}).get("spelling", "UK/AU/NZ")
         index = self.combo_spelling.findText(current_spelling)
         if index >= 0:
             self.combo_spelling.setCurrentIndex(index)
         else:
             self.combo_spelling.setCurrentIndex(0)
-            
-        spelling_layout.addRow("Preferred Spelling:", self.combo_spelling)
-        
+        spelling_layout.addWidget(
+            make_setting_row(
+                "Preferred Spelling",
+                "UK/AU/NZ or US English.",
+                self.combo_spelling,
+            )
+        )
+
         self.combo_style = QComboBox()
         self.combo_style.addItems(["Precise (Minimal Changes)", "Creative (Rewrite)"])
-        
-        current_style = self.settings.get("general", {}).get("style", "Precise (Minimal Changes)")
+        current_style = self.settings.get("general", {}).get(
+            "style", "Precise (Minimal Changes)"
+        )
         style_index = self.combo_style.findText(current_style)
         if style_index >= 0:
             self.combo_style.setCurrentIndex(style_index)
         else:
             self.combo_style.setCurrentIndex(0)
-            
-        spelling_layout.addRow("Editing Style:", self.combo_style)
+        spelling_layout.addWidget(
+            make_setting_row(
+                "Editing Style",
+                "Precise keeps your wording intact; Creative rewrites more freely.",
+                self.combo_style,
+            )
+        )
 
         self.combo_comment = QComboBox()
         self.combo_comment.addItems(["None", "Language", "Technical (Reviewer)"])
 
         access = get_access_status()
-        if access.get("tier") == "free":
+        comment_locked = access.get("tier") == "free"
+        if comment_locked:
             self.combo_comment.setCurrentIndex(0)
             self.combo_comment.setEnabled(False)
             self.combo_comment.setToolTip(
                 "Reviewer comments require a ByteProof license."
             )
-
-        if access.get("tier") != "free":
-            current_comment = self.settings.get("general", {}).get("comment_type", "None")
+        else:
+            current_comment = self.settings.get("general", {}).get(
+                "comment_type", "None"
+            )
             comment_index = self.combo_comment.findText(current_comment)
             if comment_index >= 0:
                 self.combo_comment.setCurrentIndex(comment_index)
             else:
                 self.combo_comment.setCurrentIndex(0)
-
-        spelling_layout.addRow("Add Reviewer Comment:", self.combo_comment)
+        spelling_layout.addWidget(
+            make_setting_row(
+                "Add Reviewer Comment",
+                (
+                    "Reviewer comments require a ByteProof license."
+                    if comment_locked
+                    else "Adds a Word reviewer comment alongside tracked changes."
+                ),
+                self.combo_comment,
+            )
+        )
 
         self.combo_context = QComboBox()
-        self.combo_context.addItems(["General Editing", "PhD Thesis Chapter", "Academic Journal (Top-Tier)"])
-
-        current_context = self.settings.get("general", {}).get("context", "General Editing")
+        self.combo_context.addItems(
+            [
+                "General Editing",
+                "PhD Thesis Chapter",
+                "Academic Journal (Top-Tier)",
+            ]
+        )
+        current_context = self.settings.get("general", {}).get(
+            "context", "General Editing"
+        )
         context_index = self.combo_context.findText(current_context)
         if context_index >= 0:
             self.combo_context.setCurrentIndex(context_index)
         else:
             self.combo_context.setCurrentIndex(0)
+        spelling_layout.addWidget(
+            make_setting_row(
+                "Document Context",
+                "Tailors tone and terminology to your document type.",
+                self.combo_context,
+            )
+        )
 
-        spelling_layout.addRow("Document Context:", self.combo_context)
+        note = QLabel("Changes apply to your next proofread.")
+        note.setStyleSheet(
+            "color: #A89F9A; font-size: 11px; background: transparent; border: none;"
+        )
+        spelling_layout.addWidget(note)
         layout.addWidget(spelling_group)
 
         scroll.setWidget(content)
@@ -3278,34 +3347,53 @@ class ProofreaderApp(QMainWindow):
             }
             QComboBox {
                 background-color: #FFFFFF;
-                border: 1px solid #E8E4E0;
+                border: 1px solid #DED8D2;
                 border-radius: 10px;
-                padding: 9px 12px;
+                padding: 9px 38px 9px 14px;
                 min-height: 22px;
                 color: #292524;
+                font-size: 13px;
+                font-weight: 520;
             }
             QComboBox:hover {
-                border-color: #C4BDB7;
+                border-color: #B7AFA8;
+                background-color: #FDFCFA;
             }
             QComboBox:focus {
                 border-color: #1A3A2A;
             }
+            QComboBox:disabled {
+                background-color: #F5F0EB;
+                color: #A89F9A;
+                border-color: #E8E4E0;
+            }
             QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 30px;
+                width: 34px;
+                border: none;
                 border-left: 1px solid #F0ECE8;
                 border-top-right-radius: 10px;
                 border-bottom-right-radius: 10px;
             }
             QComboBox QAbstractItemView {
                 background-color: #FFFFFF;
-                border: 1px solid #E8E4E0;
-                border-radius: 10px;
-                selection-background-color: #EDF3EF;
-                selection-color: #292524;
+                border: 1px solid #DED8D2;
+                border-radius: 12px;
                 padding: 6px;
                 outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 30px;
+                padding: 4px 10px;
+                border-radius: 8px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #F5F0EB;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #EDF3EF;
+                color: #143024;
             }
             QPushButton {
                 background-color: #FFFFFF;
@@ -3375,17 +3463,19 @@ class ProofreaderApp(QMainWindow):
                 font-size: 12px;
                 color: #57534E;
                 border: 1px solid #E8E4E0;
-                border-radius: 12px;
+                border-radius: 14px;
                 margin-top: 18px;
-                background-color: rgba(255, 255, 255, 150);
+                background-color: rgba(255, 255, 255, 235);
                 padding-top: 30px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-                left: 14px;
+                left: 16px;
                 padding: 0 8px;
                 background-color: transparent;
+                color: #1F5335;
+                font-weight: 700;
             }
             QSlider::groove:horizontal {
                 border: none;
@@ -3814,13 +3904,15 @@ class ProofreaderApp(QMainWindow):
                 done_informative = (
                     "The installer has been opened.\n\n"
                     "If it did not start automatically, open the downloaded file in your Downloads folder.\n"
-                    "Replace the existing ByteProof folder when asked to complete the update."
+                    "Replace the existing ByteProof folder when asked to complete the update.\n\n"
+                    "Your settings, license, and hotkeys are stored separately and will be kept."
                 )
             else:
                 done_informative = (
                     "The installer has been opened.\n\n"
                     "Double-click the DMG file in your Downloads folder if it did not open automatically.\n"
-                    "Drag ByteProof to Applications to complete the update."
+                    "Drag ByteProof to Applications to complete the update.\n\n"
+                    "Your settings, license, and hotkeys are stored separately and will be kept."
                 )
             done_msg.setInformativeText(
                 done_informative

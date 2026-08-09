@@ -109,10 +109,8 @@ def cleanup_runtime_artifacts() -> int:
     for name in os.listdir(RUNTIME_DIR):
         path = os.path.join(RUNTIME_DIR, name)
         try:
-            if os.path.isfile(path) and (
-                name.endswith(".zip")
-                or name.endswith(".tar.gz")
-                or name.endswith(".tgz")
+            if os.path.isfile(path) and name.endswith(
+                (".zip", ".tar.gz", ".tgz")
             ):
                 if _file_age_days(path) >= STALE_FILE_DAYS:
                     freed += os.path.getsize(path)

@@ -583,7 +583,7 @@ def test_cache_cleanup_keeps_only_two_models() -> None:
             max_models=2,
         )
         assert removed == ["a"]
-        assert freed == len("a".encode() * 100)
+        assert freed == len(b"a" * 100)
     finally:
         cc.installed_model_ids = original_installed
         cc._model_mtime = original_mtime
@@ -758,12 +758,16 @@ def test_free_mode_daily_cap() -> None:
     tmpdir = tempfile.mkdtemp()
     original_usage = licensing._get_usage_path
     original_license = licensing._get_license_path
+    original_secure_get = licensing._secure_store_get
+    original_secure_delete = licensing._secure_store_delete
     original_secondary_read = licensing._trial_secondary_read
     original_secondary_write = licensing._trial_secondary_write
     original_ensure = licensing.ensure_trial_started
     try:
         licensing._get_usage_path = lambda: os.path.join(tmpdir, "usage.json")
         licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
+        licensing._secure_store_get = lambda: None
+        licensing._secure_store_delete = lambda: None
         licensing._trial_secondary_read = lambda: None
         licensing._trial_secondary_write = lambda _ts: None
         # Trial expired 8 days ago.
@@ -784,6 +788,8 @@ def test_free_mode_daily_cap() -> None:
     finally:
         licensing._get_usage_path = original_usage
         licensing._get_license_path = original_license
+        licensing._secure_store_get = original_secure_get
+        licensing._secure_store_delete = original_secure_delete
         licensing._trial_secondary_read = original_secondary_read
         licensing._trial_secondary_write = original_secondary_write
         licensing.ensure_trial_started = original_ensure

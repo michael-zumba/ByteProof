@@ -367,7 +367,7 @@ def activate_polar_license(result: dict[str, Any]) -> dict[str, Any]:
     expiry: float | None = None
     if expires_at:
         try:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             expiry = datetime.fromisoformat(
                 str(expires_at).replace("Z", "+00:00")

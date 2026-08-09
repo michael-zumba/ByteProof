@@ -11,7 +11,7 @@ from config.deepseek_config import (
 )
 
 APP_NAME = "ByteProof"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -173,6 +173,7 @@ def _clean_api_keys(keys: list[str]) -> list[str]:
 def load_runtime_settings() -> dict[str, Any]:
     # Default structure
     settings: dict[str, Any] = {
+        "app_version": APP_VERSION,
         "general": {
             "launch_at_login": False,
             "keep_on_top": True,
@@ -217,6 +218,7 @@ def load_runtime_settings() -> dict[str, Any]:
 
     if not os.path.exists(SETTINGS_FILE):
         settings["general"]["temperature"] = 0.3
+        settings["app_version"] = APP_VERSION
         return settings
 
     try:
@@ -224,6 +226,7 @@ def load_runtime_settings() -> dict[str, Any]:
             loaded = json.load(f)
     except (json.JSONDecodeError, OSError):
         settings["general"]["temperature"] = 0.3
+        settings["app_version"] = APP_VERSION
         return settings
 
     # Migration logic
@@ -268,7 +271,26 @@ def load_runtime_settings() -> dict[str, Any]:
         settings["local_model"].update(loaded["local_model"])
 
     settings["general"]["temperature"] = max(0.0, min(2.0, settings["general"]["temperature"]))
+    _stamp_version_and_save(settings)
     return settings
+
+
+def _stamp_version_and_save(settings: dict[str, Any]) -> None:
+    """Record the app version that last wrote settings.json.
+
+    This lets future releases detect an upgrade and run one-time migrations,
+    while never touching the user's hotkeys, license, or other preferences.
+    """
+    stored_version = settings.get("app_version")
+    settings["app_version"] = APP_VERSION
+    if stored_version == APP_VERSION:
+        return
+    try:
+        os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 
 def save_runtime_settings(settings: dict[str, Any]) -> None:
     os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
