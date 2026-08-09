@@ -101,46 +101,203 @@ def test_licensing_roundtrip() -> None:
         licensing._secure_store_delete = original_secure_delete
 
 
-def test_activation_from_url() -> None:
-    from src import activation, licensing
+def _patch_license_storage(tmpdir: str):
+    """Patch licensing to use a temp license file and disable Keychain calls."""
+    from src import licensing
 
-    tmpdir = tempfile.mkdtemp()
-    licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
+    original_license = licensing._get_license_path
     original_secure_set = licensing._secure_store_set
     original_secure_get = licensing._secure_store_get
     original_secure_delete = licensing._secure_store_delete
+    licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
     licensing._secure_store_set = lambda _value: None
     licensing._secure_store_get = lambda: None
     licensing._secure_store_delete = lambda: None
+    return original_license, original_secure_set, original_secure_get, original_secure_delete
 
+
+def _restore_license_storage(originals) -> None:
+    from src import licensing
+
+    (
+        licensing._get_license_path,
+        licensing._secure_store_set,
+        licensing._secure_store_get,
+        licensing._secure_store_delete,
+    ) = originals
+
+
+def test_activation_from_url() -> None:
+    from src import activation, licensing, polar
+
+    tmpdir = tempfile.mkdtemp()
+    originals = _patch_license_storage(tmpdir)
+    original_activate = polar.activate_key
+    original_org = activation.POLAR_ORGANIZATION_ID
+    try:
+        activation.POLAR_ORGANIZATION_ID = "org_test"
+        polar.activate_key = lambda key, label: {
+            "ok": True,
+            "key": key,
+            "activation_id": "act_123",
+            "status": "granted",
+            "limit_activations": 2,
+            "expires_at": None,
+        }
+
+        result = activation.activate_from_url(
+            "byteproof://activate?key=POLAR_TEST_KEY"
+        )
+        assert result["ok"], result
+        assert licensing.is_licensed()
+        assert licensing.get_license_info()["provider"] == "polar"
+        assert licensing.get_license_info()["activation_id"] == "act_123"
+
+        bad = activation.activate_from_url("https://example.com/not-byteproof")
+        assert not bad["ok"]
+
+        # Stripe session deep links are obsolete with Polar.
+        session = activation.activate_from_url(
+            "byteproof://activate?session=cs_test_123"
+        )
+        assert not session["ok"]
+    finally:
+        activation.POLAR_ORGANIZATION_ID = original_org
+        polar.activate_key = original_activate
+        _restore_license_storage(originals)
+
+
+def test_polar_key_activation_and_validation() -> None:
+    from src import activation, licensing, polar
+
+    tmpdir = tempfile.mkdtemp()
+    originals = _patch_license_storage(tmpdir)
+    original_activate = polar.activate_key
+    original_validate = polar.validate_key
+    original_deactivate = polar.deactivate_key
+    original_org = activation.POLAR_ORGANIZATION_ID
+    try:
+        activation.POLAR_ORGANIZATION_ID = "org_test"
+        polar.activate_key = lambda key, label: {
+            "ok": True,
+            "key": key,
+            "activation_id": "act_456",
+            "status": "granted",
+            "limit_activations": 2,
+            "expires_at": None,
+        }
+        result = activation.activate_with_key("BP_TEST_1234")
+        assert result["ok"], result
+        assert licensing.is_licensed()
+
+        polar.validate_key = lambda key, activation_id: {
+            "status": "granted",
+            "activation": {"id": activation_id},
+        }
+        assert activation.validate_license_remote()["ok"] is True
+
+        polar.validate_key = lambda key, activation_id: {"status": "revoked"}
+        remote = activation.validate_license_remote()
+        assert remote["ok"] is False
+        assert "revoked" in remote["error"]
+
+        polar.deactivate_key = lambda key, activation_id: {"ok": True}
+        deactivated = activation.deactivate_license()
+        assert deactivated["ok"]
+        assert not licensing.is_licensed()
+    finally:
+        polar.activate_key = original_activate
+        polar.validate_key = original_validate
+        polar.deactivate_key = original_deactivate
+        activation.POLAR_ORGANIZATION_ID = original_org
+        _restore_license_storage(originals)
+
+
+def test_polar_activate_parses_top_level_activation() -> None:
+    from src import polar
+
+    calls: list[tuple[str, dict]] = []
+    original_post = polar._post
+
+    def fake_post(path: str, payload: dict) -> dict:
+        calls.append((path, payload))
+        return {
+            "id": "act_789",
+            "label": "test-machine",
+            "license_key": {
+                "status": "granted",
+                "limit_activations": 2,
+                "expires_at": None,
+            },
+        }
+
+    polar._post = fake_post
+    try:
+        result = polar.activate_key("BP_TEST", label="test-machine")
+        assert result["activation_id"] == "act_789"
+        assert result["status"] == "granted"
+        assert result["limit_activations"] == 2
+        assert calls[0][0] == "/v1/customer-portal/license-keys/activate"
+        assert calls[0][1]["conditions"]["machine_fingerprint"]
+    finally:
+        polar._post = original_post
+
+
+def test_developer_email_activation() -> None:
+    from src import activation, licensing
+    from src.settings import DEVELOPER_EMAILS
+
+    tmpdir = tempfile.mkdtemp()
+    originals = _patch_license_storage(tmpdir)
+    original_org = activation.POLAR_ORGANIZATION_ID
+    try:
+        dev = activation.activate_with_key(DEVELOPER_EMAILS[0])
+        assert dev["ok"], dev
+        assert licensing.is_licensed()
+        assert licensing.get_license_info()["provider"] == "dev"
+
+        # With Polar configured, a customer email is not a valid activation.
+        activation.POLAR_ORGANIZATION_ID = "org_test"
+        stranger = activation.activate_with_key("somebody@example.com")
+        assert not stranger["ok"]
+        assert "license key" in stranger["error"].lower()
+    finally:
+        activation.POLAR_ORGANIZATION_ID = original_org
+        _restore_license_storage(originals)
+
+
+def test_legacy_email_and_signed_key_fallback() -> None:
+    from src import activation, licensing
+
+    tmpdir = tempfile.mkdtemp()
+    originals = _patch_license_storage(tmpdir)
     spec = importlib.util.spec_from_file_location(
         "generate_license", os.path.join(PROJECT_ROOT, "tools", "generate_license.py")
     )
     assert spec is not None and spec.loader is not None
     generator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generator)
+    original_post = activation._post_json
     try:
+        # Polar is not configured: support-issued signed keys still work.
         key = generator.generate_license_key("paid@example.com", "unlimited", "")
-
-        result = activation.activate_from_url(f"byteproof://activate?key={key}")
+        result = activation.activate_with_key(key)
         assert result["ok"], result
         assert result["email"] == "paid@example.com"
         assert licensing.is_licensed()
 
-        bad = activation.activate_from_url("https://example.com/not-byteproof")
-        assert not bad["ok"]
-
-        original_url = activation.ACTIVATION_API_URL
-        activation.ACTIVATION_API_URL = "http://127.0.0.1:9/api"
-        unreachable = activation.activate_with_email("someone@example.com")
-        activation.ACTIVATION_API_URL = original_url
-        assert not unreachable["ok"]
-        assert unreachable["error"]
+        # Legacy email activation falls back to the ByteMind server.
+        licensing.delete_license_data()
+        activation._post_json = lambda url, payload: {
+            "ok": True,
+            "license_key": key,
+        }
+        email_result = activation.activate_with_key("paid@example.com")
+        assert email_result["ok"], email_result
+        assert email_result["email"] == "paid@example.com"
     finally:
-        activation.ACTIVATION_API_URL = original_url
-        licensing._secure_store_set = original_secure_set
-        licensing._secure_store_get = original_secure_get
-        licensing._secure_store_delete = original_secure_delete
+        activation._post_json = original_post
+        _restore_license_storage(originals)
 
 
 def test_strict_editing_rules_contract() -> None:
@@ -226,27 +383,6 @@ def test_secure_store_fallback_restores_license() -> None:
         licensing._secure_store_set = original_secure_set
         licensing._secure_store_get = original_secure_get
         licensing._secure_store_delete = original_secure_delete
-
-
-def test_activation_from_url_session() -> None:
-    from src import activation
-
-    original = activation.activate_with_session
-    calls: list[str] = []
-    activation.activate_with_session = (
-        lambda sid: calls.append(sid) or {"ok": True, "email": "buyer@example.com"}
-    )
-    try:
-        result = activation.activate_from_url(
-            "byteproof://activate?session=cs_test_123"
-        )
-        assert result["ok"]
-        assert calls == ["cs_test_123"]
-
-        bad = activation.activate_from_url("https://example.com/not-byteproof")
-        assert not bad["ok"]
-    finally:
-        activation.activate_with_session = original
 
 
 def test_server_activation_core_two_machine_limit() -> None:
@@ -1794,9 +1930,15 @@ def main() -> None:
     test_licensing_roundtrip()
     print("PASS licensing roundtrip")
     test_activation_from_url()
-    print("PASS activation from URL")
-    test_activation_from_url_session()
-    print("PASS activation from Stripe session URL")
+    print("PASS activation from URL (Polar key)")
+    test_polar_key_activation_and_validation()
+    print("PASS Polar key activation + validation + deactivation")
+    test_polar_activate_parses_top_level_activation()
+    print("PASS Polar activate response parsing")
+    test_developer_email_activation()
+    print("PASS developer email activation")
+    test_legacy_email_and_signed_key_fallback()
+    print("PASS legacy email + signed key fallback")
     test_tampered_license_rejected()
     print("PASS tampered license rejected")
     test_secure_store_fallback_restores_license()

@@ -132,25 +132,54 @@ Output: `ByteProof_Installer_Intel.dmg`
 2. Run `build_windows.bat` (or manually `pip install -r requirements.txt` then `pyinstaller --noconfirm ByteProof_win.spec`).
 3. Output: `dist\ByteProof\ByteProof.exe` and `ByteProof_Windows.zip`.
 
-## Stripe / Payments
+## Licensing & Payments
 
-The purchase button points to ByteMind's live Stripe payment link, defined in
-`src/settings.py` as `STRIPE_PAYMENT_URL`
-(`https://buy.stripe.com/00w7sLeBP3af6uJ24p3Nm03`).
+ByteProof uses **Polar** for checkout and license keys — the same approach the
+VoiceInk app uses. Polar owns the license records on its durable servers, so
+there is no custom activation server whose data can be lost on redeploy.
 
-After payment, licenses can be activated automatically:
+### Customer flow
 
-- **Deep link**: customers click `byteproof://activate?key=...` (e.g. from a
-  fulfilment email) and ByteProof activates itself.
-- **In-app**: "I've Paid — Activate Automatically" verifies the checkout email
-  with the ByteMind activation API (`src/activation.py`) and applies the
-  returned license key.
+1. 7-day free trial from first launch (every feature, no credit card).
+2. After the trial: limited free mode — Local AI only, 3 proofreads/day.
+3. One-time **$35 license**, works on up to 2 computers.
+4. Customer buys on Polar's checkout page; Polar emails them a license key and
+   keeps it in their customer portal.
+5. Customer opens Settings → License → "Already Paid? Activate with License
+   Key" and pastes the key. The app activates with this computer's
+   fingerprint; Polar enforces the 2-device limit server-side.
+6. To switch machines, the customer uses "Deactivate This Computer" to free a
+   slot, then pastes the key on the new machine.
 
-The app enforces a 7-day free trial from first launch. When it expires,
-proofreading is blocked and the user is prompted to purchase or activate.
+### Legacy fallback (before Polar is configured)
 
-License keys are generated with `tools/generate_license.py` using ByteMind's
-private key (kept out of version control — see `.gitignore`).
+Until `POLAR_ORGANIZATION_ID` is set in `src/settings.py`, the app keeps the
+older Stripe-era behavior so existing buyers are not stranded:
+
+- Entering the email used at checkout activates through the ByteMind server
+  (`byteproof-api.onrender.com`).
+- Support-issued signed keys (`tools/generate_license.py`) still work.
+
+As soon as Polar is configured, the app switches to the license-key flow and
+the old server is no longer used.
+
+### One-time Polar setup (app owner)
+
+1. Create an organization at [polar.sh](https://polar.sh).
+2. **Benefits → New Benefit → License Keys**: brand prefix `BYTEPROOF_`, set
+   **activation limit = 2**.
+3. **Products → New Product**: "ByteProof License", one-time $35 NZD, attach
+   the license-key benefit.
+4. **Checkout Links → New Link**: select the product; set the Success URL to
+   `https://www.bytemind.co.nz/byteproof` (optional).
+5. Copy your organization ID (Polar → Settings) into `POLAR_ORGANIZATION_ID`
+   in `src/settings.py`, and paste the checkout link into
+   `POLAR_CHECKOUT_URL`.
+6. Rebuild and release. Update the website buy button and FAQ to the Polar
+   flow (`ByteMind_Website/byteproof.html`).
+
+Developer-only emails that unlock full access without a key are listed in
+`DEVELOPER_EMAILS` in `src/settings.py`.
 
 ## Distribution
 

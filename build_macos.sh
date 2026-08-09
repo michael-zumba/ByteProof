@@ -13,21 +13,28 @@ fi
 APP_NAME="ByteProof"
 DMG_NAME="ByteProof_Installer_AppleSilicon.dmg"
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
+VENV_PYTHON="$THIS_DIR/venv/bin/python"
+VENV_PYINSTALLER="$THIS_DIR/venv/bin/pyinstaller"
 
 echo "=== ByteProof Build (Apple Silicon) ==="
 echo ""
 
 # --- Prerequisite checks ---
 
-if ! command -v python3 &> /dev/null; then
-    echo "Error: python3 not found. Please install Python 3.11+."
-    exit 1
+if [ -f "$VENV_PYTHON" ]; then
+    echo "Using project virtual environment (lightweight build): $VENV_PYTHON"
+    PYTHON_VERSION=$("$VENV_PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+else
+    if ! command -v python3 &> /dev/null; then
+        echo "Error: python3 not found. Please install Python 3.11+."
+        exit 1
+    fi
+    echo "Warning: no venv found. Building with system python3 may produce a large app."
+    PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 fi
-
-PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 echo "Python version: $PYTHON_VERSION"
 
-if ! command -v pyinstaller &> /dev/null; then
+if [ ! -f "$VENV_PYINSTALLER" ] && ! command -v pyinstaller &> /dev/null; then
     echo ""
     echo "PyInstaller not found. Installing dependencies from requirements.txt..."
     pip3 install -r "$THIS_DIR/requirements.txt"
@@ -48,7 +55,11 @@ rm -f "$THIS_DIR/$DMG_NAME"
 
 echo "Building .app with PyInstaller..."
 cd "$THIS_DIR"
-pyinstaller "ByteProof.spec" --noconfirm
+if [ -f "$VENV_PYINSTALLER" ]; then
+    "$VENV_PYINSTALLER" "ByteProof.spec" --noconfirm
+else
+    pyinstaller "ByteProof.spec" --noconfirm
+fi
 
 # Verify .app was created
 if [ ! -d "dist/$APP_NAME.app" ]; then

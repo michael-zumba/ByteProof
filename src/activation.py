@@ -1,21 +1,17 @@
-# pyright: reportAttributeAccessIssue=false
-"""Automatic license activation after Stripe payment.
+"""License activation: Polar-first (the VoiceInk approach) with a legacy
+email/server fallback until the Polar account is configured.
 
-Supported paths:
+Once Polar is set up (POLAR_ORGANIZATION_ID), customers buy on Polar's
+checkout page, Polar emails them a license key, and the app activates that key
+with this computer's fingerprint. Polar enforces the 2-device limit on its own
+durable servers - no custom activation server whose data could be lost on
+redeploy.
 
-1. Stripe session deep link: byteproof://activate?session=cs_...  (set as the
-   Stripe payment link success URL; the app verifies the checkout session with
-   the ByteMind server, which issues a machine-bound permanent key).
+Until Polar is configured, the old email-based activation server remains as a
+fallback so existing Stripe buyers can still activate with the email they used
+at checkout.
 
-2. Email deep link: byteproof://activate?email=... or the "I've Paid" button
-   in the app. ByteProof asks the ByteMind activation API to verify the
-   payment for that email and return a signed license key.
-
-3. Manual key: byteproof://activate?key=... (support-issued machine-bound key,
-   validated locally and activated).
-
-The server enforces a maximum of two activated computers per license.
-Deactivation (Settings -> License -> Deactivate This Computer) frees a slot.
+Known developer emails can always unlock full access locally, without a key.
 """
 
 import json
@@ -28,17 +24,27 @@ import urllib.request
 
 import certifi
 
+from . import polar
 from .licensing import (
     _get_machine_fingerprint,
+    activate_dev_license,
     activate_license,
+    activate_polar_license,
+    delete_license_data,
+    get_license_info,
     validate_license_key,
 )
-from .settings import APP_NAME
+from .settings import APP_NAME, DEVELOPER_EMAILS, POLAR_ORGANIZATION_ID
+
+URL_SCHEME = "byteproof"
 
 ACTIVATION_API_URL = "https://byteproof-api.onrender.com/api/byteproof/activate"
 ACTIVATION_DEACTIVATE_URL = "https://byteproof-api.onrender.com/api/byteproof/deactivate"
 ACTIVATION_VALIDATE_URL = "https://byteproof-api.onrender.com/api/byteproof/validate"
-URL_SCHEME = "byteproof"
+
+
+def _looks_like_email(value: str) -> bool:
+    return value.count("@") == 1 and "." in value.split("@")[1]
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -75,8 +81,8 @@ def _post_json(url: str, payload: dict) -> dict:
         return {"ok": False, "error": _api_error(exc)}
 
 
-def activate_with_email(email: str) -> dict:
-    """Ask the ByteMind server to verify payment and return a license key."""
+def _server_activate_with_email(email: str) -> dict:
+    """Legacy fallback: verify payment on the ByteMind server (Stripe era)."""
     data = _post_json(
         ACTIVATION_API_URL,
         {
@@ -85,7 +91,6 @@ def activate_with_email(email: str) -> dict:
             "app": APP_NAME,
         },
     )
-
     key = data.get("license_key") or data.get("key")
     if not key:
         return {
@@ -99,39 +104,8 @@ def activate_with_email(email: str) -> dict:
     return {"ok": True, "email": result["email"]}
 
 
-def activate_with_session(session_id: str) -> dict:
-    """Verify a Stripe checkout session and activate this computer."""
-    data = _post_json(
-        ACTIVATION_API_URL,
-        {
-            "session_id": session_id.strip(),
-            "machine_fingerprint": _get_machine_fingerprint(),
-            "app": APP_NAME,
-        },
-    )
-
-    key = data.get("license_key") or data.get("key")
-    if not key:
-        return {
-            "ok": False,
-            "error": data.get("error") or "The server did not return a license key.",
-        }
-    result = validate_license_key(key)
-    if not result["valid"]:
-        return {"ok": False, "error": result.get("error") or "Invalid license key."}
-    activate_license(key)
-    return {"ok": True, "email": result["email"]}
-
-
-def deactivate_license() -> dict:
-    """Ask the server to free this computer's slot, then remove the local key."""
-    from .licensing import get_license_info
-
-    info = get_license_info()
-    email = info.get("email", "")
-    if not email:
-        return {"ok": False, "error": "No active license found on this computer."}
-
+def _server_deactivate(email: str) -> dict:
+    """Legacy fallback: free this machine's slot on the ByteMind server."""
     data = _post_json(
         ACTIVATION_DEACTIVATE_URL,
         {
@@ -145,49 +119,148 @@ def deactivate_license() -> dict:
             "ok": False,
             "error": data.get("error") or "The server could not deactivate this license.",
         }
-
-    from .licensing import delete_license_data
-
-    delete_license_data()
     return {"ok": True, "email": email}
 
 
-def validate_license_remote() -> dict:
-    """Best-effort server-side validation of the current license."""
-    from .licensing import get_license_info
+def activate_with_key(value: str) -> dict:
+    """Activate with a Polar license key (or legacy email while Polar is off)."""
+    value = value.strip()
+    if not value:
+        return {"ok": False, "error": "Please enter your license key."}
 
+    if _looks_like_email(value):
+        email = value.lower()
+        if email in {e.lower() for e in DEVELOPER_EMAILS}:
+            result = activate_dev_license(email)
+            if not result.get("valid"):
+                return {
+                    "ok": False,
+                    "error": result.get("error") or "Activation failed.",
+                }
+            return {"ok": True, "email": email}
+        if POLAR_ORGANIZATION_ID:
+            return {
+                "ok": False,
+                "error": (
+                    "Your license key was sent to your inbox after purchase - "
+                    "open Settings → License and paste the key instead of "
+                    "your email."
+                ),
+            }
+        # Legacy Stripe-era flow: verify the email on the ByteMind server.
+        return _server_activate_with_email(email)
+
+    if POLAR_ORGANIZATION_ID:
+        try:
+            activation = polar.activate_key(
+                value,
+                label=platform.node() or "ByteProof",
+            )
+        except polar.PolarError as exc:
+            return {"ok": False, "error": str(exc)}
+        result = activate_polar_license(activation)
+        if not result.get("valid"):
+            return {
+                "ok": False,
+                "error": result.get("error") or "Activation failed.",
+            }
+        return {
+            "ok": True,
+            "email": "",
+            "key_display": result.get("key_display", ""),
+        }
+
+    # Polar not configured: accept support-issued signed keys as before.
+    result = validate_license_key(value)
+    if not result["valid"]:
+        return {"ok": False, "error": result.get("error") or "Invalid license key."}
+    activate_license(value)
+    return {"ok": True, "email": result["email"]}
+
+
+def activate_with_email(email: str) -> dict:
+    """Compatibility entry point; handles developer and legacy emails."""
+    return activate_with_key(email)
+
+
+def activate_with_session(session_id: str) -> dict:
+    return {
+        "ok": False,
+        "error": (
+            "This activation method is no longer used. Your license key was "
+            "sent to your email after purchase - open Settings → License and "
+            "paste the key to activate this computer."
+        ),
+    }
+
+
+def deactivate_license() -> dict:
+    """Free this computer's slot, then remove the local license."""
     info = get_license_info()
-    email = info.get("email", "")
-    if not email:
+    if info.get("status") != "licensed":
         return {"ok": False, "error": "No active license found on this computer."}
-    return _post_json(
-        ACTIVATION_VALIDATE_URL,
-        {
-            "email": email,
-            "machine_fingerprint": _get_machine_fingerprint(),
-            "app": APP_NAME,
-        },
-    )
+
+    if info.get("provider") == "polar":
+        try:
+            polar.deactivate_key(
+                info.get("raw_key", ""),
+                info.get("activation_id", ""),
+            )
+        except polar.PolarError as exc:
+            if "404" not in str(exc):
+                return {"ok": False, "error": str(exc)}
+    elif info.get("provider") == "legacy" and info.get("email"):
+        result = _server_deactivate(info["email"])
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error") or "Deactivation failed."}
+
+    delete_license_data()
+    return {"ok": True, "email": info.get("email", "")}
+
+
+def validate_license_remote() -> dict:
+    """Best-effort online validation of the current license."""
+    info = get_license_info()
+    if info.get("status") != "licensed":
+        return {"ok": False, "error": "No active license found on this computer."}
+
+    if info.get("provider") == "polar":
+        try:
+            result = polar.validate_key(
+                info.get("raw_key", ""),
+                info.get("activation_id", ""),
+            )
+        except polar.PolarError as exc:
+            return {"ok": False, "error": str(exc)}
+        status = result.get("status") or "granted"
+        if status in ("revoked", "disabled", "expired"):
+            return {"ok": False, "error": f"This license key is {status}."}
+        return {"ok": True, "status": status}
+
+    if info.get("provider") == "legacy" and info.get("email"):
+        return _post_json(
+            ACTIVATION_VALIDATE_URL,
+            {
+                "email": info["email"],
+                "machine_fingerprint": _get_machine_fingerprint(),
+                "app": APP_NAME,
+            },
+        )
+
+    # Developer licenses are local; nothing to validate online.
+    return {"ok": True, "provider": info.get("provider")}
 
 
 def activate_from_url(url: str) -> dict:
-    """Handle byteproof://activate?session=... or ?key=... or ?email=..."""
+    """Handle byteproof://activate?key=... (or ?email=... for legacy/dev)."""
     parsed = urllib.parse.urlparse(url.strip())
     if parsed.scheme.lower() != URL_SCHEME:
         return {"ok": False, "error": "This is not a ByteProof activation link."}
     params = urllib.parse.parse_qs(parsed.query)
 
-    session_id = (params.get("session") or [""])[0].strip()
-    if session_id:
-        return activate_with_session(session_id)
-
     key = (params.get("key") or [""])[0].strip()
     if key:
-        result = validate_license_key(key)
-        if not result["valid"]:
-            return {"ok": False, "error": result.get("error") or "Invalid license key."}
-        activate_license(key)
-        return {"ok": True, "email": result["email"]}
+        return activate_with_key(key)
 
     email = (params.get("email") or [""])[0].strip()
     if email:
@@ -195,7 +268,7 @@ def activate_from_url(url: str) -> dict:
 
     return {
         "ok": False,
-        "error": "The activation link is missing a key or an email address.",
+        "error": "The activation link is missing a license key.",
     }
 
 
@@ -204,8 +277,10 @@ def register_url_scheme() -> None:
     if platform.system() != "Windows":
         return
     try:
+        import sys
         import winreg
-        exe = os.path.abspath(__import__("sys").executable)
+
+        exe = os.path.abspath(sys.executable)
         key = winreg.CreateKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Classes\byteproof\shell\open\command",

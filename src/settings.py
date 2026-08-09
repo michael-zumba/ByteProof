@@ -11,13 +11,30 @@ from config.deepseek_config import (
 )
 
 APP_NAME = "ByteProof"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
 SUPPORT_EMAIL = "bytemind.nz@gmail.com"
 
 STRIPE_PAYMENT_URL = "https://buy.stripe.com/3cIcN50KZfX1bP3dN73Nm05"
+
+# Polar licensing (the VoiceInk approach). Fill POLAR_ORGANIZATION_ID from
+# Polar -> Settings -> Organization -> ID, then replace STRIPE_PAYMENT_URL with
+# your Polar checkout link (Polar -> Products -> Checkout Links -> New Link).
+POLAR_API_URL = "https://api.polar.sh"
+POLAR_ORGANIZATION_ID = os.environ.get(
+    "BYTEPROOF_POLAR_ORGANIZATION_ID", ""
+).strip()  # TODO: set from Polar dashboard
+POLAR_CHECKOUT_URL = os.environ.get(
+    "BYTEPROOF_POLAR_CHECKOUT_URL", ""
+).strip()  # TODO: set from Polar dashboard, e.g. https://polar.sh/...
+
+# Developer-only email addresses that unlock full access without a Polar key.
+# These are for the app owner / beta testers; customers always use Polar keys.
+DEVELOPER_EMAILS: tuple[str, ...] = (
+    "bytemind.nz@gmail.com",
+)
 
 LOCAL_MODEL_PROVIDER = "ByteProof Local (Qwen3)"
 
