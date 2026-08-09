@@ -17,6 +17,17 @@ from typing import Any, Callable
 MAX_MACHINES_PER_LICENSE = 2
 
 
+def parse_dev_emails(raw: str | None) -> set[str]:
+    """Parse the BYTEPROOF_DEV_EMAILS value (comma/space separated)."""
+    if not raw:
+        return set()
+    return {
+        part.strip().lower()
+        for part in raw.replace(",", " ").split()
+        if part.strip()
+    }
+
+
 def load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -57,6 +68,7 @@ def register_machine(
     email: str,
     machine_fp: str,
     issue_key: Callable[[str, str], str],
+    device_limit: int | None = MAX_MACHINES_PER_LICENSE,
 ) -> tuple[bool, str | None, str | None]:
     """Register a machine and return (ok, key, error).
 
@@ -70,11 +82,11 @@ def register_machine(
     if machine_fp in machines:
         return True, machines[machine_fp]["key"], None
 
-    if len(machines) >= MAX_MACHINES_PER_LICENSE:
+    if device_limit is not None and len(machines) >= device_limit:
         return (
             False,
             None,
-            "This license has reached its device limit (2 computers). "
+            f"This license has reached its device limit ({device_limit} computers). "
             "Deactivate another computer to free a slot.",
         )
 
@@ -109,11 +121,12 @@ def validate_machine(
     licenses: dict[str, Any],
     email: str,
     machine_fp: str,
+    device_limit: int | None = MAX_MACHINES_PER_LICENSE,
 ) -> dict[str, Any]:
     machines = get_machines(licenses, email)
     return {
         "valid": machine_fp in machines,
         "machine_registered": machine_fp in machines,
         "device_count": len(machines),
-        "device_limit": MAX_MACHINES_PER_LICENSE,
+        "device_limit": device_limit,
     }

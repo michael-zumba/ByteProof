@@ -124,6 +124,11 @@ one-click link. Add SMTP secrets in Render (`BYTEPROOF_SMTP_HOST`,
 `server/README.md`. If they are missing, payments still activate in-app; the
 email is skipped.
 
+**Developer access:** set `BYTEPROOF_DEV_EMAILS` in Render to a
+comma-separated list of your own email addresses. Those addresses can
+activate on any number of computers with full access and no payment or
+device-limit checks.
+
 **Device limit:** each license allows **2 computers**. The server registry
 (`licenses.json`) is the source of truth; a third computer is rejected until
 one is deactivated. The app's Settings → License → "Deactivate This Computer"

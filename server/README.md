@@ -90,6 +90,14 @@ one-click link. Configure SMTP in Render:
 If SMTP is not configured, the webhook still records the payment and
 in-app activation still works; the email is simply skipped and logged.
 
+## Developer access
+
+Set `BYTEPROOF_DEV_EMAILS` to a comma-separated list of your own email
+addresses (e.g. `you@bytemind.co.nz,backup@bytemind.co.nz`). Those addresses
+can activate ByteProof on any number of computers without a Stripe payment
+and without the 2-device limit. Everything else (signed keys, machine
+binding) still applies.
+
 Keep `DATA_DIR` private and back it up. Rebuilding it from scratch would
 require buyers to activate again (keys are regenerable, but old keys would
 stop validating if the private key changes).

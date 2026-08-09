@@ -40,6 +40,7 @@ from .activation_core import (
     deactivate_machine,
     is_paid,
     load_json,
+    parse_dev_emails,
     record_payment,
     register_machine,
     validate_machine,
@@ -54,6 +55,10 @@ LICENSES_FILE = DATA_DIR / "licenses.json"
 
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+
+
+def _dev_emails() -> set[str]:
+    return parse_dev_emails(os.environ.get("BYTEPROOF_DEV_EMAILS", ""))
 
 app = FastAPI(title="ByteProof Activation API")
 
@@ -138,7 +143,7 @@ def activate(req: ActivateRequest) -> dict[str, str]:
         record_payment(PAYMENTS_FILE, email)
     elif req.email.strip():
         email = req.email.strip().lower()
-        if not is_paid(load_json(PAYMENTS_FILE), email):
+        if email not in _dev_emails() and not is_paid(load_json(PAYMENTS_FILE), email):
             raise HTTPException(
                 status_code=404,
                 detail="No paid license found for this email. If you just purchased, "
@@ -147,12 +152,14 @@ def activate(req: ActivateRequest) -> dict[str, str]:
     else:
         raise HTTPException(status_code=400, detail="Email or session_id is required.")
 
+    is_developer = email in _dev_emails()
     try:
         ok, key, error = register_machine(
             LICENSES_FILE,
             email,
             machine_fp,
             lambda e, fp: generate_license_key(e, "unlimited", fp),
+            device_limit=None if is_developer else 2,
         )
     except Exception as exc:
         import traceback
@@ -199,8 +206,11 @@ class ValidateRequest(BaseModel):
 
 @app.post("/api/byteproof/validate")
 def validate(req: ValidateRequest) -> dict[str, Any]:
+    email = req.email.strip().lower()
+    is_developer = email in _dev_emails()
     return validate_machine(
         load_json(LICENSES_FILE),
-        req.email,
+        email,
         req.machine_fingerprint or "",
+        device_limit=None if is_developer else 2,
     )

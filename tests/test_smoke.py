@@ -339,6 +339,41 @@ def test_emailer_graceful_and_link_build() -> None:
                 os.environ[key] = value
 
 
+def test_parse_dev_emails() -> None:
+    sys.path.insert(0, os.path.join(PROJECT_ROOT, "server"))
+    from activation_core import parse_dev_emails
+
+    assert parse_dev_emails(" a@b.c, d@e.f g@h.i ") == {
+        "a@b.c",
+        "d@e.f",
+        "g@h.i",
+    }
+    assert parse_dev_emails("") == set()
+    assert parse_dev_emails(None) == set()
+
+
+def test_register_machine_developer_unlimited() -> None:
+    from pathlib import Path
+
+    sys.path.insert(0, os.path.join(PROJECT_ROOT, "server"))
+    from activation_core import register_machine
+
+    licenses_path = Path(tempfile.mkdtemp()) / "licenses.json"
+
+    def issue(email: str, machine_fp: str) -> str:
+        return f"key-{email}-{machine_fp}"
+
+    for fp in ("fp-1", "fp-2", "fp-3", "fp-4"):
+        ok, key, err = register_machine(
+            licenses_path,
+            "dev@bytemind.co.nz",
+            fp,
+            issue,
+            device_limit=None,
+        )
+        assert ok and key == f"key-dev@bytemind.co.nz-{fp}" and err is None
+
+
 def test_cache_cleanup_logs_and_stale_partials() -> None:
     import src.cache_cleanup as cc
 
@@ -1770,6 +1805,10 @@ def main() -> None:
     print("PASS server two-machine limit")
     test_emailer_graceful_and_link_build()
     print("PASS activation email builder + graceful skip")
+    test_parse_dev_emails()
+    print("PASS developer email parsing")
+    test_register_machine_developer_unlimited()
+    print("PASS developer unlimited devices")
     test_cache_cleanup_logs_and_stale_partials()
     print("PASS cache cleanup logs + partials")
     test_cache_cleanup_keeps_only_two_models()
