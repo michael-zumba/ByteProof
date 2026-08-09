@@ -58,7 +58,7 @@ app = FastAPI(title="ByteProof Activation API")
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "license_signer_configured": is_configured(),
