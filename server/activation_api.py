@@ -44,6 +44,7 @@ from .activation_core import (
     register_machine,
     validate_machine,
 )
+from .emailer import send_activation_email
 from .license_signer import generate_license_key, is_configured
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -89,6 +90,8 @@ async def stripe_webhook(
         details = session.get("customer_details") or {}
         email = details.get("email") or session.get("customer_email")
         record_payment(PAYMENTS_FILE, email or "")
+        if email:
+            send_activation_email(email, session.get("id", ""))
 
     return {"received": True}
 

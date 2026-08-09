@@ -308,6 +308,37 @@ def test_server_activation_core_two_machine_limit() -> None:
     assert state["device_limit"] == 2
 
 
+def test_emailer_graceful_and_link_build() -> None:
+    server_dir = os.path.join(PROJECT_ROOT, "server")
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+    import emailer
+
+    keys = (
+        "BYTEPROOF_SMTP_HOST",
+        "BYTEPROOF_SMTP_PORT",
+        "BYTEPROOF_SMTP_USER",
+        "BYTEPROOF_SMTP_PASSWORD",
+        "BYTEPROOF_SMTP_FROM",
+    )
+    saved = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ.pop(key, None)
+    try:
+        assert emailer.send_activation_email("buyer@example.com", "cs_test_1") is False
+        os.environ["BYTEPROOF_SMTP_USER"] = "sender@bytemind.co.nz"
+        msg = emailer._build_message("buyer@example.com", "cs_test_1")
+        body = msg.get_body(preferencelist=("plain",)).get_content()
+        assert "byteproof://activate?session=cs_test_1" in body
+        assert msg["To"] == "buyer@example.com"
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_cache_cleanup_logs_and_stale_partials() -> None:
     import src.cache_cleanup as cc
 
@@ -1737,6 +1768,8 @@ def main() -> None:
     print("PASS secure store fallback restores license")
     test_server_activation_core_two_machine_limit()
     print("PASS server two-machine limit")
+    test_emailer_graceful_and_link_build()
+    print("PASS activation email builder + graceful skip")
     test_cache_cleanup_logs_and_stale_partials()
     print("PASS cache cleanup logs + partials")
     test_cache_cleanup_keeps_only_two_models()

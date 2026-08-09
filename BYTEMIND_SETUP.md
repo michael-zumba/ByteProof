@@ -117,6 +117,13 @@ the app at the Render service URL (currently
 Until that endpoint is live, path 1 (emailed key link) works fully and path 2
 shows a clear "server not reachable" message.
 
+**Activation email:** the webhook also sends a backup activation email with a
+one-click link. Add SMTP secrets in Render (`BYTEPROOF_SMTP_HOST`,
+`BYTEPROOF_SMTP_USER`, `BYTEPROOF_SMTP_PASSWORD`, optionally
+`BYTEPROOF_SMTP_PORT`, `BYTEPROOF_SMTP_FROM`, `BYTEPROOF_SMTP_TLS`) — see
+`server/README.md`. If they are missing, payments still activate in-app; the
+email is skipped.
+
 **Device limit:** each license allows **2 computers**. The server registry
 (`licenses.json`) is the source of truth; a third computer is rejected until
 one is deactivated. The app's Settings → License → "Deactivate This Computer"

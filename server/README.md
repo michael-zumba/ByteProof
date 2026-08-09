@@ -75,6 +75,21 @@ persistent disk) or move the registry to a managed Postgres database.
   Windows Credential Manager, re-verifies the signature every time it loads,
   and offers "Deactivate This Computer" to free a slot.
 
+## Activation email
+
+When checkout completes, the webhook sends a backup activation email with a
+one-click link. Configure SMTP in Render:
+
+- `BYTEPROOF_SMTP_HOST` — e.g. `smtp.gmail.com`
+- `BYTEPROOF_SMTP_PORT` — default `587`
+- `BYTEPROOF_SMTP_USER` — the sending account
+- `BYTEPROOF_SMTP_PASSWORD` — an app password, never the account password
+- `BYTEPROOF_SMTP_FROM` — the From address (defaults to SMTP_USER)
+- `BYTEPROOF_SMTP_TLS` — `true` (default) or `false`
+
+If SMTP is not configured, the webhook still records the payment and
+in-app activation still works; the email is simply skipped and logged.
+
 Keep `DATA_DIR` private and back it up. Rebuilding it from scratch would
 require buyers to activate again (keys are regenerable, but old keys would
 stop validating if the private key changes).
