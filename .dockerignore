@@ -1,0 +1,16 @@
+.git
+.venv
+.venv_x86
+venv
+build
+build_intel
+dist
+dist_intel
+downloads
+tests
+tools
+__pycache__
+*.pyc
+*.dmg
+*.zip
+.DS_Store

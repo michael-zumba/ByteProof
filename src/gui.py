@@ -60,7 +60,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .activation import activate_from_url, activate_with_email, register_url_scheme
+from .activation import (
+    activate_from_url,
+    activate_with_email,
+    deactivate_license,
+    register_url_scheme,
+    validate_license_remote,
+)
 from .app_version import check_for_updates, download_update
 from .autostart import set_launch_at_login
 from .generic_editing import get_generic_editor, normalize_selection_text
@@ -674,6 +680,8 @@ class ActivationWorker(QThread):
                 result = activate_from_url(self.value)
             elif self.kind == "email":
                 result = activate_with_email(self.value)
+            elif self.kind == "deactivate":
+                result = deactivate_license()
             else:
                 result = {"ok": False, "error": "Unknown activation type."}
             if result.get("ok"):
@@ -682,6 +690,17 @@ class ActivationWorker(QThread):
                 self.done.emit(False, result.get("error") or "Activation failed.")
         except Exception as e:
             self.done.emit(False, str(e))
+
+
+class LicenseValidationWorker(QThread):
+    done = pyqtSignal(dict)  # pyright: ignore[reportAny]
+
+    def run(self) -> None:
+        try:
+            result = validate_license_remote()
+        except Exception as e:
+            result = {"ok": False, "error": str(e)}
+        self.done.emit(result)
 
 
 class SettingsDialog(QDialog):
@@ -1776,7 +1795,7 @@ class SettingsDialog(QDialog):
         vbox.addWidget(self.lbl_msg)
         layout.addWidget(self.status_frame)
         
-        self.btn_buy = QPushButton("Purchase License ($20)")
+        self.btn_buy = QPushButton("Purchase License ($1 Test)")
         self.btn_buy.setMinimumHeight(42)
         self.btn_buy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_buy.setStyleSheet("""
@@ -1834,11 +1853,32 @@ class SettingsDialog(QDialog):
         """)
         self.btn_auto_activate.clicked.connect(self._auto_activate_from_email)
         layout.addWidget(self.btn_auto_activate)
+
+        self.btn_deactivate = QPushButton("Deactivate This Computer")
+        self.btn_deactivate.setFlat(True)
+        self.btn_deactivate.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_deactivate.setStyleSheet("""
+            QPushButton {
+                color: #B91C1C;
+                text-align: left;
+                padding-left: 0;
+                border: none;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                text-decoration: underline;
+            }
+        """)
+        self.btn_deactivate.clicked.connect(self.deactivate_license_clicked)
+        layout.addWidget(self.btn_deactivate)
         
         if lic_status == "licensed" and lic_info.get("expiry") is None:
             self.btn_buy.setVisible(False)
             self.btn_activate.setVisible(False)
             self.btn_auto_activate.setVisible(False)
+            self.btn_deactivate.setVisible(True)
+        else:
+            self.btn_deactivate.setVisible(False)
 
         layout.addStretch()
         
@@ -2149,10 +2189,12 @@ class SettingsDialog(QDialog):
                 self.btn_buy.setVisible(False)
                 self.btn_activate.setVisible(False)
                 self.btn_auto_activate.setVisible(False)
+                self.btn_deactivate.setVisible(True)
             else:
                 self.btn_buy.setVisible(True)
                 self.btn_activate.setVisible(False)
                 self.btn_auto_activate.setVisible(False)
+                self.btn_deactivate.setVisible(False)
         elif lic_status == "expired":
             self.lbl_status.setText("License Expired")
             self.lbl_status.setStyleSheet("color: #B91C1C;")
@@ -2161,6 +2203,7 @@ class SettingsDialog(QDialog):
             self.btn_buy.setVisible(True)
             self.btn_activate.setVisible(True)
             self.btn_auto_activate.setVisible(True)
+            self.btn_deactivate.setVisible(False)
         elif trial["in_trial"]:
             self.lbl_status.setText(f"Free Trial ({trial['days_left']} day{'s' if trial['days_left'] != 1 else ''} left)")
             self.lbl_status.setStyleSheet("color: #D97706;")
@@ -2169,6 +2212,7 @@ class SettingsDialog(QDialog):
             self.btn_buy.setVisible(True)
             self.btn_activate.setVisible(True)
             self.btn_auto_activate.setVisible(True)
+            self.btn_deactivate.setVisible(False)
         else:
             self.lbl_status.setText("Trial Expired")
             self.lbl_status.setStyleSheet("color: #B91C1C;")
@@ -2177,6 +2221,44 @@ class SettingsDialog(QDialog):
             self.btn_buy.setVisible(True)
             self.btn_activate.setVisible(True)
             self.btn_auto_activate.setVisible(True)
+            self.btn_deactivate.setVisible(False)
+
+    def deactivate_license_clicked(self) -> None:
+        """Deactivate this computer and free a slot on the license."""
+        confirm = QMessageBox.question(
+            self,
+            "Deactivate License?",
+            "This deactivates ByteProof on this computer and frees a device "
+            "slot on your license.\n\n"
+            "You can reactivate later by clicking the activation link again.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self.btn_deactivate.setEnabled(False)
+        worker = ActivationWorker("deactivate", "")
+        self._deactivation_worker = worker
+        worker.done.connect(self._on_deactivation_done)
+        worker.start()
+
+    def _on_deactivation_done(self, ok: bool, message: str) -> None:
+        self.btn_deactivate.setEnabled(True)
+        if ok:
+            QMessageBox.information(
+                self,
+                "License Deactivated",
+                "ByteProof has been deactivated on this computer. "
+                "A device slot is now free.",
+            )
+            self._refresh_license_tab()
+            parent = _find_owner_window(self)
+            if isinstance(parent, ProofreaderApp):
+                parent._update_proofread_button()
+                parent._show_toast("License deactivated on this computer.", kind="success")
+        else:
+            QMessageBox.warning(self, "Deactivation Failed", message)
 
 
 class ProofreaderApp(QMainWindow):
@@ -2395,6 +2477,7 @@ class ProofreaderApp(QMainWindow):
         QTimer.singleShot(500, self.check_api_keys)
         QTimer.singleShot(600, self._sync_launch_at_login)
         QTimer.singleShot(1200, self._check_trial_status_at_startup)
+        QTimer.singleShot(1800, self._validate_license_at_startup)
         QTimer.singleShot(3000, self._check_for_app_updates)
 
     def _copy_corrected_text(self) -> None:
@@ -2926,6 +3009,24 @@ class ProofreaderApp(QMainWindow):
                 )
             self._show_toast(
                 message,
+                kind="warning",
+            )
+
+    def _validate_license_at_startup(self) -> None:
+        """Best-effort server validation, mirroring VoiceInk's validate flow."""
+        if not is_licensed():
+            return
+        worker = LicenseValidationWorker()
+        self._license_validation_worker = worker
+        worker.done.connect(self._on_license_validation_result)
+        worker.start()
+
+    def _on_license_validation_result(self, result: dict) -> None:
+        if result.get("valid") is False:
+            self._show_toast(
+                "Your license could not be verified online. If you deactivated "
+                "this computer or changed hardware, click your activation email "
+                "link again.",
                 kind="warning",
             )
 

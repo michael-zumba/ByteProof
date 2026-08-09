@@ -96,26 +96,33 @@ later want to change the price, update the button label in `src/gui.py`
 
 ByteProof supports two automatic activation paths:
 
-1. **Deep-link key** (works today): after payment, send the customer an email
-   containing a license key link: `byteproof://activate?key=<license_key>`.
-   Clicking it opens ByteProof and activates the license immediately. The app
-   registers the `byteproof://` URL scheme on macOS (bundle) and Windows
-   (registry at first launch).
-2. **Email lookup** (needs the ByteMind server): the app's
+1. **Stripe session deep link** (recommended): set the Stripe Payment Link's
+   success URL to `byteproof://activate?session={CHECKOUT_SESSION_ID}`. After
+   checkout, ByteProof opens, verifies the paid session with the ByteMind
+   server, and activates this computer automatically.
+2. **Email/auto lookup** (needs the ByteMind server): the app's
    "I've Paid — Activate Automatically" button (also in the trial-expired
    dialog) asks for the checkout email, then POSTs it with the machine
    fingerprint to `ACTIVATION_API_URL` in `src/activation.py`:
-   `https://www.bytemind.co.nz/api/byteproof/activate`. The server must verify
-   the Stripe payment and return `{"license_key": "..."}`.
+   `https://api.bytemind.co.nz/api/byteproof/activate`. The server must verify
+   the Stripe payment and return `{"license_key": "..."}`. Send buyers a
+   fallback link `byteproof://activate?email=<email>` in the fulfilment email.
 
-**To complete path 2**, deploy a small endpoint that listens for the Stripe
-checkout/webhook, generates a license key with
-`tools/generate_license.py`, and returns it for the buyer's email. Until that
-endpoint is live, path 1 (emailed key link) works fully and path 2 shows a
-clear "server not reachable" message.
+**To complete path 2**, deploy the ready-made service in `server/`
+(FastAPI + Stripe webhook + license generation). Use the included
+`render.yaml` blueprint on Render, set the three secrets (`STRIPE_SECRET_KEY`,
+`STRIPE_WEBHOOK_SECRET`, `BYTEPROOF_LICENSE_PRIVATE_KEY`), and point
+`api.bytemind.co.nz` at the service. Follow `server/README.md`.
+Until that endpoint is live, path 1 (emailed key link) works fully and path 2
+shows a clear "server not reachable" message.
 
-Optionally set the Stripe Payment Link's success URL to `byteproof://activate`
-so returning to the app after checkout opens the activation flow directly.
+**Device limit:** each license allows **2 computers**. The server registry
+(`licenses.json`) is the source of truth; a third computer is rejected until
+one is deactivated. The app's Settings → License → "Deactivate This Computer"
+calls `POST /api/byteproof/deactivate`, frees the slot, and removes the local
+key. The license payload is also stored in the macOS Keychain / Windows
+Credential Manager and re-verified (signature + machine fingerprint) on every
+app launch, so editing `license.json` cannot bypass licensing.
 
 ### 2. Update feed
 

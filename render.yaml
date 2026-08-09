@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: byteproof-api
+    runtime: docker
+    repo: https://github.com/michael-zumba/ByteProof
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: BYTEPROOF_LICENSE_PRIVATE_KEY
+        sync: false
+      - key: BYTEPROOF_DATA_DIR
+        value: /data
+    disk:
+      name: byteproof-data
+      mountPath: /data
+      sizeGB: 1

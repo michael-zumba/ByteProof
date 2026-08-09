@@ -6,6 +6,7 @@ Run from the project root:
 
 import hashlib
 import importlib.util
+import json
 import os
 import platform
 import sys
@@ -73,6 +74,12 @@ def test_licensing_roundtrip() -> None:
 
     tmpdir = tempfile.mkdtemp()
     licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
+    original_secure_set = licensing._secure_store_set
+    original_secure_get = licensing._secure_store_get
+    original_secure_delete = licensing._secure_store_delete
+    licensing._secure_store_set = lambda _value: None
+    licensing._secure_store_get = lambda: None
+    licensing._secure_store_delete = lambda: None
 
     spec = importlib.util.spec_from_file_location(
         "generate_license", os.path.join(PROJECT_ROOT, "tools", "generate_license.py")
@@ -81,11 +88,16 @@ def test_licensing_roundtrip() -> None:
     generator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generator)
 
-    key = generator.generate_license_key("buyer@example.com", "unlimited", "")
-    result = licensing.activate_license(key)
-    assert result["valid"], result
-    assert licensing.is_licensed()
-    assert licensing.get_license_info()["status"] == "licensed"
+    try:
+        key = generator.generate_license_key("buyer@example.com", "unlimited", "")
+        result = licensing.activate_license(key)
+        assert result["valid"], result
+        assert licensing.is_licensed()
+        assert licensing.get_license_info()["status"] == "licensed"
+    finally:
+        licensing._secure_store_set = original_secure_set
+        licensing._secure_store_get = original_secure_get
+        licensing._secure_store_delete = original_secure_delete
 
 
 def test_activation_from_url() -> None:
@@ -93,6 +105,12 @@ def test_activation_from_url() -> None:
 
     tmpdir = tempfile.mkdtemp()
     licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
+    original_secure_set = licensing._secure_store_set
+    original_secure_get = licensing._secure_store_get
+    original_secure_delete = licensing._secure_store_delete
+    licensing._secure_store_set = lambda _value: None
+    licensing._secure_store_get = lambda: None
+    licensing._secure_store_delete = lambda: None
 
     spec = importlib.util.spec_from_file_location(
         "generate_license", os.path.join(PROJECT_ROOT, "tools", "generate_license.py")
@@ -100,24 +118,28 @@ def test_activation_from_url() -> None:
     assert spec is not None and spec.loader is not None
     generator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generator)
-    key = generator.generate_license_key("paid@example.com", "unlimited", "")
-
-    result = activation.activate_from_url(f"byteproof://activate?key={key}")
-    assert result["ok"], result
-    assert result["email"] == "paid@example.com"
-    assert licensing.is_licensed()
-
-    bad = activation.activate_from_url("https://example.com/not-byteproof")
-    assert not bad["ok"]
-
-    original_url = activation.ACTIVATION_API_URL
-    activation.ACTIVATION_API_URL = "http://127.0.0.1:9/api"
     try:
+        key = generator.generate_license_key("paid@example.com", "unlimited", "")
+
+        result = activation.activate_from_url(f"byteproof://activate?key={key}")
+        assert result["ok"], result
+        assert result["email"] == "paid@example.com"
+        assert licensing.is_licensed()
+
+        bad = activation.activate_from_url("https://example.com/not-byteproof")
+        assert not bad["ok"]
+
+        original_url = activation.ACTIVATION_API_URL
+        activation.ACTIVATION_API_URL = "http://127.0.0.1:9/api"
         unreachable = activation.activate_with_email("someone@example.com")
+        activation.ACTIVATION_API_URL = original_url
+        assert not unreachable["ok"]
+        assert unreachable["error"]
     finally:
         activation.ACTIVATION_API_URL = original_url
-    assert not unreachable["ok"]
-    assert unreachable["error"]
+        licensing._secure_store_set = original_secure_set
+        licensing._secure_store_get = original_secure_get
+        licensing._secure_store_delete = original_secure_delete
 
 
 def test_strict_editing_rules_contract() -> None:
@@ -128,6 +150,161 @@ def test_strict_editing_rules_contract() -> None:
     assert "never refuse to edit" in prompt.lower()
     # Appending twice must not duplicate the contract.
     assert with_strict_editing_rules(prompt).count("OUTPUT CONTRACT") == 1
+
+
+def test_tampered_license_rejected() -> None:
+    from src import licensing
+
+    tmpdir = tempfile.mkdtemp()
+    original_license = licensing._get_license_path
+    original_secure_set = licensing._secure_store_set
+    original_secure_get = licensing._secure_store_get
+    original_secure_delete = licensing._secure_store_delete
+    try:
+        licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
+        licensing._secure_store_set = lambda _value: None
+        licensing._secure_store_get = lambda: None
+        licensing._secure_store_delete = lambda: None
+
+        # A forged license file with a fake key and the correct machine
+        # fingerprint must NOT be accepted.
+        licensing._save_license_data(
+            {
+                "email": "buyer@example.com",
+                "expiry": None,
+                "key": "not-a-real-key",
+                "activated_at": time.time(),
+                "machine_fp": licensing._get_machine_fingerprint(),
+            }
+        )
+        assert not licensing.is_licensed()
+        assert licensing.get_license_info()["status"] == "unlicensed"
+    finally:
+        licensing._get_license_path = original_license
+        licensing._secure_store_set = original_secure_set
+        licensing._secure_store_get = original_secure_get
+        licensing._secure_store_delete = original_secure_delete
+
+
+def test_secure_store_fallback_restores_license() -> None:
+    from src import licensing
+
+    tmpdir = tempfile.mkdtemp()
+    original_license = licensing._get_license_path
+    original_secure_set = licensing._secure_store_set
+    original_secure_get = licensing._secure_store_get
+    original_secure_delete = licensing._secure_store_delete
+    try:
+        licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
+        licensing._secure_store_set = lambda _value: None
+        licensing._secure_store_delete = lambda: None
+
+        spec = importlib.util.spec_from_file_location(
+            "generate_license", os.path.join(PROJECT_ROOT, "tools", "generate_license.py")
+        )
+        assert spec is not None and spec.loader is not None
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        machine_fp = licensing._get_machine_fingerprint()
+        key = generator.generate_license_key("keychain@example.com", "unlimited", machine_fp)
+
+        # License file is missing, but the OS credential store has the payload.
+        licensing._secure_store_get = lambda: json.dumps(
+            {
+                "email": "keychain@example.com",
+                "expiry": None,
+                "key": key,
+                "activated_at": time.time(),
+                "machine_fp": machine_fp,
+            }
+        )
+        assert licensing.is_licensed()
+        assert licensing.get_license_info()["email"] == "keychain@example.com"
+    finally:
+        licensing._get_license_path = original_license
+        licensing._secure_store_set = original_secure_set
+        licensing._secure_store_get = original_secure_get
+        licensing._secure_store_delete = original_secure_delete
+
+
+def test_activation_from_url_session() -> None:
+    from src import activation
+
+    original = activation.activate_with_session
+    calls: list[str] = []
+    activation.activate_with_session = (
+        lambda sid: calls.append(sid) or {"ok": True, "email": "buyer@example.com"}
+    )
+    try:
+        result = activation.activate_from_url(
+            "byteproof://activate?session=cs_test_123"
+        )
+        assert result["ok"]
+        assert calls == ["cs_test_123"]
+
+        bad = activation.activate_from_url("https://example.com/not-byteproof")
+        assert not bad["ok"]
+    finally:
+        activation.activate_with_session = original
+
+
+def test_server_activation_core_two_machine_limit() -> None:
+    from pathlib import Path
+
+    server_dir = os.path.join(PROJECT_ROOT, "server")
+    if server_dir not in sys.path:
+        sys.path.insert(0, server_dir)
+    from activation_core import (
+        deactivate_machine,
+        load_json,
+        register_machine,
+        validate_machine,
+    )
+
+    tmpdir = Path(tempfile.mkdtemp())
+    licenses_path = tmpdir / "licenses.json"
+    issued: list[tuple[str, str]] = []
+
+    def issue_key(email: str, machine_fp: str) -> str:
+        issued.append((email, machine_fp))
+        return f"key-{email}-{machine_fp}"
+
+    ok1, key1, err1 = register_machine(
+        licenses_path, "Buyer@Example.com", "fp-a", issue_key
+    )
+    assert ok1 and err1 is None
+    assert key1 == "key-buyer@example.com-fp-a"
+
+    ok2, key2, _ = register_machine(licenses_path, "buyer@example.com", "fp-b", issue_key)
+    assert ok2 and key2 == "key-buyer@example.com-fp-b"
+
+    # Third computer is rejected.
+    ok3, key3, err3 = register_machine(
+        licenses_path, "buyer@example.com", "fp-c", issue_key
+    )
+    assert not ok3 and key3 is None
+    assert "device limit" in (err3 or "").lower()
+
+    # Re-requesting an existing machine returns its key without issuing a new one.
+    ok_re, key_re, _ = register_machine(
+        licenses_path, "buyer@example.com", "fp-a", issue_key
+    )
+    assert ok_re and key_re == key1
+    assert len(issued) == 2
+
+    # Deactivation frees a slot.
+    assert deactivate_machine(licenses_path, "buyer@example.com", "fp-b")
+    ok4, key4, _ = register_machine(
+        licenses_path, "buyer@example.com", "fp-c", issue_key
+    )
+    assert ok4 and key4 == "key-buyer@example.com-fp-c"
+
+    state = validate_machine(
+        load_json(licenses_path), "buyer@example.com", "fp-c"
+    )
+    assert state["valid"] is True
+    assert state["device_count"] == 2
+    assert state["device_limit"] == 2
 
 
 def test_conversational_reply_guard() -> None:
@@ -1473,6 +1650,14 @@ def main() -> None:
     print("PASS licensing roundtrip")
     test_activation_from_url()
     print("PASS activation from URL")
+    test_activation_from_url_session()
+    print("PASS activation from Stripe session URL")
+    test_tampered_license_rejected()
+    print("PASS tampered license rejected")
+    test_secure_store_fallback_restores_license()
+    print("PASS secure store fallback restores license")
+    test_server_activation_core_two_machine_limit()
+    print("PASS server two-machine limit")
     test_trial_expired_enters_free_mode()
     print("PASS trial expiry enters free mode")
     test_free_mode_daily_cap()

@@ -17,7 +17,7 @@ COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
 SUPPORT_EMAIL = "bytemind.nz@gmail.com"
 
-STRIPE_PAYMENT_URL = "https://buy.stripe.com/00w7sLeBP3af6uJ24p3Nm03"
+STRIPE_PAYMENT_URL = "https://buy.stripe.com/5kQ14ngJX7qvf1f24p3Nm04"  # TEMP TEST ($1)
 
 LOCAL_MODEL_PROVIDER = "ByteProof Local (Qwen3)"
 

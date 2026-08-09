@@ -39,21 +39,208 @@ def _get_license_path() -> str:
     return os.path.join(support_dir, LICENSE_FILE_NAME)
 
 
+def _secure_store_set(value: str) -> None:
+    """Save the license payload in the OS credential store (best effort)."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.run(
+                [
+                    "security",
+                    "add-generic-password",
+                    "-U",
+                    "-a",
+                    "ByteProof",
+                    "-s",
+                    "com.bytemind.byteproof",
+                    "-w",
+                    value,
+                ],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        elif system == "Windows":
+            import ctypes
+            from ctypes import wintypes
+
+            class _Credential(ctypes.Structure):
+                _fields_ = [
+                    ("Flags", wintypes.DWORD),
+                    ("Type", wintypes.DWORD),
+                    ("TargetName", ctypes.c_wchar_p),
+                    ("Comment", ctypes.c_wchar_p),
+                    ("LastWritten", wintypes.FILETIME),
+                    ("CredentialBlobSize", wintypes.DWORD),
+                    ("CredentialBlob", ctypes.c_void_p),
+                    ("Persist", wintypes.DWORD),
+                    ("AttributeCount", wintypes.DWORD),
+                    ("Attributes", ctypes.c_void_p),
+                    ("TargetAlias", ctypes.c_wchar_p),
+                    ("UserName", ctypes.c_wchar_p),
+                ]
+
+            advapi32 = ctypes.windll.advapi32
+            advapi32.CredWriteW.argtypes = [
+                ctypes.POINTER(_Credential),
+                wintypes.DWORD,
+            ]
+            advapi32.CredWriteW.restype = wintypes.BOOL
+            blob = ctypes.create_unicode_buffer(value)
+            cred = _Credential()
+            cred.Type = 1  # CRED_TYPE_GENERIC
+            cred.TargetName = "com.bytemind.byteproof|ByteProof"
+            cred.UserName = "ByteProof"
+            cred.CredentialBlobSize = len(value.encode("utf-16-le"))
+            cred.CredentialBlob = ctypes.cast(blob, ctypes.c_void_p)
+            cred.Persist = 2  # CRED_PERSIST_LOCAL_MACHINE
+            advapi32.CredWriteW(ctypes.byref(cred), 0)
+    except Exception:
+        pass
+
+
+def _secure_store_get() -> str | None:
+    """Read the license payload from the OS credential store (best effort)."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            completed = subprocess.run(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-a",
+                    "ByteProof",
+                    "-s",
+                    "com.bytemind.byteproof",
+                    "-w",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if completed.returncode == 0:
+                return completed.stdout.rstrip("\n")
+        elif system == "Windows":
+            import ctypes
+            from ctypes import wintypes
+
+            class _Credential(ctypes.Structure):
+                _fields_ = [
+                    ("Flags", wintypes.DWORD),
+                    ("Type", wintypes.DWORD),
+                    ("TargetName", ctypes.c_wchar_p),
+                    ("Comment", ctypes.c_wchar_p),
+                    ("LastWritten", wintypes.FILETIME),
+                    ("CredentialBlobSize", wintypes.DWORD),
+                    ("CredentialBlob", ctypes.c_void_p),
+                    ("Persist", wintypes.DWORD),
+                    ("AttributeCount", wintypes.DWORD),
+                    ("Attributes", ctypes.c_void_p),
+                    ("TargetAlias", ctypes.c_wchar_p),
+                    ("UserName", ctypes.c_wchar_p),
+                ]
+
+            advapi32 = ctypes.windll.advapi32
+            advapi32.CredReadW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                ctypes.POINTER(ctypes.POINTER(_Credential)),
+            ]
+            advapi32.CredReadW.restype = wintypes.BOOL
+            advapi32.CredFree.argtypes = [ctypes.c_void_p]
+            advapi32.CredFree.restype = None
+            pcred = ctypes.POINTER(_Credential)()
+            if not advapi32.CredReadW(
+                "com.bytemind.byteproof|ByteProof",
+                1,
+                0,
+                ctypes.byref(pcred),
+            ):
+                return None
+            try:
+                cred = pcred.contents
+                raw = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+                return raw.decode("utf-16-le")
+            finally:
+                advapi32.CredFree(pcred)
+    except Exception:
+        pass
+    return None
+
+
+def _secure_store_delete() -> None:
+    """Remove the license payload from the OS credential store (best effort)."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.run(
+                [
+                    "security",
+                    "delete-generic-password",
+                    "-a",
+                    "ByteProof",
+                    "-s",
+                    "com.bytemind.byteproof",
+                ],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        elif system == "Windows":
+            import ctypes
+            from ctypes import wintypes
+
+            advapi32 = ctypes.windll.advapi32
+            advapi32.CredDeleteW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+            ]
+            advapi32.CredDeleteW.restype = wintypes.BOOL
+            advapi32.CredDeleteW("com.bytemind.byteproof|ByteProof", 1, 0)
+    except Exception:
+        pass
+
+
 def _load_license_data() -> dict[str, Any] | None:
     path = _get_license_path()
     if not os.path.exists(path):
-        return None
+        return _secure_store_load_fallback()
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
-        return None
+        return _secure_store_load_fallback()
 
 
 def _save_license_data(data: dict[str, Any]) -> None:
     path = _get_license_path()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    _secure_store_set(json.dumps(data, ensure_ascii=False))
+
+
+def _secure_store_load_fallback() -> dict[str, Any] | None:
+    raw = _secure_store_get()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def delete_license_data() -> None:
+    """Remove the local license file and its OS credential-store copy."""
+    path = _get_license_path()
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+    _secure_store_delete()
 
 
 def validate_license_key(license_key: str) -> dict[str, Any]:
@@ -159,36 +346,59 @@ def activate_license(license_key: str) -> dict[str, Any]:
     return {"valid": True, "email": result["email"]}
 
 
+def _validated_license_data() -> dict[str, Any] | None:
+    """Load the stored license and re-verify its signature and machine binding.
+
+    This prevents a forged or edited license.json from being accepted: the key
+    must cryptographically validate against the embedded public key and match
+    this computer's fingerprint.
+    """
+    def _validate(data: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not data or not data.get("key"):
+            return None
+
+        result = validate_license_key(data["key"])
+        if not result["valid"]:
+            return None
+
+        machine_fp = _get_machine_fingerprint()
+        key_machine = result.get("machine_fp", "")
+        if key_machine and key_machine != machine_fp:
+            return None
+        stored_fp = data.get("machine_fp", "")
+        if stored_fp and stored_fp != machine_fp:
+            return None
+
+        expiry = data.get("expiry")
+        if expiry is not None and expiry < time.time():
+            return None
+
+        return data
+
+    data = _validate(_load_license_data())
+    if data is not None:
+        return data
+
+    # Self-heal: if the license file is missing, corrupt, or edited, try the
+    # OS credential-store copy. It still has to pass signature validation.
+    fallback = _secure_store_load_fallback()
+    if fallback:
+        return _validate(fallback)
+    return None
+
+
 def is_licensed() -> bool:
-    data = _load_license_data()
-    if not data:
-        return False
-
-    expiry = data.get("expiry")
-    if expiry is not None and expiry < time.time():
-        return False
-
-    stored_fp = data.get("machine_fp", "")
-    if stored_fp and stored_fp != _get_machine_fingerprint():
-        return False
-
-    return bool(data.get("key"))
+    return _validated_license_data() is not None
 
 
 def get_license_info() -> dict[str, Any]:
-    data = _load_license_data()
+    data = _validated_license_data()
     if not data:
-        return {"status": "unlicensed"}
-    expiry = data.get("expiry")
-    if expiry is not None and expiry < time.time():
-        return {"status": "expired", "email": data.get("email", "Unknown")}
-    stored_fp = data.get("machine_fp", "")
-    if stored_fp and stored_fp != _get_machine_fingerprint():
         return {"status": "unlicensed"}
     return {
         "status": "licensed",
         "email": data.get("email", "Unknown"),
-        "expiry": expiry,
+        "expiry": data.get("expiry"),
         "activated_at": data.get("activated_at"),
     }
 
