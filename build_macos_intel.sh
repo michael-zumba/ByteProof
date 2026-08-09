@@ -82,6 +82,16 @@ echo ""
 echo "Applying stable code signature (preserves Accessibility permissions)..."
 "$THIS_DIR/tools/sign_byteproof.sh" "dist_intel/$APP_NAME.app" || echo "Warning: stable signing skipped."
 
+if [ -n "${BYTEPROOF_DEV_ID:-}" ]; then
+    echo ""
+    echo "Notarizing with Apple Developer ID..."
+    "$THIS_DIR/scripts/notarize.sh" "dist_intel/$APP_NAME.app"
+else
+    echo ""
+    echo "Notarization skipped (set BYTEPROOF_DEV_ID to notarize)."
+    echo "Without notarization, macOS may show 'Apple could not verify ByteProof'."
+fi
+
 echo ""
 echo "Creating .dmg installer..."
 create-dmg \
