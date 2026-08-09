@@ -1134,8 +1134,12 @@ class SettingsDialog(QDialog):
         qt_parts = []
         is_macos = platform.system() == "Darwin"
         for p in parts:
-            if p == '<cmd>': qt_parts.append('Meta' if is_macos else 'Ctrl')
-            elif p == '<ctrl>': qt_parts.append('Ctrl')
+            # Qt quirk: on macOS the Command key is reported as "Ctrl" and the
+            # physical Control key is reported as "Meta". Mapping the other
+            # way around silently changes Cmd shortcuts into Ctrl shortcuts
+            # whenever settings are saved.
+            if p == '<cmd>': qt_parts.append('Ctrl')
+            elif p == '<ctrl>': qt_parts.append('Meta' if is_macos else 'Ctrl')
             elif p == '<shift>': qt_parts.append('Shift')
             elif p == '<alt>': qt_parts.append('Alt')
             else: qt_parts.append(p.upper() if len(p)==1 else p.capitalize())
@@ -1148,8 +1152,8 @@ class SettingsDialog(QDialog):
         pynput_parts = []
         is_macos = platform.system() == "Darwin"
         for p in parts:
-            if p == 'Meta': pynput_parts.append('<cmd>' if is_macos else '<ctrl>')
-            elif p == 'Ctrl': pynput_parts.append('<ctrl>')
+            if p == 'Ctrl': pynput_parts.append('<cmd>' if is_macos else '<ctrl>')
+            elif p == 'Meta': pynput_parts.append('<ctrl>')
             elif p == 'Shift': pynput_parts.append('<shift>')
             elif p == 'Alt': pynput_parts.append('<alt>')
             else: pynput_parts.append(p.lower())
@@ -2781,6 +2785,12 @@ class ProofreaderApp(QMainWindow):
         apps = editor.running_apps()
         if not apps:
             return None
+        last = getattr(self, "_last_other_app", None)
+        last_pid = last.get("pid") if last else None
+        apps = sorted(
+            apps,
+            key=lambda app: 0 if app.get("pid") == last_pid else 1,
+        )
         labels: list[str] = []
         for app in apps:
             name = app.get("name") or "Unknown"
@@ -2789,7 +2799,8 @@ class ProofreaderApp(QMainWindow):
         choice, ok = QInputDialog.getItem(
             self,
             "Choose App",
-            "Which app has your selected text?",
+            "ByteProof couldn't find your selected text automatically.\n"
+            "Choose the app where you selected the text:",
             labels,
             0,
             False,
@@ -3751,6 +3762,20 @@ class ProofreaderApp(QMainWindow):
         activate_target = False
         try:
             editor = get_generic_editor()
+
+            # Reading text from other apps requires Accessibility permission on
+            # macOS. Fail with a clear, actionable message instead of the
+            # confusing "could not find the app" error.
+            permission_ok, permission_msg = editor.permission_status()
+            if not permission_ok:
+                self._cancel_proofread_start(
+                    permission_msg
+                    or "ByteProof needs Accessibility permission to read your "
+                    "selected text in other apps."
+                )
+                self._show_hotkey_permission_message()
+                return
+
             target = getattr(self, "_hotkey_target", None)
             self._hotkey_target = None
             if not target:
@@ -3774,17 +3799,31 @@ class ProofreaderApp(QMainWindow):
                 )
                 return
             else:
-                # ByteProof is in front (button/tray). Find the app that
-                # actually has selected text instead of guessing from history.
-                best = self._find_target_with_selection(editor)
+                # ByteProof is in front (button/tray). The app the user came
+                # from is our best guess; verify it before probing every app.
+                from .generic_editing import _debug_log
+
+                best = None
+                last = getattr(self, "_last_other_app", None)
+                if last and last.get("pid"):
+                    best = last
+                _debug_log(
+                    f"BUTTON PATH: last_other_app={last and last.get('name')!r} "
+                    f"history={[a.get('name') for a in getattr(self, '_app_history', [])]}"
+                )
+                if best is None:
+                    best = self._find_target_with_selection(editor)
                 if not best:
                     best = self._ask_user_for_target(editor)
                 if not best:
+                    _debug_log("BUTTON PATH: no target found")
                     self._cancel_proofread_start(
-                        "No app with selected text found. Switch to the app "
-                        "with your selected text and use the hotkey."
+                        "ByteProof couldn't find the app with your selected "
+                        "text. Switch to that app, select the text, and click "
+                        "Proofread again (or use the hotkey)."
                     )
                     return
+                _debug_log(f"BUTTON PATH: using {best.get('name')!r} pid={best.get('pid')}")
                 if editor.is_word(best):
                     mode = "word"
                 else:
@@ -3802,6 +3841,18 @@ class ProofreaderApp(QMainWindow):
                         activate_target = not (front and front.get("pid") == best.get("pid"))
                     except Exception:
                         activate_target = True
+                    # Fail fast with a clear message if the chosen app has no
+                    # selection, instead of starting a pointless AI task.
+                    preview = editor.get_selection_light(best)
+                    if not preview or not preview.strip():
+                        _debug_log(
+                            f"BUTTON PATH: no selection in {best.get('name')!r}"
+                        )
+                        self._cancel_proofread_start(
+                            f"No text selected in {best.get('name') or 'that app'}. "
+                            "Select the text you want proofread, then try again."
+                        )
+                        return
         except Exception as e:
             print(f"Target detection failed: {e}")
             self._cancel_proofread_start(

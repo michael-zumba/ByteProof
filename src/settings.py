@@ -11,7 +11,7 @@ from config.deepseek_config import (
 )
 
 APP_NAME = "ByteProof"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -270,9 +270,27 @@ def load_runtime_settings() -> dict[str, Any]:
     if "local_model" in loaded:
         settings["local_model"].update(loaded["local_model"])
 
+    _migrate_mac_hotkeys(settings)
     settings["general"]["temperature"] = max(0.0, min(2.0, settings["general"]["temperature"]))
     _stamp_version_and_save(settings)
     return settings
+
+
+def _migrate_mac_hotkeys(settings: dict[str, Any]) -> None:
+    """Repair hotkeys corrupted by the old Cmd/Ctrl conversion on macOS.
+
+    Older builds mapped Qt's "Ctrl" (which is the Command key on macOS) to the
+    physical Control key when saving. Restore the shipped defaults when the
+    stored value matches the exact corrupted form, so users are not silently
+    left with a hotkey they never chose.
+    """
+    if platform.system() != "Darwin":
+        return
+    general = settings.setdefault("general", {})
+    if general.get("proofread_hotkey") == "<ctrl>+<shift>+'":
+        general["proofread_hotkey"] = "<cmd>+<shift>+'"
+    if general.get("open_hotkey") == "<ctrl>+<shift>+;":
+        general["open_hotkey"] = "<cmd>+<shift>+;"
 
 
 def _stamp_version_and_save(settings: dict[str, Any]) -> None:

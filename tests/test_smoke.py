@@ -834,11 +834,46 @@ def test_hotkey_conversion() -> None:
     from src.gui import SettingsDialog
 
     if platform.system() == "Darwin":
-        assert SettingsDialog.pynput_to_qt(None, "<cmd>+<shift>+;") == "Meta+Shift+;"  # pyright: ignore[reportArgumentType]
-        assert SettingsDialog.qt_to_pynput(None, "Meta+Shift+;") == "<cmd>+<shift>+;"  # pyright: ignore[reportArgumentType]
+        # On macOS, Qt reports the Command key as "Ctrl" and the physical
+        # Control key as "Meta". The round trip must preserve the real intent.
+        assert SettingsDialog.pynput_to_qt(None, "<cmd>+<shift>+;") == "Ctrl+Shift+;"  # pyright: ignore[reportArgumentType]
+        assert SettingsDialog.qt_to_pynput(None, "Ctrl+Shift+;") == "<cmd>+<shift>+;"  # pyright: ignore[reportArgumentType]
+        assert SettingsDialog.pynput_to_qt(None, "<ctrl>+<shift>+'") == "Meta+Shift+'"  # pyright: ignore[reportArgumentType]
+        assert SettingsDialog.qt_to_pynput(None, "Meta+Shift+'") == "<ctrl>+<shift>+'"  # pyright: ignore[reportArgumentType]
     else:
         assert SettingsDialog.pynput_to_qt(None, "<cmd>+<shift>+;") == "Ctrl+Shift+;"  # pyright: ignore[reportArgumentType]
         assert SettingsDialog.qt_to_pynput(None, "Ctrl+Shift+;") == "<ctrl>+<shift>+;"  # pyright: ignore[reportArgumentType]
+
+
+def test_mac_hotkey_default_migration() -> None:
+    from src import settings
+
+    if platform.system() != "Darwin":
+        return
+
+    tmpdir = tempfile.mkdtemp()
+    original_file = settings.SETTINGS_FILE
+    original_dir = settings.APP_SUPPORT_DIR
+    try:
+        settings.SETTINGS_FILE = os.path.join(tmpdir, "settings.json")
+        settings.APP_SUPPORT_DIR = tmpdir
+        with open(settings.SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "general": {
+                        "open_hotkey": "<ctrl>+<shift>+;",
+                        "proofread_hotkey": "<ctrl>+<shift>+'",
+                    }
+                },
+                f,
+            )
+        loaded = settings.load_runtime_settings()
+        assert loaded["general"]["open_hotkey"] == "<cmd>+<shift>+;"
+        assert loaded["general"]["proofread_hotkey"] == "<cmd>+<shift>+'"
+        assert loaded.get("app_version") == settings.APP_VERSION
+    finally:
+        settings.SETTINGS_FILE = original_file
+        settings.APP_SUPPORT_DIR = original_dir
 
 
 def test_gui_constructs() -> None:
@@ -1930,6 +1965,14 @@ def test_double_escape_cancels_download() -> None:
 
 
 def main() -> None:
+    # Keep test runs from writing into the real app's support folder logs,
+    # which made real-world debugging confusing (e.g. FakeMail entries).
+    import src.generic_editing as _ge
+    import src.hotkeys as _hk
+
+    _ge._debug_log = lambda _msg: None
+    _hk.log_debug = lambda _msg: None
+
     test_updater_url_selection()
     print("PASS updater URL selection")
     test_settings_branding()
@@ -1972,6 +2015,8 @@ def main() -> None:
     print("PASS trial hardening uses earliest start")
     test_hotkey_conversion()
     print("PASS hotkey conversion")
+    test_mac_hotkey_default_migration()
+    print("PASS macOS hotkey default migration")
     test_gui_constructs()
     print("PASS GUI construction")
     test_segment_reassembly_safety()
