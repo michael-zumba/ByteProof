@@ -27,10 +27,13 @@ touching an API key:
 
 1. **Local AI (default)** — ByteProof downloads a small Qwen3 model (Apache
    2.0) and runs it privately on the user's computer through llama.cpp.
-   Unlimited, offline, no account. The app picks a model from the user's RAM:
-   Qwen3 4B (~2.5 GB) for 8 GB machines, Qwen3 8B (~5 GB) for 16 GB+, and
-   Qwen3 14B (~9 GB) for large machines. Downloads resume, verify SHA-256,
-   and can be managed in Settings → Local AI.
+   Offline, no account, and still available in the limited free mode after the
+   7-day trial (3 proofreads/day). The app picks a model from the user's RAM:
+   Phi-4 Mini (~2.3 GB, MIT) for 8–16 GB machines — the strongest small
+   English grammar model tested — Qwen3 8B (~5 GB) for 16 GB+, and Qwen3 14B
+   (~9 GB) for large machines. An ultra-light Qwen3 1.7B (~1.2 GB) covers
+   older 6 GB machines, with Qwen3 4B as a general/multilingual alternative.
+   Downloads resume, verify SHA-256, and can be managed in Settings → Local AI.
 2. **Bring your own key (advanced)** — DeepSeek, OpenAI, Anthropic, Google,
    xAI, Groq, Perplexity, or the user's own Ollama server for maximum quality
    or context.
@@ -41,9 +44,9 @@ later if needed).
 
 ### Local model engine
 
-- `src/local_model.py` — model catalog (Qwen3 GGUF files with pinned SHA-256),
-  hardware detection and recommendation, resumable/verified downloads,
-  llama.cpp runtime bootstrap, and server lifecycle.
+- `src/local_model.py` — model catalog (Qwen3 + Phi-4 Mini GGUF files with
+  pinned SHA-256), hardware detection and recommendation, resumable/verified
+  downloads, llama.cpp runtime bootstrap, and server lifecycle.
 - The first proofread with Local AI starts the engine automatically; users can
   also pre-download from Settings → Local AI with progress bars.
 - To ship a ByteProof fine-tune later, publish a GGUF and update the model

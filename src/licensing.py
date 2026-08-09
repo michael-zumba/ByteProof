@@ -12,7 +12,11 @@ from typing import Any, cast
 from .settings import get_app_support_dir
 
 TRIAL_DAYS = 7
+FREE_MODE_DAILY_PROOFREAD_LIMIT = 3
 LICENSE_FILE_NAME = "license.json"
+USAGE_FILE_NAME = "usage.json"
+TRIAL_SECONDARY_KEY = "ByteProofTrialStart"
+TRIAL_SECONDARY_DOMAIN = "com.bytemind.byteproof"
 PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
 MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAsyjv3trVqn9LBHHjX6M+
 jtYxqz7BEZDNpzvtcCBPcufjap1Lhb2ZXgtX3yNRXKFXVYfG2AScOK9d6fbxENYA
@@ -204,18 +208,209 @@ def get_trial_status(first_run_ts: float | None) -> dict[str, Any]:
     }
 
 
+def _get_usage_path() -> str:
+    return os.path.join(get_app_support_dir(), USAGE_FILE_NAME)
+
+
+def _load_usage_data() -> dict[str, Any]:
+    path = _get_usage_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_usage_data(data: dict[str, Any]) -> None:
+    path = _get_usage_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _today_key() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def get_daily_usage() -> dict[str, Any]:
+    """Return today's proofread count and the free-mode daily limit."""
+    data = _load_usage_data()
+    today = _today_key()
+    count = 0
+    if data.get("date") == today:
+        count = int(data.get("count", 0))
+    return {
+        "date": today,
+        "count": count,
+        "limit": FREE_MODE_DAILY_PROOFREAD_LIMIT,
+    }
+
+
+def get_total_usage() -> int:
+    return int(_load_usage_data().get("total", 0))
+
+
+def get_trial_usage() -> int:
+    return int(_load_usage_data().get("trial_count", 0))
+
+
+def record_proofread_usage() -> None:
+    """Record one completed proofread and the running trial total."""
+    data = _load_usage_data()
+    today = _today_key()
+    if data.get("date") != today:
+        data["date"] = today
+        data["count"] = 0
+    data["count"] = int(data.get("count", 0)) + 1
+    data["total"] = int(data.get("total", 0)) + 1
+    if get_trial_status(ensure_trial_started())["in_trial"]:
+        data["trial_count"] = int(data.get("trial_count", 0)) + 1
+    _save_usage_data(data)
+
+
+def get_access_status() -> dict[str, Any]:
+    """Return the current access tier: licensed, trial, or limited free mode."""
+    lic = get_license_info()
+    if lic.get("status") == "licensed":
+        return {
+            "tier": "licensed",
+            "licensed": True,
+            "in_trial": False,
+            "trial_expired": False,
+            "free_mode_allowed": False,
+            "daily_count": 0,
+            "daily_limit": FREE_MODE_DAILY_PROOFREAD_LIMIT,
+            "trial_usage": get_trial_usage(),
+            "total_usage": get_total_usage(),
+        }
+
+    trial = get_trial_status(ensure_trial_started())
+    if trial["in_trial"]:
+        return {
+            "tier": "trial",
+            "licensed": False,
+            "in_trial": True,
+            "trial_expired": False,
+            "days_left": trial["days_left"],
+            "free_mode_allowed": False,
+            "daily_count": 0,
+            "daily_limit": FREE_MODE_DAILY_PROOFREAD_LIMIT,
+            "trial_usage": get_trial_usage(),
+            "total_usage": get_total_usage(),
+        }
+
+    daily = get_daily_usage()
+    return {
+        "tier": "free",
+        "licensed": False,
+        "in_trial": False,
+        "trial_expired": True,
+        "free_mode_allowed": daily["count"] < daily["limit"],
+        "daily_count": daily["count"],
+        "daily_limit": daily["limit"],
+        "trial_usage": get_trial_usage(),
+        "total_usage": get_total_usage(),
+    }
+
+
+def _trial_secondary_read() -> float | None:
+    """Read the trial start from a second system location, if present."""
+    system = platform.system()
+    try:
+        if system == "Windows":
+            import winreg
+            with winreg.OpenKey(  # pyright: ignore[reportAttributeAccessIssue]
+                winreg.HKEY_CURRENT_USER,  # pyright: ignore[reportAttributeAccessIssue]
+                r"Software\ByteMind\ByteProof",
+            ) as key:
+                value, _ = winreg.QueryValueEx(  # pyright: ignore[reportAttributeAccessIssue]
+                    key, TRIAL_SECONDARY_KEY
+                )
+                return float(value)
+        if system == "Darwin":
+            completed = subprocess.run(
+                ["defaults", "read", TRIAL_SECONDARY_DOMAIN, TRIAL_SECONDARY_KEY],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if completed.returncode == 0:
+                return float(completed.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def _trial_secondary_write(trial_start: float) -> None:
+    """Persist the trial start to a second system location."""
+    system = platform.system()
+    try:
+        if system == "Windows":
+            import winreg
+            key = winreg.CreateKey(  # pyright: ignore[reportAttributeAccessIssue]
+                winreg.HKEY_CURRENT_USER,  # pyright: ignore[reportAttributeAccessIssue]
+                r"Software\ByteMind\ByteProof",
+            )
+            winreg.SetValueEx(  # pyright: ignore[reportAttributeAccessIssue]
+                key,
+                TRIAL_SECONDARY_KEY,
+                0,
+                winreg.REG_SZ,  # pyright: ignore[reportAttributeAccessIssue]
+                str(trial_start),
+            )
+            winreg.CloseKey(key)  # pyright: ignore[reportAttributeAccessIssue]
+        elif system == "Darwin":
+            subprocess.run(
+                [
+                    "defaults",
+                    "write",
+                    TRIAL_SECONDARY_DOMAIN,
+                    TRIAL_SECONDARY_KEY,
+                    "-string",
+                    str(trial_start),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+    except Exception:
+        pass
+
+
 def ensure_trial_started() -> float:
+    """Start (or read) the trial, using the earliest known start across two
+    storage locations so deleting one location cannot reset the trial."""
     trial_path = os.path.join(os.path.dirname(_get_license_path()), ".trial_start")
+    primary: float | None = None
     if os.path.exists(trial_path):
         try:
             with open(trial_path, "r") as f:
-                return float(f.read().strip())
+                primary = float(f.read().strip())
         except (ValueError, OSError):
             pass
+
+    secondary = _trial_secondary_read()
+    known = [ts for ts in (primary, secondary) if ts is not None]
+    if known:
+        earliest = min(known)
+        # Heal whichever location is missing or newer, so both stay in sync.
+        if primary is None or primary != earliest:
+            os.makedirs(os.path.dirname(trial_path), exist_ok=True)
+            with open(trial_path, "w") as f:
+                f.write(str(earliest))
+        if secondary is None or secondary != earliest:
+            _trial_secondary_write(earliest)
+        return earliest
+
     now = time.time()
     os.makedirs(os.path.dirname(trial_path), exist_ok=True)
     with open(trial_path, "w") as f:
         f.write(str(now))
+    _trial_secondary_write(now)
     return now
 
 

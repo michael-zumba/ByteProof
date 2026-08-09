@@ -45,12 +45,13 @@ includes a fresh ByteMind license keypair.
     after the selection (Accessibility API on macOS, UI Automation on Windows)
     and feeds it to the model, matching the context behaviour Word already had.
 - Type-checked with Pyright (0 errors) and covered by expanded smoke tests.
-- Added **Local AI** as the default engine: ByteProof downloads a small Qwen3
-  model (4B/8B/14B depending on RAM) and runs it privately through llama.cpp,
-  with in-app progress, resume, and SHA-256 verification. Bring-your-own-key
-  providers (DeepSeek, OpenAI, Anthropic, Google, xAI, Groq, Perplexity,
-  Ollama) remain fully supported. A managed cloud/credits option is
-  intentionally not included in this version.
+- Added **Local AI** as the default engine: ByteProof downloads a small local
+  model (Phi-4 Mini by default for English grammar, with Qwen3 1.7B/4B/8B/14B
+  and a proofreading-tuned 4B as options) and runs it privately through
+  llama.cpp, with in-app progress, resume, and SHA-256 verification.
+  Bring-your-own-key providers (DeepSeek, OpenAI, Anthropic, Google, xAI,
+  Groq, Perplexity, Ollama) remain fully supported. A managed cloud/credits
+  option is intentionally not included in this version.
 - Stable code signing: builds are signed with a persistent self-signed identity
   (`tools/certs/`), so macOS no longer treats every reinstall as a new app and
   Accessibility permissions survive updates. See the note below.
@@ -125,13 +126,18 @@ the app silently skips update checks.
 ## Trial enforcement
 
 - The 7-day free trial starts on first launch (stored in the ByteProof support
-  folder).
+  folder and in a second system location, so deleting the support folder does
+  not reset the trial).
 - During the trial, proofreading works normally and a warning toast appears
   when 3 days or fewer remain.
-- After the trial expires, the proofread button is disabled and every
-  proofreading attempt shows a dialog with **Purchase**, **Activate License**,
-  and **I've Paid — Activate Automatically** — the app cannot be used until a
-  license is activated.
+- After the trial expires, ByteProof enters a limited free mode: Local AI only,
+  3 proofreads per day, and no reviewer comments. Cloud providers and unlimited
+  use require the $20 license.
+- Hitting the daily cap or trying a cloud provider shows a purchase dialog with
+  a recap of how many selections were proofread during the trial, plus
+  **Purchase**, **Activate License**, and **I've Paid — Activate Automatically**.
+- Completed proofreads are counted in `usage.json` in the support folder (daily
+  count, lifetime total, and trial total).
 
 ### 3. Website / GitHub release
 

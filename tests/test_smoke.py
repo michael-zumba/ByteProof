@@ -10,6 +10,7 @@ import os
 import platform
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -119,7 +120,115 @@ def test_activation_from_url() -> None:
     assert unreachable["error"]
 
 
-def test_trial_expired_disables_proofreading() -> None:
+def test_strict_editing_rules_contract() -> None:
+    from src.logic import with_strict_editing_rules
+
+    prompt = with_strict_editing_rules("You are an editor.")
+    assert "OUTPUT CONTRACT" in prompt
+    assert "never refuse to edit" in prompt.lower()
+    # Appending twice must not duplicate the contract.
+    assert with_strict_editing_rules(prompt).count("OUTPUT CONTRACT") == 1
+
+
+def test_conversational_reply_guard() -> None:
+    from src.logic import _looks_like_conversational_reply
+
+    refusal = (
+        "I notice you're asking for business strategy advice, but I must clarify "
+        "my role here. I am an Academic Editor and Writing Coach and I cannot "
+        "provide business advice."
+    )
+    assert _looks_like_conversational_reply(refusal)
+
+    plain_question = "What is the best way to improve academic writing?"
+    assert not _looks_like_conversational_reply(plain_question)
+
+    normal_edit = (
+        "We are writing to inform you that, in accordance with our records, "
+        "your account currently shows an outstanding balance."
+    )
+    assert not _looks_like_conversational_reply(normal_edit)
+
+
+def test_proofread_prompt_uses_markers_and_retries_conversational_reply() -> None:
+    import json as json_module
+
+    from src import logic
+
+    captured: list[dict] = []
+    responses = [
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "I notice you're asking for business strategy advice, "
+                            "but I am an Academic Editor and cannot help."
+                        )
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "I am writing to ask whether you can review my draft. "
+                            "Please advise on the best approach."
+                        )
+                    }
+                }
+            ]
+        },
+    ]
+
+    original_urlopen = logic.urllib.request.urlopen
+
+    class FakeResponse:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return json_module.dumps(self._payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0, context=None):
+        body = json_module.loads(request.data)
+        captured.append(body)
+        return FakeResponse(responses[len(captured) - 1])
+
+    logic.urllib.request.urlopen = fake_urlopen
+    try:
+        result = logic.proofread_with_provider(
+            "I want you to review the Byteproof app. What should I do?",
+            "sk-test",
+            512,
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            provider_name="DeepSeek",
+        )
+    finally:
+        logic.urllib.request.urlopen = original_urlopen
+
+    # First response was conversational, so the request must have been retried.
+    assert len(captured) == 2
+    first_user = captured[0]["messages"][1]["content"]
+    first_system = captured[0]["messages"][0]["content"]
+    assert logic.TEXT_BEGIN_MARKER in first_user
+    assert logic.TEXT_END_MARKER in first_user
+    assert "OUTPUT CONTRACT" in first_system
+
+    retry_system = captured[1]["messages"][0]["content"]
+    retry_user = captured[1]["messages"][1]["content"]
+    assert "CRITICAL INSTRUCTION" in retry_system
+    assert "CRITICAL INSTRUCTION" in retry_user
+    assert result == (
+        "I am writing to ask whether you can review my draft. "
+        "Please advise on the best approach."
+    )
+
+
+def test_trial_expired_enters_free_mode() -> None:
     from PyQt6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
@@ -127,9 +236,12 @@ def test_trial_expired_disables_proofreading() -> None:
     from src import gui, settings
 
     window = gui.ProofreaderApp(1024, settings.load_runtime_settings())
+    window.settings["active_provider"] = settings.LOCAL_MODEL_PROVIDER
     original_licensed = gui.is_licensed
     original_ensure = gui.ensure_trial_started
     original_status = gui.get_trial_status
+    original_access = gui.get_access_status
+    original_dialog = window._show_purchase_dialog
     try:
         gui.is_licensed = lambda: False
         gui.ensure_trial_started = lambda: 1000000000.0
@@ -138,14 +250,117 @@ def test_trial_expired_disables_proofreading() -> None:
             "days_left": 0,
             "trial_expired": True,
         }
+        window._show_purchase_dialog = lambda *a, **k: None
+
+        free_access = {
+            "tier": "free",
+            "licensed": False,
+            "in_trial": False,
+            "trial_expired": True,
+            "free_mode_allowed": True,
+            "daily_count": 1,
+            "daily_limit": 3,
+            "trial_usage": 12,
+            "total_usage": 20,
+        }
+        gui.get_access_status = lambda: free_access
+
         window._update_proofread_button()
-        assert not window.run_btn.isEnabled()
-        assert "Trial Expired" in window.run_btn.text()
+        assert window.run_btn.isEnabled()
+        assert "Free mode" in window.run_btn.text()
+        assert "2 left today" in window.run_btn.text()
+        assert window._check_license_access() is True
+
+        free_access["free_mode_allowed"] = False
+        free_access["daily_count"] = free_access["daily_limit"]
+        assert window._check_license_access() is False
+        window._update_proofread_button()
+        assert window.run_btn.isEnabled()
+        assert "Free Limit Reached" in window.run_btn.text()
+
+        # Cloud providers stay locked in free mode.
+        free_access["free_mode_allowed"] = True
+        window.settings["active_provider"] = "DeepSeek"
+        assert window._check_license_access() is False
     finally:
         gui.is_licensed = original_licensed
         gui.ensure_trial_started = original_ensure
         gui.get_trial_status = original_status
+        gui.get_access_status = original_access
+        window._show_purchase_dialog = original_dialog
         window.close()
+
+
+def test_free_mode_daily_cap() -> None:
+    from src import licensing
+
+    tmpdir = tempfile.mkdtemp()
+    original_usage = licensing._get_usage_path
+    original_license = licensing._get_license_path
+    original_secondary_read = licensing._trial_secondary_read
+    original_secondary_write = licensing._trial_secondary_write
+    original_ensure = licensing.ensure_trial_started
+    try:
+        licensing._get_usage_path = lambda: os.path.join(tmpdir, "usage.json")
+        licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
+        licensing._trial_secondary_read = lambda: None
+        licensing._trial_secondary_write = lambda _ts: None
+        # Trial expired 8 days ago.
+        licensing.ensure_trial_started = lambda: time.time() - (8 * 86400)
+
+        status = licensing.get_access_status()
+        assert status["tier"] == "free"
+        assert status["free_mode_allowed"] is True
+
+        for _ in range(3):
+            licensing.record_proofread_usage()
+
+        status = licensing.get_access_status()
+        assert status["daily_count"] == 3
+        assert status["free_mode_allowed"] is False
+        assert status["trial_usage"] == 0
+        assert status["total_usage"] == 3
+    finally:
+        licensing._get_usage_path = original_usage
+        licensing._get_license_path = original_license
+        licensing._trial_secondary_read = original_secondary_read
+        licensing._trial_secondary_write = original_secondary_write
+        licensing.ensure_trial_started = original_ensure
+
+
+def test_ensure_trial_started_uses_earliest_secondary() -> None:
+    from src import licensing
+
+    tmpdir = tempfile.mkdtemp()
+    original_license = licensing._get_license_path
+    original_secondary_read = licensing._trial_secondary_read
+    original_secondary_write = licensing._trial_secondary_write
+    try:
+        licensing._get_license_path = lambda: os.path.join(tmpdir, "license.json")
+
+        # Secondary location holds an older start than the primary file:
+        # the earlier timestamp must win so deleting one file cannot reset.
+        primary_path = os.path.join(tmpdir, ".trial_start")
+        with open(primary_path, "w") as f:
+            f.write(str(999999.0))
+        licensing._trial_secondary_read = lambda: 123456.0
+        written: list[float] = []
+        licensing._trial_secondary_write = lambda ts: written.append(ts)
+
+        assert licensing.ensure_trial_started() == 123456.0
+        with open(primary_path) as f:
+            assert float(f.read().strip()) == 123456.0
+        assert written == []
+
+        # Only secondary exists: primary is created from it.
+        os.remove(primary_path)
+        assert licensing.ensure_trial_started() == 123456.0
+        with open(primary_path) as f:
+            assert float(f.read().strip()) == 123456.0
+    finally:
+        licensing._get_license_path = original_license
+        licensing._trial_secondary_read = original_secondary_read
+        licensing._trial_secondary_write = original_secondary_write
 
 
 def test_hotkey_conversion() -> None:
@@ -219,13 +434,31 @@ def test_strict_editing_rules() -> None:
 
     base = "You are an editor."
     enriched = with_strict_editing_rules(base)
-    assert "STRICT LANGUAGE-EDITING MODE" in enriched
-    assert "never a question" in enriched
+    assert "OUTPUT CONTRACT" in enriched
+    assert "never a message, question, or request" in enriched
+    assert "never refuse to edit" in enriched.lower()
     assert with_strict_editing_rules(enriched) == enriched
 
     assert "STRICT LANGUAGE-EDITING MODE" in load_polish_prompt()
     assert "STRICT LANGUAGE-EDITING MODE" in load_proofreading_prompt("Precise (Minimal Changes)")
     assert "STRICT LANGUAGE-EDITING MODE" in load_proofreading_prompt("Creative (Rewrite)")
+
+
+def test_local_model_output_cleaning() -> None:
+    from src.logic import _clean_local_model_output
+
+    assert (
+        _clean_local_model_output(
+            "<think>I should fix the spelling.</think>The cat sat on the mat."
+        )
+        == "The cat sat on the mat."
+    )
+    assert (
+        _clean_local_model_output(
+            "<|im_start|>assistant\nThe cat sat.<|im_end|>"
+        )
+        == "The cat sat."
+    )
 
 
 def test_polish_prompt_and_flow() -> None:
@@ -726,17 +959,22 @@ def test_local_model_catalog_and_recommendation() -> None:
     local_model.LOCAL_MODEL_DIR = tempfile.mkdtemp(prefix="byteproof-test-models-")
     try:
         catalog = local_model.get_catalog()
-        assert len(catalog) >= 3
+        assert len(catalog) >= 5
         model = local_model.get_model("qwen3-4b")
         assert model["sha256"]
         assert model["size_bytes"] > 1_000_000_000
+        for model_id in ("qwen3-1.7b", "qwen3-4b-proofread", "phi4-mini"):
+            entry = local_model.get_model(model_id)
+            assert entry["sha256"]
+            assert entry["size_bytes"] > 100_000_000
         assert local_model.model_path("qwen3-4b").endswith(".gguf")
         assert local_model.is_model_installed("qwen3-4b") is False
         assert local_model.resolve_model_id("qwen3-4b") == "qwen3-4b"
         assert local_model.resolve_model_id("not-a-model") == local_model.recommend_model()["id"]
         assert local_model.resolve_model_id(None) == local_model.recommend_model()["id"]
 
-        assert local_model.recommend_model({"total_ram_gb": 8.0})["id"] == "qwen3-4b"
+        assert local_model.recommend_model({"total_ram_gb": 6.0})["id"] == "qwen3-1.7b"
+        assert local_model.recommend_model({"total_ram_gb": 8.0})["id"] == "phi4-mini"
         assert local_model.recommend_model({"total_ram_gb": 16.0})["id"] == "qwen3-8b"
         assert local_model.recommend_model({"total_ram_gb": 24.0})["id"] == "qwen3-14b"
     finally:
@@ -790,11 +1028,12 @@ def test_local_model_download_with_checksum_and_resume() -> None:
                 dest,
                 expected_size=len(payload),
                 expected_sha256=sha,
-                progress_callback=lambda done, total, stage: calls.append((done, total)),
+                progress_callback=lambda done, total, stage: calls.append((done, total, stage)),
             )
             with open(dest, "rb") as f:
                 assert f.read() == payload
             assert calls and calls[-1][0] == len(payload)
+            assert any(stage.startswith("Verifying") for _, _, stage in calls)
 
             # Resume: seed the .part file, then re-download and verify.
             os.remove(dest)
@@ -822,6 +1061,27 @@ def test_local_model_download_with_checksum_and_resume() -> None:
                 assert not os.path.exists(bad_dest + ".part")
         finally:
             server.shutdown()
+
+
+def test_local_model_disk_space_check() -> None:
+    from src import local_model
+
+    original_dir = local_model.LOCAL_MODEL_DIR
+    original_usage = local_model.shutil.disk_usage
+    original_runtime = local_model.ensure_runtime
+    local_model.LOCAL_MODEL_DIR = tempfile.mkdtemp(prefix="byteproof-disk-")
+    local_model.shutil.disk_usage = lambda _path: SimpleNamespace(free=50 * 1024 * 1024)
+    local_model.ensure_runtime = lambda *args, **kwargs: "/tmp/llama-server"
+    try:
+        try:
+            local_model.ensure_local_model("qwen3-1.7b")
+            raise AssertionError("Expected disk space failure")
+        except RuntimeError as exc:
+            assert "disk space" in str(exc)
+    finally:
+        local_model.shutil.disk_usage = original_usage
+        local_model.ensure_runtime = original_runtime
+        local_model.LOCAL_MODEL_DIR = original_dir
 
 
 def test_settings_new_pages() -> None:
@@ -906,7 +1166,9 @@ def test_local_download_worker_anchored_to_main_window() -> None:
             self.done.emit(self.model_id)
 
     original_worker = gui.LocalModelDownloadWorker
+    original_save = gui.save_runtime_settings
     gui.LocalModelDownloadWorker = FakeDownloadWorker
+    gui.save_runtime_settings = lambda _settings: None
     try:
         dialog._download_local_model("qwen3-4b")
         worker = getattr(window, "_local_download_worker", None)
@@ -916,6 +1178,7 @@ def test_local_download_worker_anchored_to_main_window() -> None:
         assert not worker.isRunning()
     finally:
         gui.LocalModelDownloadWorker = original_worker
+        gui.save_runtime_settings = original_save
         dialog.close()
         window.close()
 
@@ -942,7 +1205,9 @@ def test_local_model_use_button_active_state() -> None:
     app.processEvents()
 
     original_installed = gui.is_model_installed
+    original_save = gui.save_runtime_settings
     gui.is_model_installed = lambda _model_id: True
+    gui.save_runtime_settings = lambda _settings: None
     try:
         dialog._use_local_model("qwen3-4b")
         active_btn = dialog.local_model_cards["qwen3-4b"]["use"]
@@ -953,6 +1218,56 @@ def test_local_model_use_button_active_state() -> None:
         assert other_btn.isEnabled()
     finally:
         gui.is_model_installed = original_installed
+        gui.save_runtime_settings = original_save
+        dialog.close()
+        window.close()
+
+
+def test_local_download_done_activates_model() -> None:
+    """Download completion must install, activate, and persist the model."""
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    from src import gui, settings
+
+    window = gui.ProofreaderApp(1024, settings.load_runtime_settings())
+    dialog = gui.SettingsDialog(settings.load_runtime_settings(), window)
+    dialog.show()
+    app.processEvents()
+
+    class FakeDownloadWorker(gui.LocalModelDownloadWorker):
+        def run(self) -> None:
+            self.done.emit(self.model_id)
+
+    original_worker = gui.LocalModelDownloadWorker
+    original_installed = gui.is_model_installed
+    original_save = gui.save_runtime_settings
+    saved: list[dict[str, Any]] = []
+    gui.LocalModelDownloadWorker = FakeDownloadWorker
+    gui.is_model_installed = lambda mid: mid == "qwen3-4b-proofread"
+    gui.save_runtime_settings = lambda new_settings: saved.append(new_settings)
+    try:
+        dialog._download_local_model("qwen3-4b-proofread")
+        worker = getattr(window, "_local_download_worker", None)
+        assert worker is not None
+        assert worker.wait(3000)
+        app.processEvents()
+
+        assert dialog.settings["active_provider"] == settings.LOCAL_MODEL_PROVIDER
+        assert dialog.settings["local_model"]["active_model"] == "qwen3-4b-proofread"
+        assert (
+            dialog.settings["providers"][settings.LOCAL_MODEL_PROVIDER]["model"]
+            == "qwen3-4b-proofread"
+        )
+        assert window.settings["local_model"]["active_model"] == "qwen3-4b-proofread"
+        assert saved and saved[-1]["local_model"]["active_model"] == "qwen3-4b-proofread"
+        assert "ready" in dialog.local_status_label.text().lower()
+        assert dialog.local_model_cards["qwen3-4b-proofread"]["use"].text() == "Active"
+    finally:
+        gui.LocalModelDownloadWorker = original_worker
+        gui.is_model_installed = original_installed
+        gui.save_runtime_settings = original_save
         dialog.close()
         window.close()
 
@@ -1032,6 +1347,77 @@ def test_download_file_cancellation_keeps_partial_file() -> None:
             server.shutdown()
 
 
+def test_download_cancel_during_verification_keeps_partial_file() -> None:
+    """Cancelling while the checksum runs must keep the .part file for resume."""
+    import http.server
+    import socketserver
+    import threading
+
+    from src import local_model
+
+    payload = b"verification-cancel-payload-" * 2000
+    sha = hashlib.sha256(payload).hexdigest()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            tmpdir = tempfile.mkdtemp()
+            dest = os.path.join(tmpdir, "model.gguf")
+            cancel_event = threading.Event()
+            result: dict[str, Any] = {}
+
+            original_sha256 = local_model.hashlib.sha256
+
+            class CancellingSha256:
+                def __init__(self) -> None:
+                    self._inner = original_sha256()
+
+                def update(self, block: bytes) -> None:
+                    cancel_event.set()
+                    self._inner.update(block)
+                    raise local_model.DownloadCancelledError(
+                        "Download cancelled by user."
+                    )
+
+                def hexdigest(self) -> str:
+                    return self._inner.hexdigest()
+
+            local_model.hashlib.sha256 = lambda *args, **kwargs: CancellingSha256()
+            try:
+                try:
+                    local_model.download_file(
+                        f"http://127.0.0.1:{port}/model.gguf",
+                        dest,
+                        expected_size=len(payload),
+                        expected_sha256=sha,
+                        cancel_event=cancel_event,
+                    )
+                    result["ok"] = True
+                except Exception as exc:
+                    result["error"] = exc
+            finally:
+                local_model.hashlib.sha256 = original_sha256
+
+            assert "ok" not in result
+            assert isinstance(result.get("error"), local_model.DownloadCancelledError)
+            assert not os.path.exists(dest)
+            assert os.path.exists(dest + ".part")
+        finally:
+            server.shutdown()
+
+
 def test_double_escape_cancels_download() -> None:
 
     from PyQt6.QtCore import QEvent, Qt
@@ -1087,8 +1473,12 @@ def main() -> None:
     print("PASS licensing roundtrip")
     test_activation_from_url()
     print("PASS activation from URL")
-    test_trial_expired_disables_proofreading()
-    print("PASS trial expiry blocks proofreading")
+    test_trial_expired_enters_free_mode()
+    print("PASS trial expiry enters free mode")
+    test_free_mode_daily_cap()
+    print("PASS free mode daily cap")
+    test_ensure_trial_started_uses_earliest_secondary()
+    print("PASS trial hardening uses earliest start")
     test_hotkey_conversion()
     print("PASS hotkey conversion")
     test_gui_constructs()
@@ -1099,6 +1489,8 @@ def main() -> None:
     print("PASS provider connection tester")
     test_strict_editing_rules()
     print("PASS strict editing rules")
+    test_local_model_output_cleaning()
+    print("PASS local model output cleaning")
     test_polish_prompt_and_flow()
     print("PASS polish prompt + flow")
     test_generic_gui_flow()
@@ -1141,6 +1533,8 @@ def main() -> None:
     print("PASS local model catalog + recommendation")
     test_local_model_download_with_checksum_and_resume()
     print("PASS local model download (checksum + resume)")
+    test_local_model_disk_space_check()
+    print("PASS local model disk space check")
     test_settings_new_pages()
     print("PASS settings new pages")
     test_resolve_local_provider_without_api_key()
@@ -1155,6 +1549,10 @@ def main() -> None:
     print("PASS provider free badges only local + Ollama")
     test_download_file_cancellation_keeps_partial_file()
     print("PASS download file cancellation keeps partial file")
+    test_download_cancel_during_verification_keeps_partial_file()
+    print("PASS download cancel during verification keeps partial file")
+    test_local_download_done_activates_model()
+    print("PASS local download done activates model")
     test_double_escape_cancels_download()
     print("PASS double escape cancels download")
     print("\nALL_SMOKE_TESTS_PASSED")

@@ -1,13 +1,15 @@
 """In-app local model engine for ByteProof.
 
-ByteProof can download a small Qwen3 GGUF model and run it entirely on the
-user's machine through llama.cpp's OpenAI-compatible server. The first run
-downloads the runtime (~30 MB) and the model (~2.5-9 GB) with progress,
-resume, and SHA-256 verification. After that, proofreading is private,
-offline, and unlimited.
+ByteProof can download a small GGUF model (Phi-4 Mini or Qwen3) and run it
+entirely on the user's machine through llama.cpp's OpenAI-compatible server.
+The first run downloads the runtime (~30 MB) and the model (~1.2-9 GB) with
+progress, resume, and SHA-256 verification. After that, proofreading is
+private and offline. Local AI remains available in the limited free mode after
+the 7-day trial (3 proofreads/day); the $20 license unlocks unlimited use.
 
 The catalog is intentionally small and conservative: Qwen3 models are Apache
-2.0, which is safe to bundle and redistribute in a commercial app.
+2.0 and Phi-4 Mini is MIT, which are both safe to bundle and redistribute in a
+commercial app.
 """
 
 from __future__ import annotations
@@ -63,23 +65,62 @@ REMOTE_MANIFEST_ENABLED = False
 
 MODEL_CATALOG: list[dict[str, Any]] = [
     {
+        "id": "qwen3-1.7b",
+        "name": "Qwen3 1.7B",
+        "params": "1.7B",
+        "tag": "Ultra light",
+        "file": "Qwen3-1.7B-q4_k_m.gguf",
+        "url": "https://huggingface.co/jburnford/dyslexic-writer-qwen3-1.7b/resolve/main/Qwen3-1.7B-q4_k_m.gguf",
+        "size_bytes": 1282439232,
+        "sha256": "c4ad6b2a7ffa5393066d7b75615c827d951a0c7930799a80764c0ffcb8a6a48d",
+        "min_ram_gb": 6,
+        "license": "Apache 2.0",
+        "description": "Proofreading-tuned. Fastest option for older or low-RAM computers (6 GB+).",
+    },
+    {
+        "id": "qwen3-4b-proofread",
+        "name": "Qwen3 4B Proofreading",
+        "params": "4B",
+        "tag": "Proofreading tuned",
+        "file": "Qwen3-4B-q4_k_m.gguf",
+        "url": "https://huggingface.co/jburnford/dyslexic-writer-qwen3-4b/resolve/main/Qwen3-4B-q4_k_m.gguf",
+        "size_bytes": 2497280608,
+        "sha256": "aff288097e38c3498eff321c1325f1596cb7c2e386fc992de193851fd79b0c6e",
+        "min_ram_gb": 8,
+        "license": "Apache 2.0",
+        "description": "Fine-tuned specifically for proofreading; a good alternative to try.",
+    },
+    {
         "id": "qwen3-4b",
         "name": "Qwen3 4B",
         "params": "4B",
-        "tag": "Fast & private",
+        "tag": "General",
         "file": "Qwen3-4B-Q4_K_M.gguf",
         "url": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
         "size_bytes": 2497280256,
         "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
         "min_ram_gb": 8,
         "license": "Apache 2.0",
-        "description": "Best default for 8 GB machines. Handles most academic proofreading well.",
+        "description": "Balanced general model. Handles academic proofreading with good multilingual support.",
+    },
+    {
+        "id": "phi4-mini",
+        "name": "Phi-4 Mini",
+        "params": "3.8B",
+        "tag": "Recommended",
+        "file": "Phi-4-mini-instruct-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf",
+        "size_bytes": 2491874400,
+        "sha256": "3c4d3cbdf3006d81444f6c7a5a56eb93d8e0f0e2ba5963b8ab62f9fd42604233",
+        "min_ram_gb": 8,
+        "license": "MIT",
+        "description": "Microsoft's Phi-4 Mini — strong English grammar correction with the safest MIT license.",
     },
     {
         "id": "qwen3-8b",
         "name": "Qwen3 8B",
         "params": "8B",
-        "tag": "Recommended",
+        "tag": "Powerful",
         "file": "Qwen3-8B-Q4_K_M.gguf",
         "url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
         "size_bytes": 5027783488,
@@ -241,8 +282,10 @@ def recommend_model(hardware: dict[str, Any] | None = None) -> dict[str, Any]:
     """Pick the best local model for the user's RAM."""
     hw = hardware or detect_hardware()
     ram = hw.get("total_ram_gb", 8.0)
-    if ram < 12:
-        return get_model("qwen3-4b")
+    if ram < 7:
+        return get_model("qwen3-1.7b")
+    if ram < 16:
+        return get_model("phi4-mini")
     if ram < 20:
         return get_model("qwen3-8b")
     return get_model("qwen3-14b")
@@ -310,9 +353,13 @@ def download_file(
             response.close()
 
     if expected_sha256:
+        if progress_callback is not None:
+            progress_callback(downloaded, downloaded, "Verifying download…")
         sha = hashlib.sha256()
         with open(part_path, "rb") as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise DownloadCancelledError("Download cancelled by user.")
                 sha.update(block)
         if sha.hexdigest().lower() != expected_sha256.lower():
             if os.path.exists(part_path):
@@ -446,6 +493,8 @@ def ensure_runtime(
         )
 
     extract_dir = os.path.join(RUNTIME_DIR, tag)
+    if progress_callback is not None:
+        progress_callback(0, 0, "Installing the local AI engine…")
     if os.path.isdir(extract_dir):
         shutil.rmtree(extract_dir, ignore_errors=True)
     os.makedirs(extract_dir, exist_ok=True)
@@ -482,6 +531,19 @@ def ensure_local_model(
     model = get_model(model_id)
     path = model_path(model_id)
     if not is_model_installed(model_id):
+        part_path = path + ".part"
+        part_size = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+        remaining = max(0, model["size_bytes"] - part_size)
+        try:
+            free = shutil.disk_usage(os.path.dirname(path) or ".").free
+        except OSError:
+            free = None
+        if free is not None and free < remaining + 512 * 1024 * 1024:
+            raise RuntimeError(
+                f"Not enough free disk space. {model['name']} needs about "
+                f"{model_size_gb(model_id):.1f} GB, and only "
+                f"{free / (1024 ** 3):.1f} GB is available."
+            )
         if progress_callback is not None:
             progress_callback(
                 0,
@@ -566,6 +628,7 @@ class LocalModelServer:
             "--ctx-size", "8192",
             "--parallel", "1",
             "--no-webui",
+            "--reasoning-budget", "0",
             "--alias", self.model_id,
         ]
         hw = detect_hardware()

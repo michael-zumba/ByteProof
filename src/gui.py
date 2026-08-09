@@ -65,14 +65,15 @@ from .app_version import check_for_updates, download_update
 from .autostart import set_launch_at_login
 from .generic_editing import get_generic_editor, normalize_selection_text
 from .licensing import (
-    TRIAL_DAYS,
+    activate_license as activate_license_key,
+)
+from .licensing import (
     ensure_trial_started,
+    get_access_status,
     get_license_info,
     get_trial_status,
     is_licensed,
-)
-from .licensing import (
-    activate_license as activate_license_key,
+    record_proofread_usage,
 )
 from .local_model import (
     MODEL_CATALOG,
@@ -909,7 +910,7 @@ class SettingsDialog(QDialog):
         self.temp_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.temp_slider.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        current_temp = self.settings.get("general", {}).get("temperature", 0.7)
+        current_temp = self.settings.get("general", {}).get("temperature", 0.3)
         current_temp = max(0.0, min(2.0, current_temp))
         self.temp_slider.setValue(int(current_temp * 10))
         
@@ -959,12 +960,21 @@ class SettingsDialog(QDialog):
         self.combo_comment = QComboBox()
         self.combo_comment.addItems(["None", "Language", "Technical (Reviewer)"])
 
-        current_comment = self.settings.get("general", {}).get("comment_type", "None")
-        comment_index = self.combo_comment.findText(current_comment)
-        if comment_index >= 0:
-            self.combo_comment.setCurrentIndex(comment_index)
-        else:
+        access = get_access_status()
+        if access.get("tier") == "free":
             self.combo_comment.setCurrentIndex(0)
+            self.combo_comment.setEnabled(False)
+            self.combo_comment.setToolTip(
+                "Reviewer comments require a ByteProof license."
+            )
+
+        if access.get("tier") != "free":
+            current_comment = self.settings.get("general", {}).get("comment_type", "None")
+            comment_index = self.combo_comment.findText(current_comment)
+            if comment_index >= 0:
+                self.combo_comment.setCurrentIndex(comment_index)
+            else:
+                self.combo_comment.setCurrentIndex(0)
 
         spelling_layout.addRow("Add Reviewer Comment:", self.combo_comment)
 
@@ -1165,12 +1175,25 @@ class SettingsDialog(QDialog):
         scroll.setWidget(content)
         layout.addWidget(scroll)
         self.pages.addWidget(self.connect_page)
+        self._refresh_connect_tab()
 
     def _refresh_connect_tab(self) -> None:
         """Update provider cards in place without rebuilding the page."""
         active_provider = self.settings.get("active_provider", LOCAL_MODEL_PROVIDER)
+        access = get_access_status()
+        free_mode = access.get("tier") == "free"
         for provider_name, btn in self.provider_buttons.items():
             btn.setChecked(provider_name == active_provider)
+            provider_info = PROVIDERS.get(provider_name, {})
+            is_local = bool(
+                provider_info.get("is_local") or provider_name == "Ollama (Local)"
+            )
+            if free_mode and not is_local:
+                btn.setEnabled(False)
+                btn.setToolTip("Requires a ByteProof license")
+            else:
+                btn.setEnabled(True)
+                btn.setToolTip("")
             if provider_name == active_provider:
                 btn.setText("Active")
                 btn.setStyleSheet("QPushButton { background-color: #1A3A2A; color: white; border: 1px solid #143024; border-radius: 10px; padding: 6px 12px; font-weight: 620; }")
@@ -1199,6 +1222,10 @@ class SettingsDialog(QDialog):
 
             if provider_name == active_provider:
                 status_text += " · Active"
+            if free_mode and not (
+                provider_info.get("is_local") or provider_name == "Ollama (Local)"
+            ):
+                status_text += " · License required"
             lbl.setText(status_text)
             lbl.setStyleSheet(f"color: {status_color}; font-size: 11px;")
 
@@ -1227,7 +1254,8 @@ class SettingsDialog(QDialog):
 
         subtitle = QLabel(
             "Private, offline proofreading on your computer. Download once and "
-            "use it unlimited — no account, no API key, no internet needed."
+            "run it locally — no account, no API key, no internet needed. "
+            "The $20 license unlocks unlimited use."
         )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
@@ -1252,7 +1280,10 @@ class SettingsDialog(QDialog):
         hw_layout.addWidget(hw_line1)
         self.local_recommend_label = QLabel()
         self.local_recommend_label.setStyleSheet("color: #1F5335; font-size: 12px; font-weight: 600;")
-        self.local_recommend_label.setText(f"Recommended: {recommended['name']} ({recommended['params']})")
+        self.local_recommend_label.setText(
+            f"Recommended: {recommended['name']} ({recommended['params']}) · "
+            f"{model_size_label(recommended)}"
+        )
         hw_layout.addWidget(self.local_recommend_label)
         layout.addWidget(hw_card)
 
@@ -1315,6 +1346,12 @@ class SettingsDialog(QDialog):
             status_lbl = QLabel("")
             status_lbl.setStyleSheet("color: #059669; font-size: 11px;")
             info_col.addWidget(status_lbl)
+
+            desc_lbl = QLabel(model.get("description", ""))
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setStyleSheet("color: #57534E; font-size: 11px;")
+            info_col.addWidget(desc_lbl)
+
             row.addLayout(info_col, stretch=1)
 
             btn_use = QPushButton("Use")
@@ -1383,6 +1420,9 @@ class SettingsDialog(QDialog):
         self.settings["active_provider"] = LOCAL_MODEL_PROVIDER
         self.settings["local_model"]["active_model"] = model_id
         self.settings["providers"][LOCAL_MODEL_PROVIDER]["model"] = model_id
+        parent = _find_owner_window(self)
+        if parent is not None:
+            parent._apply_local_model_selection(model_id)
         self._refresh_connect_tab()
         self._refresh_local_tab()
 
@@ -1395,6 +1435,7 @@ class SettingsDialog(QDialog):
             widgets["download"].setEnabled(mid != model_id)
             if mid == model_id:
                 widgets["download"].setText("Downloading…")
+        self.local_status_label.setStyleSheet("color: #57534E; font-size: 12px;")
         self.local_status_label.setText(f"Preparing {get_model(model_id)['name']}…")
 
         worker = LocalModelDownloadWorker(model_id)
@@ -1409,6 +1450,7 @@ class SettingsDialog(QDialog):
 
     def _on_local_download_progress(self, done: int, total: int, stage: str) -> None:
         try:
+            shown_done = 0
             if total > 0:
                 shown_done = min(done, total)
                 pct = int(shown_done * 100 / total) if total else 0
@@ -1416,6 +1458,7 @@ class SettingsDialog(QDialog):
                 self.local_progress.setRange(0, total)
                 self.local_progress.setValue(shown_done)
                 self.local_progress.setFormat(size_text)
+                self.local_status_label.setStyleSheet("color: #B45309; font-size: 12px;")
                 self.local_status_label.setText(
                     f"{stage or 'Downloading'} — {size_text}"
                 )
@@ -1423,6 +1466,21 @@ class SettingsDialog(QDialog):
                 self.local_progress.setRange(0, 0)
                 self.local_progress.setFormat(stage or "Working…")
             self.local_progress.setVisible(True)
+            downloading = getattr(self, "_local_downloading", None)
+            if downloading is not None and downloading in self.local_model_cards:
+                card_status = self.local_model_cards[downloading]["status"]
+                if total > 0:
+                    pct = int(shown_done * 100 / total) if total else 0
+                    if stage.startswith("Verifying"):
+                        card_status.setText(f"Verifying… {pct}%")
+                    else:
+                        card_status.setText(
+                            f"Downloading {pct}% · {_format_bytes(shown_done)} / "
+                            f"{_format_bytes(total)}"
+                        )
+                else:
+                    card_status.setText(stage or "Downloading…")
+                card_status.setStyleSheet("color: #B45309; font-size: 11px;")
         except RuntimeError:
             pass
 
@@ -1430,8 +1488,12 @@ class SettingsDialog(QDialog):
         try:
             self._local_downloading = None
             self.local_progress.setVisible(False)
-            self.local_status_label.setText(f"{get_model(model_id)['name']} is installed.")
-            self._refresh_local_tab()
+            self._use_local_model(model_id)
+            self.local_status_label.setStyleSheet("color: #059669; font-size: 12px;")
+            self.local_status_label.setText(
+                f"{get_model(model_id)['name']} is installed and ready. "
+                "It starts automatically when you proofread."
+            )
         except RuntimeError:
             pass
 
@@ -1528,8 +1590,7 @@ class SettingsDialog(QDialog):
             return
         active_model = resolve_model_id(self.settings.get("local_model", {}).get("active_model"))
         self.settings["local_model"]["active_model"] = active_model
-        if not self.settings["providers"][LOCAL_MODEL_PROVIDER].get("model"):
-            self.settings["providers"][LOCAL_MODEL_PROVIDER]["model"] = active_model
+        self.settings["providers"][LOCAL_MODEL_PROVIDER]["model"] = active_model
 
         for model_id, widgets in self.local_model_cards.items():
             installed = is_model_installed(model_id)
@@ -2148,10 +2209,10 @@ class ProofreaderApp(QMainWindow):
         app_inst = QApplication.instance()
         if app_inst is not None:
             try:
-                app_inst.aboutToQuit.disconnect(stop_local_server)
+                app_inst.aboutToQuit.disconnect(self._on_about_to_quit)
             except TypeError:
                 pass
-            app_inst.aboutToQuit.connect(stop_local_server)
+            app_inst.aboutToQuit.connect(self._on_about_to_quit)
         icon_path = resource_path(os.path.join("logo", "logo.png"))
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -2567,7 +2628,7 @@ class ProofreaderApp(QMainWindow):
                 msg.setWindowTitle(f"Welcome to {APP_NAME}")
                 msg.setText("ByteProof's private local AI is ready to download.")
                 msg.setInformativeText(
-                    "Download a small Qwen3 model to proofread offline with no "
+                    "Download a small local AI model to proofread offline with no "
                     "API key and no monthly fee. The right size is picked "
                     "automatically for your computer."
                 )
@@ -2840,14 +2901,31 @@ class ProofreaderApp(QMainWindow):
             if worker is not None and worker.isRunning():
                 worker.cancel_event.set()
 
+    def _on_about_to_quit(self) -> None:
+        """Cancel in-flight downloads/server starts before the app exits."""
+        self._cancel_active_local_task()
+        for attr in ("_local_download_worker", "_local_server_worker"):
+            worker = getattr(self, attr, None)
+            if worker is not None and worker.isRunning():
+                # The download loop checks cancellation between chunks; one
+                # stalled socket read can take up to the 60s timeout.
+                worker.wait(60_000)
+        stop_local_server()
+
     def _check_trial_status_at_startup(self) -> None:
         if is_licensed():
             return
         trial = get_trial_status(ensure_trial_started())
         if trial["in_trial"] and 0 < trial["days_left"] <= 3:
-            day_text = "day" if trial["days_left"] == 1 else "days"
+            if trial["days_left"] == 1:
+                message = "Trial ends tomorrow — purchase a license to keep unlimited access."
+            else:
+                message = (
+                    f"Trial ends in {trial['days_left']} days — "
+                    "purchase a license to keep unlimited access."
+                )
             self._show_toast(
-                f"Trial ends in {trial['days_left']} {day_text} — purchase a license.",
+                message,
                 kind="warning",
             )
 
@@ -3200,21 +3278,19 @@ class ProofreaderApp(QMainWindow):
         self.activateWindow()
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
 
-    def _check_license_access(self) -> bool:
-        if is_licensed():
-            return True
-
-        trial_ts = ensure_trial_started()
-        trial = get_trial_status(trial_ts)
-
-        if trial["in_trial"]:
-            return True
-
+    def _show_purchase_dialog(self, title: str, text: str, recap: str = "") -> None:
         msg = QMessageBox(self)
-        msg.setWindowTitle("Trial Expired")
+        msg.setWindowTitle(title)
         msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setText(f"Your {TRIAL_DAYS}-day free trial has ended.")
-        msg.setInformativeText(f"Purchase a license to continue using {APP_NAME}.\n\nClick 'Purchase' to buy a license, then activate it with the key you receive.")
+        msg.setText(text)
+        info = recap
+        if info:
+            info += "\n\n"
+        info += (
+            "Click 'Purchase' to buy a license, then activate it with the key "
+            "you receive."
+        )
+        msg.setInformativeText(info)
         buy_btn = msg.addButton("Purchase", QMessageBox.ButtonRole.ActionRole)
         activate_btn = msg.addButton("Activate License", QMessageBox.ButtonRole.ActionRole)
         paid_btn = msg.addButton(
@@ -3232,24 +3308,100 @@ class ProofreaderApp(QMainWindow):
         elif msg.clickedButton() == paid_btn:
             self._prompt_auto_activation()
 
-        return False
+    def _check_license_access(self) -> bool:
+        access = get_access_status()
+        if access.get("licensed") or access.get("in_trial"):
+            return True
+
+        provider = self.settings.get("active_provider", LOCAL_MODEL_PROVIDER)
+        provider_info = PROVIDERS.get(provider, {})
+        is_local = bool(provider_info.get("is_local") or provider == "Ollama (Local)")
+
+        trial_used = int(access.get("trial_usage", 0))
+        recap = (
+            f"You proofread {trial_used} selection"
+            f"{'s' if trial_used != 1 else ''} during your trial."
+        )
+
+        if not access.get("free_mode_allowed"):
+            self._show_purchase_dialog(
+                "Free Limit Reached",
+                f"You've used all {access.get('daily_limit', 3)} free proofreads for today.",
+                recap,
+            )
+            return False
+
+        if not is_local:
+            self._show_purchase_dialog(
+                "Cloud Providers Require a License",
+                "Cloud AI providers are available with a ByteProof license.",
+                recap,
+            )
+            return False
+
+        return True
 
     def _update_proofread_button(self) -> None:
-        if is_licensed():
+        access = get_access_status()
+        if access.get("licensed"):
             self.run_btn.setText("Proofread Selection Now")
             self.run_btn.setToolTip("")
             self.run_btn.setEnabled(True)
+            return
+
+        if access.get("in_trial"):
+            days = int(access.get("days_left", 0))
+            self.run_btn.setText("Proofread Selection Now")
+            self.run_btn.setToolTip(
+                f"{days} day{'' if days == 1 else 's'} remaining in free trial"
+            )
+            self.run_btn.setEnabled(True)
+            return
+
+        remaining = max(
+            0,
+            int(access.get("daily_limit", 3)) - int(access.get("daily_count", 0)),
+        )
+        if remaining > 0:
+            self.run_btn.setText(f"Free mode - {remaining} left today")
+            self.run_btn.setToolTip(
+                f"Local AI only · {remaining} proofread"
+                f"{'' if remaining == 1 else 's'} left today · "
+                "Purchase a license for unlimited use"
+            )
+            self.run_btn.setEnabled(True)
         else:
-            trial_ts = ensure_trial_started()
-            trial = get_trial_status(trial_ts)
-            if trial["in_trial"]:
-                self.run_btn.setText("Proofread Selection Now")
-                self.run_btn.setToolTip(f"{trial['days_left']} day{'' if trial['days_left'] == 1 else 's'} remaining in free trial")
-                self.run_btn.setEnabled(True)
-            else:
-                self.run_btn.setText("Trial Expired - Purchase License")
-                self.run_btn.setToolTip("Your free trial has ended. Purchase a license to continue.")
-                self.run_btn.setEnabled(False)
+            self.run_btn.setText("Free Limit Reached - Upgrade")
+            self.run_btn.setToolTip(
+                "You've used all your free proofreads for today. "
+                "Purchase a license to continue."
+            )
+            self.run_btn.setEnabled(True)
+
+    def _proofread_consumes_usage(self, status_text: str) -> bool:
+        if not status_text:
+            return False
+        if status_text.startswith("Error"):
+            return False
+        if status_text.startswith("REVIEW_NEEDED:"):
+            return True
+        non_consuming = (
+            "Selection is empty.",
+            "Selection too short.",
+            "Skipped:",
+            "No text selected",
+            "No API keys configured",
+            "No app with selected text",
+            "Could not detect",
+            "Free mode is limited",
+            "You have used all your free proofreads",
+        )
+        return not status_text.startswith(non_consuming)
+
+    def _record_usage_if_completed(self, status_text: str) -> None:
+        if self._proofread_consumes_usage(status_text):
+            record_proofread_usage()
+            self._update_proofread_button()
 
     def _open_license_tab(self) -> None:
         try:
@@ -3266,6 +3418,13 @@ class ProofreaderApp(QMainWindow):
             self._update_proofread_button()
         except Exception as e:
             print(f"Error opening license tab: {e}")
+
+    def _apply_local_model_selection(self, model_id: str) -> None:
+        """Persist a local model choice made from the Settings dialog."""
+        self.settings["active_provider"] = LOCAL_MODEL_PROVIDER
+        self.settings["local_model"]["active_model"] = model_id
+        self.settings["providers"][LOCAL_MODEL_PROVIDER]["model"] = model_id
+        save_runtime_settings(self.settings)
 
     def open_settings_local(self) -> None:
         try:
@@ -3502,7 +3661,7 @@ class ProofreaderApp(QMainWindow):
 
     def closeEvent(self, a0: Any) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
-            stop_local_server()
+            self._on_about_to_quit()
             QApplication.quit()
             if a0 is not None:
                 a0.accept()
@@ -3512,6 +3671,7 @@ class ProofreaderApp(QMainWindow):
             a0.ignore()
 
     def handle_result(self, status_text: str, original: str, corrected: str, comment: str = "", review_start: int = 0) -> None:
+        self._record_usage_if_completed(status_text)
         self._set_corrected_for_copy(corrected)
         if getattr(self.worker, "mode", "word") == "generic":
             self._handle_generic_result(status_text, original, corrected, comment)

@@ -41,15 +41,17 @@ SETTINGS_FILE = os.path.join(APP_SUPPORT_DIR, "settings.json")
 PROVIDERS = {
     LOCAL_MODEL_PROVIDER: {
         "base_url": "",
-        "model": "qwen3-4b",
+        "model": "phi4-mini",
         "default_keys": [],
         "is_free": True,
         "is_local": True,
         "badge": "LOCAL",
         "max_output_tokens": 8192,
         "install_guide": (
-            "ByteProof downloads a small Qwen3 model to your computer and runs "
-            "it privately — no API key, no account, unlimited use.\n\n"
+            "ByteProof downloads a small local model (Phi-4 Mini or Qwen3) to "
+            "your computer and runs it privately — no API key, no account, "
+            "and it stays available in the limited free mode after your "
+            "7-day trial. The $20 license unlocks unlimited use.\n\n"
             "Open the Local AI tab to pick a model and download it. The "
             "recommended size depends on your RAM."
         ),
@@ -155,7 +157,7 @@ def load_runtime_settings() -> dict[str, Any]:
             "keep_on_top": True,
             "auto_apply": True,
             "play_sound_on_proofread": True,
-            "temperature": 0.7,
+            "temperature": 0.3,
             "spelling": "UK/AU/NZ",
             "style": "Precise (Minimal Changes)",
             "comment_type": "None",
@@ -193,14 +195,14 @@ def load_runtime_settings() -> dict[str, Any]:
         }
 
     if not os.path.exists(SETTINGS_FILE):
-        settings["general"]["temperature"] = 0.7
+        settings["general"]["temperature"] = 0.3
         return settings
 
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             loaded = json.load(f)
     except (json.JSONDecodeError, OSError):
-        settings["general"]["temperature"] = 0.7
+        settings["general"]["temperature"] = 0.3
         return settings
 
     # Migration logic
@@ -215,15 +217,15 @@ def load_runtime_settings() -> dict[str, Any]:
         if "model" in loaded:
             settings["providers"]["DeepSeek"]["model"] = loaded["model"].strip()
             
-        settings["general"]["temperature"] = 0.7
+        settings["general"]["temperature"] = 0.3
     else:
         # New format
         if "general" in loaded:
             settings["general"].update(loaded["general"])
             if "temperature" not in loaded["general"]:
-                settings["general"]["temperature"] = 0.7
+                settings["general"]["temperature"] = 0.3
         else:
-             settings["general"]["temperature"] = 0.7
+             settings["general"]["temperature"] = 0.3
         
         if "active_provider" in loaded and loaded["active_provider"] in PROVIDERS:
             settings["active_provider"] = loaded["active_provider"]
