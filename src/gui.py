@@ -71,9 +71,6 @@ from .app_version import check_for_updates, download_update
 from .autostart import set_launch_at_login
 from .generic_editing import get_generic_editor, normalize_selection_text
 from .licensing import (
-    activate_license as activate_license_key,
-)
-from .licensing import (
     ensure_trial_started,
     get_access_status,
     get_license_info,
@@ -732,7 +729,6 @@ class SettingsDialog(QDialog):
     lbl_status: QLabel
     lbl_msg: QLabel
     btn_buy: QPushButton
-    btn_activate: QPushButton
     btn_auto_activate: QPushButton
 
     def __init__(self, settings: dict[str, Any], parent: QWidget | None = None) -> None:
@@ -1818,25 +1814,7 @@ class SettingsDialog(QDialog):
         self.btn_buy.clicked.connect(lambda: open_purchase_url(self))
         layout.addWidget(self.btn_buy)
         
-        self.btn_activate = QPushButton("Activate License Key")
-        self.btn_activate.setFlat(True)
-        self.btn_activate.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_activate.setStyleSheet("""
-            QPushButton {
-                color: #1A3A2A;
-                text-align: left;
-                padding-left: 0;
-                border: none;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                text-decoration: underline;
-            }
-        """)
-        self.btn_activate.clicked.connect(self.activate_license)
-        layout.addWidget(self.btn_activate)
-
-        self.btn_auto_activate = QPushButton("I've Paid — Activate Automatically")
+        self.btn_auto_activate = QPushButton("Already Paid? Activate with Email")
         self.btn_auto_activate.setFlat(True)
         self.btn_auto_activate.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_auto_activate.setStyleSheet("""
@@ -1874,7 +1852,6 @@ class SettingsDialog(QDialog):
         
         if lic_status == "licensed" and lic_info.get("expiry") is None:
             self.btn_buy.setVisible(False)
-            self.btn_activate.setVisible(False)
             self.btn_auto_activate.setVisible(False)
             self.btn_deactivate.setVisible(True)
         else:
@@ -2064,68 +2041,12 @@ class SettingsDialog(QDialog):
             self.settings["providers"][provider_name]["model"] = input_model.text().strip()
             self._refresh_connect_tab()
 
-    def activate_license(self) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Activate License")
-        dialog.setModal(True)
-        dialog.resize(480, 220)
-        dialog.setStyleSheet("QDialog { background-color: #FAF8F5; }")
-
-        dlg_layout = QVBoxLayout(dialog)
-        dlg_layout.setSpacing(14)
-        dlg_layout.setContentsMargins(20, 20, 20, 20)
-
-        dlg_layout.addWidget(QLabel("Enter your license key below:"))
-        key_input = QLineEdit()
-        key_input.setPlaceholderText("Paste your license key here")
-        key_input.setMinimumHeight(36)
-        dlg_layout.addWidget(key_input)
-
-        error_lbl = QLabel("")
-        error_lbl.setStyleSheet("color: #B91C1C; font-size: 11px;")
-        dlg_layout.addWidget(error_lbl)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        btn_layout.addWidget(cancel_btn)
-        activate_btn = QPushButton("Activate")
-        activate_btn.setStyleSheet("QPushButton { background-color: #1A3A2A; color: white; border-radius: 10px; font-weight: 620; padding: 8px 18px; } QPushButton:hover { background-color: #143024; }")
-        activate_btn.clicked.connect(dialog.accept)
-        btn_layout.addWidget(activate_btn)
-        dlg_layout.addLayout(btn_layout)
-
-        def attempt_activation():
-            raw_key = key_input.text().strip()
-            if not raw_key:
-                error_lbl.setText("Please enter a license key.")
-                return
-            result = activate_license_key(raw_key)
-            if result.get("valid"):
-                QMessageBox.information(dialog, "Activation Successful",
-                    f"License activated for {result.get('email', 'Unknown')}.")
-                dialog.done(QDialog.DialogCode.Accepted)
-            else:
-                error_lbl.setText(result.get("error", "Activation failed."))
-
-        activate_btn.clicked.disconnect()
-        activate_btn.clicked.connect(attempt_activation)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.settings["license"]["status"] = "licensed"
-            self._refresh_license_tab()
-            parent = self.parent()
-            if isinstance(parent, ProofreaderApp):
-                parent._update_proofread_button()
-            save_runtime_settings(self.settings)
-
     def _auto_activate_from_email(self) -> None:
         from PyQt6.QtWidgets import QInputDialog
 
         email, ok = QInputDialog.getText(
             self,
-            "Activate Automatically",
+            "Activate with Email",
             "Enter the email you used at checkout:",
         )
         if not ok or not email.strip():
@@ -2183,16 +2104,17 @@ class SettingsDialog(QDialog):
         if lic_status == "licensed":
             self.lbl_status.setText("Licensed")
             self.lbl_status.setStyleSheet("color: #065F46;")
-            self.lbl_msg.setText(f"Licensed to {lic_info.get('email', 'Unknown')}.")
+            self.lbl_msg.setText(
+                f"Licensed to {lic_info.get('email', 'Unknown')}. "
+                "Works on up to 2 computers."
+            )
             self.lbl_msg.setStyleSheet("color: #065F46; font-size: 12px;")
             if lic_info.get("expiry") is None:
                 self.btn_buy.setVisible(False)
-                self.btn_activate.setVisible(False)
                 self.btn_auto_activate.setVisible(False)
                 self.btn_deactivate.setVisible(True)
             else:
                 self.btn_buy.setVisible(True)
-                self.btn_activate.setVisible(False)
                 self.btn_auto_activate.setVisible(False)
                 self.btn_deactivate.setVisible(False)
         elif lic_status == "expired":
@@ -2201,25 +2123,28 @@ class SettingsDialog(QDialog):
             self.lbl_msg.setText(f"License for {lic_info.get('email', 'Unknown')} has expired. Please renew.")
             self.lbl_msg.setStyleSheet("color: #B91C1C; font-size: 12px;")
             self.btn_buy.setVisible(True)
-            self.btn_activate.setVisible(True)
             self.btn_auto_activate.setVisible(True)
             self.btn_deactivate.setVisible(False)
         elif trial["in_trial"]:
             self.lbl_status.setText(f"Free Trial ({trial['days_left']} day{'s' if trial['days_left'] != 1 else ''} left)")
             self.lbl_status.setStyleSheet("color: #D97706;")
-            self.lbl_msg.setText("Support development by purchasing a license.")
+            self.lbl_msg.setText(
+                "Everything included for 7 days. Buy a license, or activate "
+                "with the email you used at checkout."
+            )
             self.lbl_msg.setStyleSheet("color: #78716C; font-size: 12px;")
             self.btn_buy.setVisible(True)
-            self.btn_activate.setVisible(True)
             self.btn_auto_activate.setVisible(True)
             self.btn_deactivate.setVisible(False)
         else:
             self.lbl_status.setText("Trial Expired")
             self.lbl_status.setStyleSheet("color: #B91C1C;")
-            self.lbl_msg.setText("Your free trial has ended. Purchase a license to continue.")
+            self.lbl_msg.setText(
+                "Your free trial has ended. Buy a license, or activate with "
+                "the email you used at checkout."
+            )
             self.lbl_msg.setStyleSheet("color: #B91C1C; font-size: 12px;")
             self.btn_buy.setVisible(True)
-            self.btn_activate.setVisible(True)
             self.btn_auto_activate.setVisible(True)
             self.btn_deactivate.setVisible(False)
 
@@ -3054,7 +2979,7 @@ class ProofreaderApp(QMainWindow):
 
         email, ok = QInputDialog.getText(
             self,
-            "Activate Automatically",
+            "Activate with Email",
             "Enter the email you used at checkout:",
         )
         if ok and email.strip():
@@ -3388,14 +3313,14 @@ class ProofreaderApp(QMainWindow):
         if info:
             info += "\n\n"
         info += (
-            "Click 'Purchase' to buy a license, then activate it with the key "
-            "you receive."
+            "Click 'Purchase' to buy a license. If you have already paid, "
+            "choose 'Already Paid — Activate with Email' and enter the email "
+            "you used at checkout."
         )
         msg.setInformativeText(info)
         buy_btn = msg.addButton("Purchase", QMessageBox.ButtonRole.ActionRole)
-        activate_btn = msg.addButton("Activate License", QMessageBox.ButtonRole.ActionRole)
         paid_btn = msg.addButton(
-            "I've Paid — Activate Automatically",
+            "Already Paid — Activate with Email",
             QMessageBox.ButtonRole.ActionRole,
         )
         msg.addButton(QMessageBox.StandardButton.Cancel)
@@ -3403,9 +3328,6 @@ class ProofreaderApp(QMainWindow):
 
         if msg.clickedButton() == buy_btn:
             open_purchase_url(self)
-        elif msg.clickedButton() == activate_btn:
-            self.open_settings()
-            QTimer.singleShot(300, lambda: self._open_license_tab())
         elif msg.clickedButton() == paid_btn:
             self._prompt_auto_activation()
 

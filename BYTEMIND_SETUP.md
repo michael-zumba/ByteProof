@@ -125,6 +125,12 @@ key. The license payload is also stored in the macOS Keychain / Windows
 Credential Manager and re-verified (signature + machine fingerprint) on every
 app launch, so editing `license.json` cannot bypass licensing.
 
+**User-facing UX:** activation is email-based. The License tab offers
+"Already Paid? Activate with Email" and never asks users for a key. Keys exist
+only internally (generated server-side, stored in the app). The manual key
+deep link (`byteproof://activate?key=...`) still works as a hidden support
+path for ByteMind staff to recover lost activations.
+
 ### 2. Update feed
 
 Host `byteproof-version.json` at `https://www.bytemind.co.nz/byteproof-version.json`.

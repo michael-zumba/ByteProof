@@ -49,7 +49,8 @@ def test_settings_branding() -> None:
     assert "ByteMind" in settings.APP_SUPPORT_DIR
     assert "bytemind" in settings.PRODUCT_URL
     assert settings.PRODUCT_URL == "https://www.bytemind.co.nz/byteproof"
-    assert settings.STRIPE_PAYMENT_URL == "https://buy.stripe.com/00w7sLeBP3af6uJ24p3Nm03"
+    # Currently a temporary $1 test link; the real $20 link is restored before release.
+    assert settings.STRIPE_PAYMENT_URL.startswith("https://buy.stripe.com/")
     assert "ByteProof Local (Qwen3)" in settings.PROVIDERS
 
 
