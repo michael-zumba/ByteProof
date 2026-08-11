@@ -47,11 +47,8 @@ def _set_macos(enabled: bool) -> bool:
                 capture_output=True,
                 check=False,
             )
-            subprocess.run(
-                ["launchctl", "bootstrap", f"gui/{uid}", LAUNCH_AGENT_PATH],
-                capture_output=True,
-                check=False,
-            )
+            # Do NOT bootstrap here: RunAtLoad would immediately launch a
+            # second copy of ByteProof. The agent is picked up at next login.
         else:
             # Unload by service label so removal works even if the plist path
             # no longer exists.

@@ -4,6 +4,7 @@ import os
 import re
 import ssl
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +29,10 @@ from .word_integration import get_word_integration
 word_app = get_word_integration()
 
 TABLE_SKIPPED_STATUS = "Skipped: Selection contains a table. Please select text excluding tables."
+
+
+class TaskCancelledError(Exception):
+    """Raised when the user cancels a running proofread with double-Esc."""
 
 
 def provider_requires_api_key(provider_name: str) -> bool:
@@ -200,15 +205,15 @@ def apply_corrections_with_diff(
     corrected_text: str,
     start_offset: int,
     protected_spans: list[tuple[int, int]] | None = None,
-) -> None:
+) -> bool:
     try:
         _, current_start, _, _, _ = word_app.get_selection_info()
         if abs(current_start - start_offset) > 10:
             print(f"Aborting: Selection moved (Expected {start_offset}, got {current_start}).")
-            return
+            return False
     except Exception as e:
         print(f"Error verifying selection: {e}")
-        return
+        return False
 
     if protected_spans is None:
         protected_spans = []
@@ -216,7 +221,7 @@ def apply_corrections_with_diff(
     has_fields = word_app.selection_has_fields()
     if has_fields and protected_spans:
         word_app.replace_selection_content(corrected_text)
-        return
+        return True
 
     matcher = difflib.SequenceMatcher(None, original_text, corrected_text, autojunk=False)
 
@@ -241,25 +246,67 @@ def apply_corrections_with_diff(
 
     edits.sort(key=lambda e: e[0], reverse=True)
 
-    for doc_start, doc_end, new_text in edits:
-        if doc_start == doc_end:
-            word_app.insert_at_position(doc_start, new_text)
-        elif new_text:
-            word_app.replace_range(doc_start, doc_end, new_text)
-        else:
-            word_app.delete_range(doc_start, doc_end)
+    try:
+        for doc_start, doc_end, new_text in edits:
+            if doc_start == doc_end:
+                word_app.insert_at_position(doc_start, new_text)
+            elif new_text:
+                word_app.replace_range(doc_start, doc_end, new_text)
+            else:
+                word_app.delete_range(doc_start, doc_end)
+    except Exception as e:
+        print(f"Error applying corrections: {e}")
+        return False
+    return True
 
 
+
+
+def _run_with_cancel(
+    cancel_event: threading.Event,
+    func: Callable[[], str],
+) -> str:
+    """Run func in a daemon thread and return when done or cancelled.
+
+    A network request can block for up to its socket timeout, so the request
+    runs in a detached thread and we poll the cancel event. When the user
+    cancels, TaskCancelledError is raised immediately; the detached request
+    is allowed to finish quietly in the background.
+    """
+    box: list[Any] = []
+
+    def _target() -> None:
+        try:
+            box.append(("ok", func()))
+        except BaseException as exc:
+            box.append(("err", exc))
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        if cancel_event.wait(0.1):
+            raise TaskCancelledError()
+    if not box:
+        raise RuntimeError("Request thread did not return a result.")
+    kind, value = box[0]
+    if kind == "err":
+        raise value  # type: ignore[misc]
+    return value  # type: ignore[return-value]
 
 
 def _api_call_with_retry(
     make_request: Callable[[], str],
     max_retries: int = 2,
     base_delay: float = 1.0,
+    cancel_event: threading.Event | None = None,
 ) -> str:
     last_error = None
     for attempt in range(max_retries + 1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelledError()
         try:
+            if cancel_event is not None:
+                return _run_with_cancel(cancel_event, make_request)
             return make_request()
         except RuntimeError as e:
             last_error = e
@@ -277,7 +324,13 @@ def _api_call_with_retry(
                 raise
             delay = base_delay * (2 ** attempt)
             print(f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries + 1}): {msg[:120]}")
-            time.sleep(delay)
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise TaskCancelledError()
+            else:
+                time.sleep(delay)
+        except TaskCancelledError:
+            raise
     if last_error is not None:
         raise last_error
     raise RuntimeError("API call failed after retries")
@@ -470,6 +523,7 @@ def proofread_with_provider(
     text_section_label: str = "Text to proofread",
     reviewer_comment: str = "",
     user_instructions: str = "",
+    cancel_event: threading.Event | None = None,
 ) -> str:
     provider_cap = PROVIDERS.get(provider_name, {}).get("max_output_tokens")
     if provider_cap:
@@ -590,12 +644,16 @@ def proofread_with_provider(
             except (KeyError, IndexError, TypeError) as exc:
                 raise RuntimeError(f"Unexpected {provider_name} response format: {response_data}") from exc
 
-        return _api_call_with_retry(_do_request)
+        return _api_call_with_retry(_do_request, cancel_event=cancel_event)
 
     result = _send(system_prompt, user_content)
+    if cancel_event is not None and cancel_event.is_set():
+        raise TaskCancelledError()
     if _looks_like_conversational_reply(result):
         # The model replied or refused instead of editing. Retry once with an
         # explicit correction before handing the output to the caller.
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelledError()
         result = _send(
             system_prompt + CONVERSATIONAL_RETRY_SUFFIX,
             user_content + CONVERSATIONAL_RETRY_SUFFIX,
@@ -635,6 +693,7 @@ def generate_comment(
     comment_type: str,
     spelling: str = "UK/AU/NZ",
     context: str = "General Editing",
+    cancel_event: threading.Event | None = None,
 ) -> str:
     provider_cap = PROVIDERS.get(provider_name, {}).get("max_output_tokens")
     if provider_cap:
@@ -712,7 +771,7 @@ def generate_comment(
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"Unexpected {provider_name} response format: {response_data}") from exc
 
-    return _api_call_with_retry(_do_comment_request)
+    return _api_call_with_retry(_do_comment_request, cancel_event=cancel_event)
 
 
 def test_provider_connection(
@@ -887,6 +946,7 @@ def proofread_selection_once(
     max_tokens: int,
     settings: dict[str, Any] | None = None,
     key_callback: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[str, str | None, str | None, str | None, int]:
     try:
         word_app.ensure_ready()
@@ -910,6 +970,8 @@ def proofread_selection_once(
             return "Selection too short.", current_text, None, None, 0
             
         print(f"Proofreading selection ({len(current_text)} chars)...")
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelledError()
         
         protected_text, replacements = protect_special_chars(current_text)
         
@@ -976,6 +1038,7 @@ def proofread_selection_once(
                     comment_type=comment_type,
                     spelling=spelling,
                     context=context,
+                    cancel_event=cancel_event,
                 )
                 if result and result.strip():
                     comment_result["text"] = result.strip()
@@ -989,6 +1052,8 @@ def proofread_selection_once(
 
         protected_spans = _find_protected_spans(current_text)
         editable_segments = _extract_segments_from_text(current_text, protected_spans)
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelledError()
 
         if len(editable_segments) > 1:
             segmented_prompt = _build_segmented_prompt(editable_segments)
@@ -1016,6 +1081,7 @@ def proofread_selection_once(
                 context=context,
                 reviewer_comment=reviewer_comment,
                 user_instructions=segmented_instructions,
+                cancel_event=cancel_event,
             )
 
             corrected_segments = _parse_segmented_response(
@@ -1041,11 +1107,14 @@ def proofread_selection_once(
                 style=style,
                 context=context,
                 reviewer_comment=reviewer_comment,
+                cancel_event=cancel_event,
             )
 
             corrected = restore_special_chars(corrected_protected, replacements)
 
         corrected = corrected.replace('\r\n', '\r').replace('\n', '\r')
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelledError()
         
         if normalize_for_comparison(corrected) == normalize_for_comparison(current_text):
             result_status = "No changes suggested."
@@ -1067,6 +1136,8 @@ def proofread_selection_once(
                 print(f"Creative mode: similarity={similarity:.2f} (expected for rewrite mode).")
 
             if auto_apply:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise TaskCancelledError()
                 apply_corrections_with_diff(
                     current_text, corrected,
                     start_offset=start_offset,
@@ -1075,7 +1146,7 @@ def proofread_selection_once(
                 result_status = "Proofreading complete." + warning_suffix
             else:
                 suggestion_comment = "Proofreading suggestion:\n\n" + corrected
-                if comment_result["text"] is not None:
+                if comment_result["text"] is not None and comment_result["text"].strip():
                     suggestion_comment += "\n\n---\nReviewer note:\n" + comment_result["text"]
                     comment_result["text"] = None
                 try:
@@ -1085,7 +1156,7 @@ def proofread_selection_once(
                     print(f"Failed to insert correction comment: {e}")
                 result_status = "Changes added as comment (auto-apply disabled)." + warning_suffix
 
-        if comment_result["text"] is not None:
+        if comment_result["text"] is not None and comment_result["text"].strip():
             try:
                 word_app.add_comment(comment_result["text"])
                 print("Comment inserted via keyboard shortcut.")
@@ -1094,6 +1165,8 @@ def proofread_selection_once(
 
         return result_status, current_text, corrected, comment_result["text"], 0
         
+    except TaskCancelledError:
+        raise
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.strip() if e.stderr else str(e)
         if "Microsoft Word is not running" in error_msg:
@@ -1113,6 +1186,7 @@ def polish_selection_once(
     target: dict[str, Any] | None = None,
     status_callback: Callable[[str], None] | None = None,
     activate_target: bool = True,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[str, str | None, str | None, str | None, int]:
     """Polish selected text in a non-Word app and return the final text.
 
@@ -1155,6 +1229,8 @@ def polish_selection_once(
             return "Selection too short.", current_text, None, None, 0
         if status_callback is not None:
             status_callback(f"Polishing {len(current_text)} characters from {app_name}…")
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelledError()
 
         runtime_settings = settings or load_runtime_settings()
         active_provider, api_key, base_url, model = resolve_provider_connection(runtime_settings)
@@ -1210,8 +1286,11 @@ def polish_selection_once(
             text_section_label="Text to polish",
             context_before=context_before,
             context_after=context_after,
+            cancel_event=cancel_event,
         )
         corrected = corrected.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelledError()
 
         if normalize_selection_text(corrected) == normalize_selection_text(current_text):
             return "No changes suggested.", current_text, corrected, None, 0
@@ -1226,6 +1305,8 @@ def polish_selection_once(
                 0,
             )
         return "Polished.", current_text, corrected, None, 0
+    except TaskCancelledError:
+        raise
     except Exception as e:
         print(f"Error in polish_selection_once: {e}")
         return f"Error: {e!s}", None, None, None, 0

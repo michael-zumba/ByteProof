@@ -9,8 +9,8 @@ includes a fresh ByteMind license keypair.
 - Copied the app into `ByteMind Project/ByteProof` with a new name (**ByteProof**).
 - Rebranded all code, docs, build scripts, bundle identifiers, and the license
   file to ByteMind Ltd / `bytemind.co.nz`.
-- Replaced the logo with the official ByteMind mark (green monogram), including
-  `logo.svg`, `logo.png`, `logo.ico`, and `logo.icns`.
+- Replaced the logo with the ByteProof brain mark on a white background
+  (text-free), including `logo.svg`, `logo.png`, `logo.ico`, and `logo.icns`.
 - Added real Windows support:
   - pynput global hotkeys (no Accessibility permission needed)
   - COM thread initialisation for Word integration
@@ -185,6 +185,31 @@ python tools/generate_license.py customer@email.com 2027-06-30
 
 Keep `tools/` private — it contains the ByteMind license private key and is
 already excluded from git.
+
+## Release checklist (always bump the version)
+
+Every shipped change — major feature, minor polish, or bugfix — must bump the
+version so installed apps can see the update notification.
+
+```bash
+python tools/bump_version.py 1.6.0 "Short release notes for users..."
+```
+
+The script updates `APP_VERSION` in `src/settings.py`, the Windows
+`version_info.txt` metadata, the website update feed
+(`../ByteMind_Website/byteproof-version.json`), and the local example feed.
+Then rebuild and distribute:
+
+```bash
+./build_macos.sh
+```
+
+Rules of thumb:
+
+- Bug fixes and UI polish → patch bump (`1.5.1` → `1.5.2`).
+- New features or behaviour changes → minor bump (`1.5.2` → `1.6.0`).
+- Never ship a rebuilt app whose `APP_VERSION` matches the version already on
+  the website feed; users would never be offered the update.
 
 ## Rebuilding
 

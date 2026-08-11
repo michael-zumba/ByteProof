@@ -914,6 +914,30 @@ def test_segment_reassembly_safety() -> None:
     assert _parse_segmented_response(response, 2) == ["Alpha", "Beta"]
 
 
+def test_api_call_with_retry_cancellation() -> None:
+    import threading
+
+    from src.logic import TaskCancelledError, _api_call_with_retry
+
+    cancel = threading.Event()
+
+    def slow_request() -> str:
+        time.sleep(5)
+        return "done"
+
+    def arm_cancel() -> None:
+        time.sleep(0.1)
+        cancel.set()
+
+    threading.Thread(target=arm_cancel, daemon=True).start()
+    start = time.monotonic()
+    try:
+        _api_call_with_retry(slow_request, cancel_event=cancel)
+        raise AssertionError("expected cancellation")
+    except TaskCancelledError:
+        assert time.monotonic() - start < 2
+
+
 def test_provider_connection_tester() -> None:
     from src.logic import test_provider_connection
 
@@ -1019,6 +1043,7 @@ def test_polish_prompt_and_flow() -> None:
             spelling="UK/AU/NZ", style="Precise (Minimal Changes)",
             context="General Editing", system_prompt_override=None,
             text_section_label="Text to proofread", reviewer_comment="",
+            cancel_event=None,
         ):
             captured["prompt"] = system_prompt_override
             captured["context_before"] = context_before
@@ -1149,6 +1174,39 @@ def test_generic_apply_preview_shows_diff() -> None:
     window._on_generic_apply_done(True, "Applied to FakeMail.")
     assert "Hello, world." in window.diff_text.toPlainText()
     assert not window.apply_btn.isVisible()
+    window.close()
+
+
+def test_hidden_word_review_shows_apply_button() -> None:
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    from src import settings
+    from src.gui import ProofreaderApp
+
+    window = ProofreaderApp(1024, settings.load_runtime_settings())
+    window.show()
+    app.processEvents()
+    window.hide()
+    app.processEvents()
+    window.worker = SimpleNamespace(mode="word")  # type: ignore[assignment]
+    window._record_usage_if_completed = lambda _status: None  # type: ignore[method-assign]
+    window.handle_result(
+        "REVIEW_NEEDED:0.4",
+        "Hello world.",
+        "Hello, wonderful world.",
+        "",
+        0,
+    )
+    app.processEvents()
+    assert window.pending_generic_apply is not None
+    assert window.pending_generic_apply.get("mode") == "word"
+    assert not window.apply_btn.isHidden()
+    assert window.apply_btn.isEnabled()
+    assert window.apply_btn.text() == "Apply Changes"
+    window.show()
+    app.processEvents()
+    assert window.apply_btn.isVisible()
     window.close()
 
 
@@ -2021,6 +2079,8 @@ def main() -> None:
     print("PASS GUI construction")
     test_segment_reassembly_safety()
     print("PASS segment reassembly safety")
+    test_api_call_with_retry_cancellation()
+    print("PASS API call cancellation")
     test_provider_connection_tester()
     print("PASS provider connection tester")
     test_strict_editing_rules()
@@ -2039,6 +2099,8 @@ def main() -> None:
     print("PASS mac selection fallback (safe without permission)")
     test_generic_apply_preview_shows_diff()
     print("PASS generic apply preview (diff shown after apply)")
+    test_hidden_word_review_shows_apply_button()
+    print("PASS hidden Word review shows Apply button")
     test_apply_verification_tolerant()
     print("PASS apply verification tolerant")
     test_toast_notification_shows()

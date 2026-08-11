@@ -41,7 +41,6 @@ class WordIntegration:
     def selection_has_fields(self) -> bool:
         raise NotImplementedError
 
-
 # --- Windows Implementation ---
 
 class WindowsWordIntegration(WordIntegration):
@@ -173,6 +172,9 @@ class WindowsWordIntegration(WordIntegration):
             return False
 
     def add_comment(self, comment_text: str) -> None:
+        if not comment_text or not comment_text.strip():
+            print("Skipping empty comment insertion.")
+            return
         try:
             word = self._get_word()
             doc = word.ActiveDocument
@@ -464,6 +466,10 @@ class MacOSWordIntegration(WordIntegration):
 
     def add_comment(self, comment_text: str) -> None:
         import subprocess as sp
+
+        if not comment_text or not comment_text.strip():
+            print("Skipping empty comment insertion.")
+            return
 
         try:
             saved_clipboard = None

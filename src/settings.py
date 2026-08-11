@@ -11,7 +11,7 @@ from config.deepseek_config import (
 )
 
 APP_NAME = "ByteProof"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.6"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"

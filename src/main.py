@@ -1,6 +1,8 @@
 import argparse
 import os
 import sys
+import time
+import traceback
 
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
@@ -10,7 +12,32 @@ from config.deepseek_config import DEFAULT_MAX_OUTPUT_CHAT
 from .gui import ProofreaderApp
 
 # Use relative imports assuming this is run as a module
-from .settings import load_runtime_settings, resource_path
+from .settings import get_app_support_dir, load_runtime_settings, resource_path
+
+
+def _install_exception_hook() -> None:
+    """Keep unhandled exceptions from aborting the Qt app.
+
+    PyQt6 calls qFatal() and aborts when a Python exception escapes a Qt slot
+    unless sys.excepthook is replaced. This hook logs the full traceback to
+    the ByteProof support folder and lets the app keep running.
+    """
+
+    def _hook(exc_type, exc_value, exc_tb) -> None:
+        try:
+            log_dir = get_app_support_dir()
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "error.log")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n"
+                )
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        except Exception:
+            pass
+        traceback.print_exception(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _hook
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def main() -> int:
+    _install_exception_hook()
     args = parse_args()
     if args.capture_test:
         import json

@@ -23,6 +23,7 @@ datas = [
     ('prompt/context_phd_thesis.txt', 'prompt'),
     ('logo/logo.png', 'logo'),
     ('logo/logo.svg', 'logo'),
+    ('assets/chevron-down.svg', 'assets'),
     ('sounds/proofread_start.wav', 'sounds'),
 ]
 datas += collect_data_files('certifi')

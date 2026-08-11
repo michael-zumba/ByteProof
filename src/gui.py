@@ -95,6 +95,7 @@ from .local_model import (
 )
 from .logic import (
     TABLE_SKIPPED_STATUS,
+    TaskCancelledError,
     _find_protected_spans,
     apply_corrections_with_diff,
     polish_selection_once,
@@ -259,12 +260,12 @@ class WaveformBars(QWidget):
 
 
 class ToastNotification(QFrame):
-    """VoiceInk-style 'mini recorder' pill shown while proofreading.
+    """VoiceInk-style dynamic-island pill shown while proofreading.
 
-    While a task runs it is a dark pill at the bottom-centre of the screen with
-    animated equalizer bars, live status text, and a running timer. When the
-    task finishes it switches to a green/red/amber result state and fades away
-    automatically.
+    While a task runs it is a black capsule near the bottom-centre of the
+    screen with animated equalizer bars, live status text, and a running
+    timer. When the task finishes it switches to a green/red/amber result
+    state and fades away automatically.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -277,11 +278,10 @@ class ToastNotification(QFrame):
             | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(
-            "#ToastNotification { background-color: #000000; "
-            "border: 1px solid rgba(255, 255, 255, 70); "
-            "border-radius: 22px; }"
+            "#ToastNotification { background: transparent; border: none; }"
         )
 
         layout = QHBoxLayout(self)
@@ -322,6 +322,30 @@ class ToastNotification(QFrame):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self._fade_out)
         self._processing = False
+
+    def paintEvent(self, a0: Any) -> None:  # pyright: ignore[reportAny]
+        """Paint a fully opaque black capsule (dynamic-island style).
+
+        The custom paint guarantees the black backdrop renders even on macOS,
+        where the stylesheet background on a translucent top-level window can
+        be dropped. Child labels stay transparent so only the capsule shows.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = rect.height() / 2.0
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 238))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QColor(255, 255, 255, 46))
+        painter.drawRoundedRect(
+            rect.adjusted(0.5, 0.5, -0.5, -0.5),
+            radius,
+            radius,
+        )
 
     def is_processing(self) -> bool:
         return self._processing
@@ -375,7 +399,7 @@ class ToastNotification(QFrame):
         self._position_on_screen()
         self.setWindowOpacity(1.0)
         self.show()
-        self.raise_()
+        self._raise_native()
         self._hide_timer.start(duration_ms)
 
     def show_message(
@@ -391,8 +415,42 @@ class ToastNotification(QFrame):
         self._position_on_screen()
         self.setWindowOpacity(0.0)
         self.show()
-        self.raise_()
+        self._raise_native()
         self._fade_in()
+        # Safety net: if the fade animation is interrupted or unsupported,
+        # force the pill fully visible shortly after it appears.
+        QTimer.singleShot(250, self._ensure_opaque)
+
+    def _ensure_opaque(self) -> None:
+        if self.isVisible() and self.windowOpacity() < 0.5:
+            self.setWindowOpacity(1.0)
+
+    def _raise_native(self) -> None:
+        """Raise the pill above other windows without stealing focus (macOS)."""
+        if platform.system() != "Darwin":
+            return
+        try:
+            import ctypes
+
+            from AppKit import NSFloatingWindowLevel
+            from objc import objc_object
+
+            win_id = int(self.winId())
+            if not win_id:
+                return
+            ns_view = objc_object(ctypes.c_void_p(win_id))
+            ns_window = ns_view.window()
+            if ns_window is None:
+                return
+            ns_window.setLevel_(NSFloatingWindowLevel)
+            ns_window.orderFrontRegardless()
+        except Exception:
+            # Fallback: Qt's normal raise (may briefly activate, but the pill
+            # still appears instead of being invisible).
+            try:
+                self.raise_()
+            except Exception:
+                pass
 
     def _position_on_screen(self) -> None:
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
@@ -401,6 +459,7 @@ class ToastNotification(QFrame):
             return
         geo = screen.availableGeometry()
         x = geo.x() + (geo.width() - self.width()) // 2
+        # Bottom-centre placement, just above the Dock / screen edge.
         y = geo.bottom() - self.height() - 36
         # Keep the banner fully on screen for unusual display setups.
         x = max(geo.x() + 8, min(x, geo.x() + geo.width() - self.width() - 8))
@@ -435,6 +494,7 @@ class WorkerSignals(QObject):
     result: pyqtSignal = pyqtSignal(str, str, str, str, int) # pyright: ignore[reportAny]
     finished: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
     error: pyqtSignal = pyqtSignal(str) # pyright: ignore[reportAny]
+    cancelled: pyqtSignal = pyqtSignal(str) # pyright: ignore[reportAny]
 
 class SingleProofreadWorker(QThread):
     max_tokens: int
@@ -450,6 +510,7 @@ class SingleProofreadWorker(QThread):
         mode: str = "word",
         generic_target: dict[str, Any] | None = None,
         activate_target: bool = True,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         super().__init__()
         self.max_tokens = max_tokens
@@ -457,6 +518,7 @@ class SingleProofreadWorker(QThread):
         self.mode = mode
         self.generic_target = generic_target or {}
         self.activate_target = activate_target
+        self.cancel_event = cancel_event or threading.Event()
         self.signals = WorkerSignals()
 
     def run(self) -> None:
@@ -472,6 +534,7 @@ class SingleProofreadWorker(QThread):
                     self.generic_target,
                     status_callback=self.signals.status.emit,
                     activate_target=self.activate_target,
+                    cancel_event=self.cancel_event,
                 )
             else:
                 provider_name = self.settings.get("active_provider", "")
@@ -483,6 +546,7 @@ class SingleProofreadWorker(QThread):
                 status, original, corrected, comment, review_start = proofread_selection_once(
                     self.max_tokens,
                     self.settings,
+                    cancel_event=self.cancel_event,
                 )
             self.signals.result.emit(
                 status,
@@ -491,6 +555,8 @@ class SingleProofreadWorker(QThread):
                 comment if comment else "",
                 review_start if review_start else 0,
             )
+        except TaskCancelledError:
+            self.signals.cancelled.emit("Task cancelled.")
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
@@ -639,11 +705,13 @@ class GenericApplyWorker(QThread):
         original: str,
         corrected: str,
         target: dict[str, Any],
+        cancel_event: threading.Event | None = None,
     ) -> None:
         super().__init__()
         self.original = original
         self.corrected = corrected
         self.target = target
+        self.cancel_event = cancel_event or threading.Event()
 
     def run(self) -> None:
         app_name = self.target.get("name") or "the app"
@@ -651,6 +719,9 @@ class GenericApplyWorker(QThread):
             editor = get_generic_editor()
             editor.activate(self.target)
             time.sleep(0.25)
+            if self.cancel_event.is_set():
+                self.done.emit(False, "Task cancelled.")
+                return
             # Verify with at most one keystroke so a failed copy cannot produce
             # repeated system beeps.
             current = editor.get_selection_light(self.target)
@@ -670,6 +741,9 @@ class GenericApplyWorker(QThread):
             # Verify the paste read-only (no keystrokes), so the system never
             # plays error beeps after editing.
             time.sleep(0.4)
+            if self.cancel_event.is_set():
+                self.done.emit(False, "Task cancelled.")
+                return
             after = editor.get_selection_ax_only(self.target)
             ok_verify, _ = evaluate_apply_verification(
                 self.original,
@@ -842,32 +916,90 @@ class SettingsDialog(QDialog):
         self.init_license_tab()
         
         self.setStyleSheet("""
-            QDialog { background-color: #FAF8F5; }
+            QDialog {
+                background-color: #F7F4F0;
+            }
+            QScrollArea, QStackedWidget {
+                background: transparent;
+            }
+            QGroupBox {
+                background-color: rgba(255, 255, 255, 238);
+                border: 1px solid #E8E1D9;
+                border-radius: 16px;
+                margin-top: 20px;
+                padding-top: 28px;
+                font-size: 12px;
+                font-weight: 700;
+                color: #1F5335;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 16px;
+                padding: 0 8px;
+                background-color: transparent;
+            }
+            QKeySequenceEdit {
+                background-color: #FFFFFF;
+                border: 1px solid #DDD6CF;
+                border-radius: 10px;
+                padding: 8px 10px;
+                color: #292524;
+                selection-background-color: #D6E4DB;
+            }
+            QKeySequenceEdit:focus {
+                border-color: #1A3A2A;
+            }
+            QDialogButtonBox QPushButton {
+                min-width: 88px;
+                padding: 9px 18px;
+                border-radius: 10px;
+                font-weight: 600;
+            }
+            QDialogButtonBox QPushButton:default {
+                background-color: #1A3A2A;
+                color: #FFFFFF;
+                border: 1px solid #143024;
+            }
+            QDialogButtonBox QPushButton:default:hover {
+                background-color: #143024;
+            }
+            QProgressBar {
+                background-color: #EFE9E3;
+                border: none;
+                border-radius: 6px;
+                text-align: center;
+                color: transparent;
+            }
+            QProgressBar::chunk {
+                background-color: #1A3A2A;
+                border-radius: 6px;
+            }
         """)
         self.sidebar.setStyleSheet("""
             QListWidget {
-                background-color: #F5F0EB;
+                background-color: #F2EDE6;
                 border: none;
                 font-size: 13px;
-                padding: 14px 0;
+                padding: 16px 0;
                 outline: 0;
             }
             QListWidget::item {
-                height: 44px;
+                height: 46px;
                 padding-left: 20px;
                 padding-right: 14px;
-                margin: 2px 10px;
+                margin: 3px 10px;
                 color: #57534E;
                 border-radius: 10px;
                 font-weight: 520;
             }
             QListWidget::item:selected {
-                background-color: #EDF3EF;
-                color: #143024;
+                background-color: #1A3A2A;
+                color: #FFFFFF;
                 font-weight: 620;
             }
             QListWidget::item:hover:!selected {
-                background-color: #EDE6DF;
+                background-color: #E7DFD6;
             }
         """)
         self.sidebar.setCurrentRow(0)
@@ -2416,12 +2548,15 @@ class ProofreaderApp(QMainWindow):
         self.request_show.connect(self.show_and_raise)
         
         self.setWindowTitle(APP_NAME)
-        self.setGeometry(120, 120, 760, 540)
+        self.setGeometry(120, 120, 840, 600)
+        self.setMinimumSize(640, 500)
         
         if keep_on_top:
             self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.apply_menu_action: QAction | None = None
+        self.keep_top_action: QAction | None = None
         
         self._configure_theme()
         self._setup_menu_bar()
@@ -2460,19 +2595,25 @@ class ProofreaderApp(QMainWindow):
         # Header Area
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
-        
-        title_layout = QVBoxLayout()
-        title_layout.setSpacing(2)
-        
-        header = QLabel(APP_NAME)
-        header.setObjectName("TitleLabel")
-        title_layout.addWidget(header)
-        
-        subtitle = QLabel("Academic proofreading for Word · Writing polish for any app")
-        subtitle.setObjectName("MetaLabel")
-        title_layout.addWidget(subtitle)
-        
-        header_layout.addLayout(title_layout)
+        header_layout.setSpacing(12)
+
+        # Clean logo-only header: the brand mark replaces the old headline
+        # so the panel feels like a focused, premium utility.
+        logo_path = resource_path(os.path.join("logo", "logo.svg"))
+        if os.path.exists(logo_path):
+            try:
+                logo_widget = QSvgWidget(logo_path)
+                logo_widget.setFixedSize(68, 68)
+                logo_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+
+                def on_logo_click(a0=None):
+                    self.show_and_raise()
+
+                logo_widget.mousePressEvent = on_logo_click
+                header_layout.addWidget(logo_widget)
+            except Exception:
+                pass
+
         header_layout.addStretch()
         
         self.settings_btn = QPushButton("Settings")
@@ -2599,6 +2740,11 @@ class ProofreaderApp(QMainWindow):
         self._app_observer_token = None
         self._provider_test_worker: ConnectionTestWorker | None = None
         self._activation_worker: ActivationWorker | None = None
+        self._suppress_activate_until = 0.0
+        self._tray_menu_open = False
+        self._task_cancel_event = threading.Event()
+        self._last_task_cancelled = False
+        self._escape_monitor = None
         self.toast = ToastNotification()
         self._start_app_tracking()
         register_url_scheme()
@@ -2814,6 +2960,10 @@ class ProofreaderApp(QMainWindow):
         return apps[index]
 
     def _show_toast(self, message: str, kind: str = "success") -> None:
+        # Showing the floating pill can briefly activate the app on macOS.
+        # Suppress the ApplicationActivate auto-show so a hotkey-triggered
+        # proofread never pops the main window back up.
+        self._suppress_activate_until = time.monotonic() + 2.0
         if kind == "processing":
             self.toast.show_processing(message)
         else:
@@ -3033,14 +3183,21 @@ class ProofreaderApp(QMainWindow):
             painter.setBrush(QColor("#306D49"))
             painter.setPen(Qt.PenStyle.NoPen)
             size = pixmap.size()
-            radius = size.width() // 4
-            painter.drawEllipse(size.width() - radius - 2, size.height() - radius - 2, radius, radius)
+            radius = max(6, size.width() // 16)
+            painter.drawEllipse(
+                size.width() * 7 // 10 - radius,
+                size.height() * 7 // 10 - radius,
+                radius * 2,
+                radius * 2,
+            )
             painter.end()
             self.active_icon = QIcon(pixmap)
             
             self.tray_icon.setIcon(self.normal_icon)
 
         tray_menu = QMenu()
+        tray_menu.aboutToShow.connect(lambda: setattr(self, "_tray_menu_open", True))
+        tray_menu.aboutToHide.connect(lambda: setattr(self, "_tray_menu_open", False))
         
         show_action = QAction("Show Window", self)
         show_action.triggered.connect(self.show_and_raise)
@@ -3088,9 +3245,15 @@ class ProofreaderApp(QMainWindow):
 
     def eventFilter(self, a0: Any, a1: Any) -> bool:  # pyright: ignore[reportAny]
         # Clicking the Dock icon (or otherwise switching to ByteProof) brings
-        # the hidden main window back.
+        # the hidden main window back, unless the activation was caused by our
+        # own floating pill while proofreading in the background, or by opening
+        # the tray menu.
         if a1.type() == QEvent.Type.ApplicationActivate:
-            if self.isHidden():
+            if (
+                self.isHidden()
+                and time.monotonic() >= self._suppress_activate_until
+                and not self._tray_menu_open
+            ):
                 self.show()
                 self.raise_()
                 self.activateWindow()
@@ -3099,12 +3262,12 @@ class ProofreaderApp(QMainWindow):
             if url.startswith("byteproof://"):
                 QTimer.singleShot(0, lambda: self._start_activation("url", url))
         elif a1.type() == QEvent.Type.KeyPress and a1.key() == Qt.Key.Key_Escape:
-            if self._has_active_local_task():
+            if self._has_active_task():
                 now = time.monotonic()
                 if now - self._last_escape_ts < 0.7:
                     self._last_escape_ts = 0.0
-                    self._cancel_active_local_task()
-                    self.status_label.setText("Cancelling download…")
+                    self._cancel_active_tasks()
+                    self.status_label.setText("Cancelling task…")
                     dlg = self._active_settings_dialog
                     if dlg is not None and hasattr(dlg, "local_status_label"):
                         dlg.local_status_label.setText("Cancelling download…")
@@ -3117,29 +3280,95 @@ class ProofreaderApp(QMainWindow):
                 return True
         return super().eventFilter(a0, a1)
 
-    def _has_active_local_task(self) -> bool:
+    def _has_active_task(self) -> bool:
+        for worker in (
+            getattr(self, "worker", None),
+            getattr(self, "generic_apply_worker", None),
+        ):
+            if (
+                worker is not None
+                and callable(getattr(worker, "isRunning", None))
+                and worker.isRunning()
+            ):
+                return True
         for attr in ("_local_download_worker", "_local_server_worker"):
             worker = getattr(self, attr, None)
             if worker is not None and worker.isRunning():
                 return True
         return False
 
-    def _cancel_active_local_task(self) -> None:
+    def _cancel_active_tasks(self) -> None:
+        self._task_cancel_event.set()
         for attr in ("_local_download_worker", "_local_server_worker"):
             worker = getattr(self, attr, None)
             if worker is not None and worker.isRunning():
                 worker.cancel_event.set()
 
+    def _start_escape_monitor(self) -> None:
+        """Temporarily listen for bare Esc presses while a task is running."""
+        if self._escape_monitor is not None:
+            return
+        try:
+            from .hotkeys import HotkeyManager, log_debug
+        except Exception as e:
+            print(f"Could not import hotkey manager for Esc: {e}")
+            return
+
+        def on_escape() -> None:
+            now = time.monotonic()
+            if now - self._last_escape_ts < 0.7:
+                self._last_escape_ts = 0.0
+                self._cancel_active_tasks()
+                self.status_label.setText("Cancelling task…")
+            else:
+                self._last_escape_ts = now
+                self.status_label.setText("Press Esc again to cancel.")
+
+        monitor = HotkeyManager({"<esc>": on_escape})
+        try:
+            started = monitor.start(prompt_user=False)
+        except Exception as e:
+            log_debug(f"Error starting Esc hotkey monitor: {e}")
+            started = False
+        if started:
+            self._escape_monitor = monitor
+            log_debug("Esc hotkey monitor started")
+
+    def _stop_escape_monitor(self) -> None:
+        if self._escape_monitor is not None:
+            try:
+                self._escape_monitor.stop()
+            except Exception:
+                pass
+            self._escape_monitor = None
+
     def _on_about_to_quit(self) -> None:
-        """Cancel in-flight downloads/server starts before the app exits."""
-        self._cancel_active_local_task()
+        """Cancel in-flight tasks before the app exits."""
+        self._stop_escape_monitor()
+        self._cancel_active_tasks()
+        for worker in (
+            getattr(self, "worker", None),
+            getattr(self, "generic_apply_worker", None),
+        ):
+            if worker is not None and callable(getattr(worker, "isRunning", None)) and worker.isRunning():
+                if callable(getattr(worker, "wait", None)):
+                    try:
+                        worker.wait(10_000)
+                    except Exception:
+                        pass
         for attr in ("_local_download_worker", "_local_server_worker"):
             worker = getattr(self, attr, None)
             if worker is not None and worker.isRunning():
                 # The download loop checks cancellation between chunks; one
                 # stalled socket read can take up to the 60s timeout.
-                worker.wait(60_000)
-        stop_local_server()
+                try:
+                    worker.wait(60_000)
+                except Exception:
+                    pass
+        try:
+            stop_local_server()
+        except Exception:
+            pass
 
     def _check_trial_status_at_startup(self) -> None:
         if is_licensed():
@@ -3229,45 +3458,255 @@ class ProofreaderApp(QMainWindow):
         menu_bar = self.menuBar()
         if menu_bar is None:
             return
-        menu = menu_bar.addMenu("Application")
-        if menu is None:
-            return
-        proofread_action = QAction("Proofread Selection", self)
-        proofread_action.triggered.connect(self.run_proofread_task)
-        menu.addAction(proofread_action)
-        self.proofread_actions.append(proofread_action)
-        
-        preferences_action = QAction("Settings…", self)
-        preferences_action.setMenuRole(QAction.MenuRole.PreferencesRole)
-        prefs_shortcut = "Meta+," if platform.system() == "Darwin" else "Ctrl+,"
-        preferences_action.setShortcut(prefs_shortcut)
-        preferences_action.triggered.connect(self.open_settings)
-        menu.addAction(preferences_action)
+        is_mac = platform.system() == "Darwin"
+        meta_key = "Meta" if is_mac else "Ctrl"
 
-        check_updates_action = QAction("Check for Updates…", self)
-        check_updates_action.triggered.connect(lambda: self._check_for_app_updates(force=True))
-        menu.addAction(check_updates_action)
+        # ---- File ----
+        file_menu = menu_bar.addMenu("File")
+        if file_menu is not None:
+            # On macOS Qt moves these role actions into the application menu
+            # automatically, so we never add our own ByteProof menu here.
+            about_action = QAction(f"About {APP_NAME}", self)
+            about_action.setMenuRole(QAction.MenuRole.AboutRole)
+            about_action.triggered.connect(self._show_about)
+            file_menu.addAction(about_action)
 
-        diagnostics_action = QAction("Copy Capture Diagnostics", self)
-        diagnostics_action.triggered.connect(self._copy_capture_diagnostics)
-        menu.addAction(diagnostics_action)
+            preferences_action = QAction("Settings…", self)
+            preferences_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+            preferences_action.setShortcut(f"{meta_key}+,")
+            preferences_action.triggered.connect(self.open_settings)
+            file_menu.addAction(preferences_action)
 
-        open_log_action = QAction("Open Log Folder", self)
-        open_log_action.triggered.connect(self._open_support_folder)
-        menu.addAction(open_log_action)
-        menu.addSeparator()
-        quit_action = QAction("Quit", self)
-        quit_action.setMenuRole(QAction.MenuRole.QuitRole)
-        quit_shortcut = "Meta+Q" if platform.system() == "Darwin" else "Ctrl+Q"
-        quit_action.setShortcut(quit_shortcut)
-        quit_action.triggered.connect(QApplication.quit)
-        menu.addAction(quit_action)
+            file_menu.addSeparator()
+            proofread_action = QAction("Proofread Selection", self)
+            # No shortcut here on purpose: the same combination is registered
+            # as a global hotkey, and a menu shortcut would fire twice.
+            proofread_action.triggered.connect(self.run_proofread_task)
+            file_menu.addAction(proofread_action)
+            self.proofread_actions.append(proofread_action)
+
+            self.apply_menu_action = QAction("Apply Changes", self)
+            self.apply_menu_action.setShortcut(f"{meta_key}+Return")
+            self.apply_menu_action.setEnabled(False)
+            self.apply_menu_action.triggered.connect(self._apply_pending_generic)
+            file_menu.addAction(self.apply_menu_action)
+
+            file_menu.addSeparator()
+            close_action = QAction("Close Window", self)
+            close_action.setShortcut(f"{meta_key}+W")
+            close_action.triggered.connect(self.close)
+            file_menu.addAction(close_action)
+
+            file_menu.addSeparator()
+            quit_action = QAction(f"Quit {APP_NAME}", self)
+            quit_action.setMenuRole(QAction.MenuRole.QuitRole)
+            quit_action.setShortcut(f"{meta_key}+Q")
+            quit_action.triggered.connect(QApplication.quit)
+            file_menu.addAction(quit_action)
+
+        # ---- Edit ----
+        edit_menu = menu_bar.addMenu("Edit")
+        if edit_menu is not None:
+            self._add_text_edit_action(edit_menu, "Undo", f"{meta_key}+Z", "undo")
+            self._add_text_edit_action(edit_menu, "Redo", f"{meta_key}+Shift+Z", "redo")
+            edit_menu.addSeparator()
+            self._add_text_edit_action(edit_menu, "Cut", f"{meta_key}+X", "cut")
+            self._add_text_edit_action(edit_menu, "Copy", f"{meta_key}+C", "copy")
+            self._add_text_edit_action(edit_menu, "Paste", f"{meta_key}+V", "paste")
+            self._add_text_edit_action(edit_menu, "Delete", None, "delete")
+            edit_menu.addSeparator()
+            self._add_text_edit_action(edit_menu, "Select All", f"{meta_key}+A", "select_all")
+
+        # ---- View ----
+        view_menu = menu_bar.addMenu("View")
+        if view_menu is not None:
+            keep_top_action = QAction("Keep Window on Top", self)
+            keep_top_action.setCheckable(True)
+            keep_top_action.setChecked(
+                self.settings.get("general", {}).get("keep_on_top", True)
+            )
+            keep_top_action.triggered.connect(self._toggle_keep_on_top)
+            self.keep_top_action = keep_top_action
+            view_menu.addAction(keep_top_action)
+
+            view_menu.addSeparator()
+            full_screen_action = QAction("Enter Full Screen", self)
+            full_screen_action.setShortcut(f"{meta_key}+Ctrl+F")
+            full_screen_action.triggered.connect(self._toggle_full_screen)
+            view_menu.addAction(full_screen_action)
+
+        # ---- Window ----
+        window_menu = menu_bar.addMenu("Window")
+        if window_menu is not None:
+            minimize_action = QAction("Minimize", self)
+            minimize_action.setShortcut(f"{meta_key}+M")
+            minimize_action.triggered.connect(self.showMinimized)
+            window_menu.addAction(minimize_action)
+
+            zoom_action = QAction("Zoom", self)
+            zoom_action.triggered.connect(self._toggle_maximize)
+            window_menu.addAction(zoom_action)
+
+            window_menu.addSeparator()
+            bring_all_action = QAction("Bring All to Front", self)
+            bring_all_action.triggered.connect(self.show_and_raise)
+            window_menu.addAction(bring_all_action)
+
+        # ---- Help ----
+        help_menu = menu_bar.addMenu("Help")
+        if help_menu is not None:
+            help_action = QAction(f"{APP_NAME} Help", self)
+            help_action.triggered.connect(lambda: webbrowser.open(PRODUCT_URL))
+            help_menu.addAction(help_action)
+
+            contact_action = QAction("Contact Support", self)
+            contact_action.triggered.connect(
+                lambda: webbrowser.open(f"mailto:{SUPPORT_EMAIL}")
+            )
+            help_menu.addAction(contact_action)
+
+            help_menu.addSeparator()
+            diagnostics_action = QAction("Copy Capture Diagnostics", self)
+            diagnostics_action.triggered.connect(self._copy_capture_diagnostics)
+            help_menu.addAction(diagnostics_action)
+
+            open_log_action = QAction("Open Log Folder", self)
+            open_log_action.triggered.connect(self._open_support_folder)
+            help_menu.addAction(open_log_action)
+
+            check_updates_action = QAction("Check for Updates…", self)
+            check_updates_action.triggered.connect(
+                lambda: self._check_for_app_updates(force=True)
+            )
+            help_menu.addAction(check_updates_action)
+
+    def _add_text_edit_action(
+        self,
+        menu: QMenu,
+        title: str,
+        shortcut: str | None,
+        method: str,
+    ) -> None:
+        action = QAction(title, self)
+        if shortcut:
+            action.setShortcut(shortcut)
+        action.triggered.connect(lambda: self._dispatch_text_edit(method))
+        menu.addAction(action)
+
+    def _dispatch_text_edit(self, method: str) -> None:
+        widget = QApplication.focusWidget()
+        if isinstance(widget, QTextEdit):
+            if method == "undo":
+                widget.undo()
+            elif method == "redo":
+                widget.redo()
+            elif method == "cut":
+                widget.cut()
+            elif method == "copy":
+                widget.copy()
+            elif method == "paste":
+                widget.paste()
+            elif method == "delete":
+                cursor = widget.textCursor()
+                if cursor.hasSelection():
+                    cursor.removeSelectedText()
+            elif method == "select_all":
+                widget.selectAll()
+        elif isinstance(widget, QLineEdit):
+            if method == "undo":
+                widget.undo()
+            elif method == "redo":
+                widget.redo()
+            elif method == "cut":
+                widget.cut()
+            elif method == "copy":
+                widget.copy()
+            elif method == "paste":
+                widget.paste()
+            elif method == "delete":
+                widget.del_()
+            elif method == "select_all":
+                widget.selectAll()
+
+    def _show_about(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"About {APP_NAME}")
+        dlg.setModal(True)
+        dlg.setFixedSize(380, 300)
+        dlg.setStyleSheet(
+            "QDialog { background-color: #FAF8F5; }"
+            "QLabel#AboutTitle { font-size: 17px; font-weight: 700; color: #292524; }"
+            "QLabel#AboutMeta { font-size: 12px; color: #78716C; line-height: 1.5; }"
+        )
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(10)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        logo_path = resource_path(os.path.join("logo", "logo.svg"))
+        if os.path.exists(logo_path):
+            try:
+                logo_widget = QSvgWidget(logo_path)
+                logo_widget.setFixedSize(84, 84)
+                layout.addWidget(logo_widget, 0, Qt.AlignmentFlag.AlignCenter)
+            except Exception:
+                pass
+
+        title = QLabel(APP_NAME)
+        title.setObjectName("AboutTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        meta = QLabel(
+            f"Version {APP_VERSION}<br>{COMPANY_NAME}<br>"
+            f'A <a href="{PRODUCT_URL}" style="color: #1A3A2A;">'
+            f"{PRODUCT_URL.replace('https://', '')}</a>"
+        )
+        meta.setObjectName("AboutMeta")
+        meta.setOpenExternalLinks(True)
+        meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(meta)
+
+        close_btn = QPushButton("Done")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.exec()
+
+    def _toggle_keep_on_top(self) -> None:
+        current = self.settings.setdefault("general", {}).get("keep_on_top", True)
+        new_value = not current
+        self.settings["general"]["keep_on_top"] = new_value
+        current_flags = self.windowFlags()
+        if new_value:
+            self.setWindowFlags(current_flags | Qt.WindowType.WindowStaysOnTopHint)
+        else:
+            self.setWindowFlags(current_flags & ~Qt.WindowType.WindowStaysOnTopHint)
+        save_runtime_settings(self.settings)
+        if self.isVisible():
+            self.show()
+            self.raise_()
+
+    def _toggle_full_screen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def _toggle_maximize(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
 
     def _configure_theme(self) -> None:
-        self.setStyleSheet(
-            """
+        chevron_path = resource_path(
+            os.path.join("assets", "chevron-down.svg")
+        ).replace("\\", "/")
+        stylesheet = """
             QMainWindow {
-                background-color: #FAF8F5;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #F9F7F4, stop:1 #F1EDE8);
             }
             QWidget {
                 color: #292524;
@@ -3321,15 +3760,15 @@ class ProofreaderApp(QMainWindow):
                 letter-spacing: -0.3px;
             }
             #StatusBar {
-                background-color: rgba(255, 255, 255, 230);
-                border: 1px solid #E8E4E0;
-                border-radius: 12px;
+                background-color: rgba(255, 255, 255, 228);
+                border: 1px solid #E8E2DB;
+                border-radius: 14px;
                 margin-bottom: 8px;
             }
             #Card, #ProviderCard, #LicenseCard {
                 background-color: rgba(255, 255, 255, 250);
-                border: 1px solid #E8E4E0;
-                border-radius: 14px;
+                border: 1px solid #E6E0D9;
+                border-radius: 16px;
             }
             QTextEdit {
                 background-color: #FFFFFF;
@@ -3358,20 +3797,24 @@ class ProofreaderApp(QMainWindow):
             }
             QComboBox {
                 background-color: #FFFFFF;
-                border: 1px solid #DED8D2;
-                border-radius: 10px;
-                padding: 9px 38px 9px 14px;
-                min-height: 22px;
+                border: 1px solid #DDD6CF;
+                border-radius: 12px;
+                padding: 10px 40px 10px 14px;
+                min-height: 24px;
                 color: #292524;
                 font-size: 13px;
                 font-weight: 520;
             }
             QComboBox:hover {
-                border-color: #B7AFA8;
-                background-color: #FDFCFA;
+                border-color: #B9AFA6;
+                background-color: #FEFDFC;
             }
             QComboBox:focus {
                 border-color: #1A3A2A;
+            }
+            QComboBox:on {
+                border-color: #1A3A2A;
+                background-color: #FFFFFF;
             }
             QComboBox:disabled {
                 background-color: #F5F0EB;
@@ -3381,30 +3824,39 @@ class ProofreaderApp(QMainWindow):
             QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 34px;
+                width: 38px;
                 border: none;
-                border-left: 1px solid #F0ECE8;
-                border-top-right-radius: 10px;
-                border-bottom-right-radius: 10px;
+                border-top-right-radius: 12px;
+                border-bottom-right-radius: 12px;
+            }
+            QComboBox::down-arrow {
+                image: url("__CHEVRON_URL__");
+                width: 12px;
+                height: 8px;
             }
             QComboBox QAbstractItemView {
                 background-color: #FFFFFF;
-                border: 1px solid #DED8D2;
-                border-radius: 12px;
+                border: 1px solid #E3DCD4;
+                border-radius: 14px;
                 padding: 6px;
                 outline: none;
+                selection-background-color: transparent;
             }
             QComboBox QAbstractItemView::item {
-                min-height: 30px;
-                padding: 4px 10px;
-                border-radius: 8px;
+                min-height: 34px;
+                padding: 6px 12px;
+                border-radius: 9px;
+                color: #44403C;
+                font-size: 13px;
             }
             QComboBox QAbstractItemView::item:hover {
-                background-color: #F5F0EB;
+                background-color: #F3EFEA;
+                color: #292524;
             }
             QComboBox QAbstractItemView::item:selected {
-                background-color: #EDF3EF;
+                background-color: #E7F0EA;
                 color: #143024;
+                font-weight: 600;
             }
             QPushButton {
                 background-color: #FFFFFF;
@@ -3547,8 +3999,8 @@ class ProofreaderApp(QMainWindow):
             QScrollBar::sub-line:vertical {
                 height: 0;
             }
-            """
-        )
+        """
+        self.setStyleSheet(stylesheet.replace("__CHEVRON_URL__", chevron_path))
 
     def current_settings(self) -> dict[str, Any]:
         return self.settings
@@ -3609,6 +4061,12 @@ class ProofreaderApp(QMainWindow):
         )
 
         if not access.get("free_mode_allowed"):
+            if not self.isVisible():
+                self._show_toast(
+                    "Free limit reached — open ByteProof to continue.",
+                    kind="warning",
+                )
+                return False
             self._show_purchase_dialog(
                 "Free Limit Reached",
                 f"You've used all {access.get('daily_limit', 3)} free proofreads for today.",
@@ -3617,6 +4075,12 @@ class ProofreaderApp(QMainWindow):
             return False
 
         if not is_local:
+            if not self.isVisible():
+                self._show_toast(
+                    "This provider needs a license — open ByteProof to continue.",
+                    kind="warning",
+                )
+                return False
             self._show_purchase_dialog(
                 "Cloud Providers Require a License",
                 "Cloud AI providers are available with a ByteProof license.",
@@ -3736,6 +4200,8 @@ class ProofreaderApp(QMainWindow):
             return
 
         self.run_btn.setEnabled(False)
+        self._task_cancel_event.clear()
+        self._last_task_cancelled = False
         self.status_dot.setStyleSheet("background-color: #D97706; border-radius: 4px;")
         self.status_label.setText("Initializing...")
         self.diff_text.clear()
@@ -3746,6 +4212,8 @@ class ProofreaderApp(QMainWindow):
         self.pending_generic_preview = None
         self._generic_apply_pending = False
         self.apply_btn.setVisible(False)
+        if self.apply_menu_action is not None:
+            self.apply_menu_action.setEnabled(False)
         
         if hasattr(self, 'tray_icon') and hasattr(self, 'active_icon') and not self.active_icon.isNull():
             self.tray_icon.setIcon(self.active_icon)
@@ -3867,14 +4335,26 @@ class ProofreaderApp(QMainWindow):
             mode=mode,
             generic_target=generic_target,
             activate_target=activate_target,
+            cancel_event=self._task_cancel_event,
         )
         self.worker.signals.result.connect(self.handle_result)
         self.worker.signals.error.connect(self.handle_error)
         self.worker.signals.status.connect(self._on_worker_status)
+        self.worker.signals.cancelled.connect(self._on_task_cancelled)
         self.worker.signals.finished.connect(self.task_finished)
         self.worker.start()
-        if self.settings.get("general", {}).get("play_sound_on_proofread", True):
-            play_start_sound()
+        try:
+            self._start_escape_monitor()
+            if self.settings.get("general", {}).get("play_sound_on_proofread", True):
+                play_start_sound()
+        except Exception as e:
+            print(f"Error starting proofread UI: {e}")
+            self._task_cancel_event.set()
+            self._stop_escape_monitor()
+            self._cancel_proofread_start(
+                "Could not start proofreading. Please try again."
+            )
+            return
 
     def _check_for_app_updates(self, force: bool = False) -> None:
         self._update_check_force = force
@@ -3987,15 +4467,20 @@ class ProofreaderApp(QMainWindow):
         self.status_label.setText("Ready")
 
     def closeEvent(self, a0: Any) -> None:
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            self._on_about_to_quit()
-            QApplication.quit()
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                self._on_about_to_quit()
+                QApplication.quit()
+                if a0 is not None:
+                    a0.accept()
+                return
+            self.hide()
+            if a0 is not None:
+                a0.ignore()
+        except Exception as e:
+            print(f"Error in closeEvent: {e}")
             if a0 is not None:
                 a0.accept()
-            return
-        self.hide()
-        if a0 is not None:
-            a0.ignore()
 
     def handle_result(self, status_text: str, original: str, corrected: str, comment: str = "", review_start: int = 0) -> None:
         self._record_usage_if_completed(status_text)
@@ -4004,22 +4489,36 @@ class ProofreaderApp(QMainWindow):
             self._handle_generic_result(status_text, original, corrected, comment)
             return
         if status_text == TABLE_SKIPPED_STATUS:
-            QMessageBox.warning(
-                self,
-                "Table Detected",
-                "The selected text contains a table.\n\nPlease select text excluding tables to proceed with proofreading.",
-                QMessageBox.StandardButton.Ok
-            )
+            if self.isVisible():
+                QMessageBox.warning(
+                    self,
+                    "Table Detected",
+                    "The selected text contains a table.\n\nPlease select text excluding tables to proceed with proofreading.",
+                    QMessageBox.StandardButton.Ok
+                )
+            else:
+                self._show_toast(
+                    "Proofreading skipped — table detected.",
+                    kind="warning",
+                )
             self.status_label.setText("Proofreading skipped (Table detected).")
             self.diff_text.clear()
             self.diff_word_count.setText("")
             return
 
         if status_text.startswith("Error: Microsoft Word is not running"):
-            self._show_word_unavailable(status_text, word_running=False)
+            if self.isVisible():
+                self._show_word_unavailable(status_text, word_running=False)
+            else:
+                self._show_toast(status_text, kind="error")
+                self.status_label.setText(status_text)
             return
         if status_text.startswith("Error: No active Word document"):
-            self._show_word_unavailable(status_text, word_running=True)
+            if self.isVisible():
+                self._show_word_unavailable(status_text, word_running=True)
+            else:
+                self._show_toast(status_text, kind="error")
+                self.status_label.setText(status_text)
             return
 
         if status_text.startswith("REVIEW_NEEDED:"):
@@ -4028,6 +4527,33 @@ class ProofreaderApp(QMainWindow):
                 sim_float = float(sim_pct)
             except ValueError:
                 sim_float = 0.0
+
+            if not self.isVisible():
+                self.status_label.setText(
+                    f"Low similarity ({sim_pct}) — review before applying."
+                )
+                self._show_toast(
+                    "Review changes — open ByteProof to review.",
+                    kind="warning",
+                )
+                if original and corrected:
+                    self.display_diff(original, corrected)
+                    self.diff_word_count.setText(f"{len(corrected.split())} words")
+                    # Restore the panel Apply button for Word results that
+                    # arrived while the window was hidden.
+                    self.pending_generic_apply = {
+                        "mode": "word",
+                        "original": original,
+                        "corrected": corrected,
+                        "comment": comment,
+                        "review_start": review_start,
+                    }
+                    self.apply_btn.setText("Apply Changes")
+                    self.apply_btn.setVisible(True)
+                    self.apply_btn.setEnabled(True)
+                    if self.apply_menu_action is not None:
+                        self.apply_menu_action.setEnabled(True)
+                return
 
             dlg = QDialog(self)
             dlg.setWindowTitle("Unusual Result — Review Needed")
@@ -4111,20 +4637,31 @@ class ProofreaderApp(QMainWindow):
 
             if result == 2:
                 spans = _find_protected_spans(original)
-                apply_corrections_with_diff(
+                applied = apply_corrections_with_diff(
                     original, corrected,
                     start_offset=review_start,
                     protected_spans=spans,
                 )
-                if comment and comment.strip():
-                    try:
-                        word_app = get_word_integration()
-                        word_app.add_comment(comment.strip())
-                    except Exception as e:
-                        print(f"Comment insertion failed: {e}")
-                self.status_label.setText(f"Low-similarity correction applied (user approved, {sim_float:.0%}).")
-                self._set_corrected_for_copy("")
+                if applied:
+                    if comment and comment.strip():
+                        try:
+                            word_app = get_word_integration()
+                            word_app.add_comment(comment.strip())
+                        except Exception as e:
+                            print(f"Comment insertion failed: {e}")
+                    self.status_label.setText(f"Low-similarity correction applied (user approved, {sim_float:.0%}).")
+                    self._set_corrected_for_copy("")
+                else:
+                    self.status_label.setText(
+                        "Could not apply — selection moved in Word."
+                    )
+                    self._show_toast(
+                        "Could not apply — selection moved in Word.",
+                        kind="error",
+                    )
             elif result == 1:
+                # Review in the panel instead of a blocking follow-up dialog,
+                # so the user can scroll the full diff before deciding.
                 if comment and comment.strip():
                     cursor = self.diff_text.textCursor()
                     heading_fmt = QTextCharFormat()
@@ -4143,85 +4680,25 @@ class ProofreaderApp(QMainWindow):
                     cursor.insertText("─" * 40 + "\n\n", sep2_fmt)
                 self.display_diff(original, corrected)
                 self.diff_word_count.setText(f"{len(corrected.split())} words")
-                QApplication.processEvents()
-
-                follow = QDialog(self)
-                follow.setWindowTitle("Decision — Low-Similarity Result")
-                follow.setModal(True)
-                follow.setFixedSize(420, 180)
-                follow.setStyleSheet("""
-                    QDialog { background-color: #FAF8F5; }
-                    QLabel#FollowTitle { font-size: 14px; font-weight: 700; color: #292524; }
-                    QLabel#FollowDesc { font-size: 12px; color: #57534E; }
-                    QPushButton { border-radius: 8px; padding: 9px 20px; font-size: 13px; font-weight: 600; min-width: 110px; }
-                    QPushButton#FollowAccept { background-color: #059669; color: white; border: none; }
-                    QPushButton#FollowAccept:hover { background-color: #047857; }
-                    QPushButton#FollowReject { background-color: #E8E4E0; color: #57534E; border: 1px solid #D6D0CA; }
-                    QPushButton#FollowReject:hover { background-color: #D6D0CA; }
-                """)
-
-                f_layout = QVBoxLayout(follow)
-                f_layout.setSpacing(12)
-                f_layout.setContentsMargins(24, 20, 24, 20)
-
-                f_title = QLabel("Apply or Discard?")
-                f_title.setObjectName("FollowTitle")
-                f_layout.addWidget(f_title)
-
-                f_desc = QLabel(
-                    f"You have reviewed the diff ({sim_float:.0%} similarity). "
-                    "Apply the changes to your document or discard them."
+                self.pending_generic_apply = {
+                    "mode": "word",
+                    "original": original,
+                    "corrected": corrected,
+                    "comment": comment,
+                    "review_start": review_start,
+                }
+                self.apply_btn.setText("Apply Changes")
+                self.apply_btn.setVisible(True)
+                self.apply_btn.setEnabled(True)
+                if self.apply_menu_action is not None:
+                    self.apply_menu_action.setEnabled(True)
+                self.status_label.setText(
+                    f"Low similarity ({sim_pct}) — review, then click Apply."
                 )
-                f_desc.setObjectName("FollowDesc")
-                f_desc.setWordWrap(True)
-                f_layout.addWidget(f_desc)
-
-                f_layout.addStretch()
-
-                f_btn_layout = QHBoxLayout()
-                f_btn_layout.setSpacing(12)
-
-                f_reject = QPushButton("Discard")
-                f_reject.setObjectName("FollowReject")
-                f_reject.setCursor(Qt.CursorShape.PointingHandCursor)
-
-                f_accept = QPushButton("Apply Changes")
-                f_accept.setObjectName("FollowAccept")
-                f_accept.setCursor(Qt.CursorShape.PointingHandCursor)
-
-                f_btn_layout.addWidget(f_reject)
-                f_btn_layout.addStretch()
-                f_btn_layout.addWidget(f_accept)
-                f_layout.addLayout(f_btn_layout)
-
-                f_reject.clicked.connect(lambda: follow.done(0))
-                f_accept.clicked.connect(lambda: follow.done(1))
-
-                follow_result = follow.exec()
-
-                if follow_result == 1:
-                    spans = _find_protected_spans(original)
-                    apply_corrections_with_diff(
-                        original, corrected,
-                        start_offset=review_start,
-                        protected_spans=spans,
-                    )
-                    if comment and comment.strip():
-                        try:
-                            word_app = get_word_integration()
-                            word_app.add_comment(comment.strip())
-                        except Exception as e:
-                            print(f"Comment insertion failed: {e}")
-                    self.status_label.setText(f"Low-similarity correction applied (user approved, {sim_float:.0%}).")
-                    self._set_corrected_for_copy("")
-                    corrected = ""
-                else:
-                    self.status_label.setText(
-                        f"Correction rejected (low similarity {sim_float:.0%})."
-                    )
-                    self._set_corrected_for_copy("")
-                    corrected = ""
-                self.diff_text.clear()
+                self._show_toast(
+                    "Review the changes in the panel, then click Apply.",
+                    kind="warning",
+                )
                 return
             else:
                 self.status_label.setText(
@@ -4403,13 +4880,20 @@ class ProofreaderApp(QMainWindow):
             self.apply_btn.setText(f"Apply to {app_name}")
             self.apply_btn.setVisible(True)
             self.apply_btn.setEnabled(True)
+            if self.apply_menu_action is not None:
+                self.apply_menu_action.setEnabled(True)
         else:
             self.pending_generic_apply = None
             self.apply_btn.setVisible(False)
+            if self.apply_menu_action is not None:
+                self.apply_menu_action.setEnabled(False)
 
     def _apply_pending_generic(self) -> None:
         pending = self.pending_generic_apply
         if not pending:
+            return
+        if pending.get("mode") == "word":
+            self._apply_pending_word(pending)
             return
         self._apply_generic_text(
             pending["original"],
@@ -4417,31 +4901,111 @@ class ProofreaderApp(QMainWindow):
             pending["target"],
         )
 
+    def _apply_pending_word(self, pending: dict[str, Any]) -> None:
+        """Apply a low-similarity Word correction from the panel."""
+        self._task_cancel_event.clear()
+        self.apply_btn.setEnabled(False)
+        if self.apply_menu_action is not None:
+            self.apply_menu_action.setEnabled(False)
+        self.status_label.setText("Applying changes to Word…")
+        self._show_toast("Applying changes to Word…", kind="processing")
+        applied = False
+        try:
+            spans = _find_protected_spans(pending["original"])
+            applied = apply_corrections_with_diff(
+                pending["original"],
+                pending["corrected"],
+                start_offset=pending.get("review_start", 0),
+                protected_spans=spans,
+            )
+            if applied:
+                comment_text = pending.get("comment") or ""
+                if comment_text.strip():
+                    try:
+                        word_app = get_word_integration()
+                        word_app.add_comment(comment_text.strip())
+                    except Exception as e:
+                        print(f"Comment insertion failed: {e}")
+                self.status_label.setText("Low-similarity correction applied.")
+                self._show_toast("Changes applied to Word.", kind="success")
+                self._set_corrected_for_copy("")
+            else:
+                self.status_label.setText(
+                    "Could not apply — the selection in Word moved. "
+                    "Reselect the text and try again."
+                )
+                self._show_toast(
+                    "Could not apply — selection moved in Word.",
+                    kind="error",
+                )
+        except Exception as e:
+            print(f"Error applying Word correction: {e}")
+            self.status_label.setText(f"Could not apply: {e}")
+            self._show_toast(f"Could not apply: {e}", kind="error")
+        finally:
+            self.apply_btn.setEnabled(True)
+            if applied:
+                self.apply_btn.setVisible(False)
+                self.pending_generic_apply = None
+                if self.apply_menu_action is not None:
+                    self.apply_menu_action.setEnabled(False)
+            else:
+                # Keep the button available so the user can retry after
+                # reselecting the text in Word.
+                if self.apply_menu_action is not None:
+                    self.apply_menu_action.setEnabled(True)
+
     def _apply_generic_text(
         self,
         original: str,
         corrected: str,
         target: dict[str, Any],
     ) -> None:
+        self._task_cancel_event.clear()
         app_name = target.get("name") or "the app"
         self.status_label.setText(f"Applying to {app_name}…")
         self._generic_apply_pending = True
         self._show_toast(f"Applying to {app_name}…", kind="processing")
         self.apply_btn.setEnabled(False)
-        worker = GenericApplyWorker(original, corrected, target)
+        if self.apply_menu_action is not None:
+            self.apply_menu_action.setEnabled(False)
+        worker = GenericApplyWorker(
+            original,
+            corrected,
+            target,
+            cancel_event=self._task_cancel_event,
+        )
         self.generic_apply_worker = worker
         worker.done.connect(self._on_generic_apply_done)
-        worker.start()
+        try:
+            worker.start()
+            self._start_escape_monitor()
+        except Exception as e:
+            print(f"Error starting apply worker: {e}")
+            self._generic_apply_pending = False
+            self.apply_btn.setEnabled(True)
+            self._stop_escape_monitor()
+            self._show_toast("Could not start applying the changes.", kind="error")
+            return
 
     def _on_generic_apply_done(self, ok: bool, message: str) -> None:
+        self._stop_escape_monitor()
         self._generic_apply_pending = False
         self.apply_btn.setVisible(False)
         self.apply_btn.setEnabled(True)
+        if self.apply_menu_action is not None:
+            self.apply_menu_action.setEnabled(False)
         self.pending_generic_apply = None
         preview = getattr(self, "pending_generic_preview", None)
         self.pending_generic_preview = None
         self.status_label.setText(message)
         if not ok:
+            if message == "Task cancelled.":
+                self.status_dot.setStyleSheet(
+                    "background-color: #D97706; border-radius: 4px;"
+                )
+                self._show_toast(message, kind="warning")
+                return
             if preview:
                 self._show_generic_diff(
                     preview["original"],
@@ -4496,9 +5060,43 @@ class ProofreaderApp(QMainWindow):
         self._set_corrected_for_copy("")
         self._show_toast(f"Error: {error_msg}", kind="error")
 
-    def task_finished(self) -> None:
+    def _on_task_cancelled(self, message: str) -> None:
+        """User pressed double-Esc while a proofread was running."""
+        self._stop_escape_monitor()
+        self._last_task_cancelled = True
         self.run_btn.setEnabled(True)
-        self.status_dot.setStyleSheet("background-color: #059669; border-radius: 4px;")
+        self.status_dot.setStyleSheet("background-color: #D97706; border-radius: 4px;")
+        self.status_label.setText(message)
+        self._show_toast(message, kind="warning")
+        self._set_corrected_for_copy("")
+        self.apply_btn.setVisible(False)
+        self.apply_btn.setEnabled(True)
+        self.pending_generic_apply = None
+        self.pending_generic_preview = None
+        self._generic_apply_pending = False
+        if self.apply_menu_action is not None:
+            self.apply_menu_action.setEnabled(False)
+        if hasattr(self, 'tray_icon') and hasattr(self, 'normal_icon') and not self.normal_icon.isNull():
+            self.tray_icon.setIcon(self.normal_icon)
+
+    def task_finished(self) -> None:
+        apply_worker = getattr(self, "generic_apply_worker", None)
+        apply_running = (
+            self._generic_apply_pending
+            or (apply_worker is not None and apply_worker.isRunning())
+        )
+        if not apply_running:
+            self._stop_escape_monitor()
+        self.run_btn.setEnabled(True)
+        if self._last_task_cancelled:
+            self._last_task_cancelled = False
+            self.status_dot.setStyleSheet(
+                "background-color: #D97706; border-radius: 4px;"
+            )
+        else:
+            self.status_dot.setStyleSheet(
+                "background-color: #059669; border-radius: 4px;"
+            )
         if hasattr(self, 'tray_icon') and hasattr(self, 'normal_icon') and not self.normal_icon.isNull():
             self.tray_icon.setIcon(self.normal_icon)
         if self.toast.is_processing() and not self._generic_apply_pending:
@@ -4509,6 +5107,9 @@ class ProofreaderApp(QMainWindow):
 
     def open_settings(self):
         try:
+            previous_launch_at_login = self.settings.get(
+                "general", {}
+            ).get("launch_at_login", False)
             dialog = SettingsDialog(self.current_settings(), self)
             self._active_settings_dialog = dialog
             dialog.finished.connect(
@@ -4542,17 +5143,24 @@ class ProofreaderApp(QMainWindow):
                     self.activateWindow()
             
             save_runtime_settings(updated)
+            if self.keep_top_action is not None:
+                self.keep_top_action.setChecked(
+                    updated.get("general", {}).get("keep_on_top", True)
+                )
             launch_wanted = updated.get("general", {}).get("launch_at_login", False)
-            if launch_wanted:
-                if not set_launch_at_login(True):
-                    QMessageBox.warning(
-                        self,
-                        "Launch at Login",
-                        "ByteProof could not be set to launch at login.\n\n"
-                        "You can still launch ByteProof manually.",
-                    )
-            else:
-                set_launch_at_login(False)
+            # Only touch launchd when the setting actually changed; re-running
+            # bootstrap on every Save would briefly launch a second copy.
+            if launch_wanted != previous_launch_at_login:
+                if launch_wanted:
+                    if not set_launch_at_login(True):
+                        QMessageBox.warning(
+                            self,
+                            "Launch at Login",
+                            "ByteProof could not be set to launch at login.\n\n"
+                            "You can still launch ByteProof manually.",
+                        )
+                else:
+                    set_launch_at_login(False)
             self.status_label.setText("Settings saved.")
             print(f"Settings saved. New Temp: {updated['general']['temperature']}")
             
