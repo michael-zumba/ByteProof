@@ -1,9 +1,48 @@
 # How to Build and Distribute "ByteProof" App
 
-This guide explains how to build the application for both macOS (Apple Silicon
-and Intel) and Windows, and how to distribute it via GitHub Releases.
+This guide explains how to ship a new ByteProof release from your Mac: it
+builds the signed/notarized macOS DMGs locally, kicks off the Windows build in
+GitHub Actions at the same time, uploads everything to a GitHub Release, and
+then publishes the update feed to the ByteMind website.
 
-## Part 1: Building the Application
+## One-command release (recommended)
+
+**Prerequisites:**
+
+- Mac with Apple Silicon + Rosetta 2, Python 3.13, and `create-dmg`
+  (`brew install create-dmg`).
+- GitHub CLI installed and authenticated: `gh auth login`.
+- The `.venv` (Apple Silicon) and `.venv_x86` (Intel) Python environments from
+  the setup below.
+- Optional: Apple Developer ID / notary credentials so the DMGs are notarized
+  (set `BYTEPROOF_DEV_ID`; see `scripts/notarize.sh`).
+
+Release a new version with one command:
+
+```bash
+./scripts/release.sh 1.6.0 "Short release notes for users"
+```
+
+What happens automatically:
+
+1. `tools/bump_version.py` updates the app version, the Windows file metadata,
+   and the website update feed.
+2. The script commits, tags (`v1.6.0`), and pushes — GitHub Actions immediately
+   starts building `ByteProof_Windows.zip` on a Windows runner.
+3. While GitHub builds Windows, the script builds
+   `ByteProof_Installer_AppleSilicon.dmg` and `ByteProof_Installer_Intel.dmg`
+   on your Mac.
+4. When both are finished, it uploads the two DMGs to the GitHub Release, which
+   already contains the Windows zip.
+5. Only then does it push `byteproof-version.json` to the ByteMind website
+   repository. GitHub Pages publishes it, and installed copies of ByteProof
+   see the new version on their next update check.
+
+If any step fails, fix the problem and run the same command again. Existing
+tags are detected and skipped, so re-runs continue without re-bumping the
+version.
+
+## Manual builds (fallback)
 
 ### 1. Build for macOS (Apple Silicon / arm64)
 
@@ -40,7 +79,7 @@ Then build:
 
 **Output:** `ByteProof_Installer_Intel.dmg` in the project root.
 
-### 3. Build for Windows
+### 3. Build for Windows (manual)
 
 **Prerequisites:** Windows computer with Python 3.11+.
 
@@ -59,42 +98,28 @@ Then build:
 
 ---
 
-## Part 2: Distributing via GitHub Releases
+## GitHub Releases
 
-### Step 1: Push Code to GitHub
+The recommended `release.sh` flow creates the release automatically. If you
+prefer to do it by hand:
 
-```bash
-git add .
-git commit -m "Release version 1.0"
-git push origin main
-```
-
-### Step 2: Create a Release
-
-1. Go to your repository's **Releases** page.
-2. Click **Draft a new release**.
-3. **Tag:** e.g., `v1.0` (create new tag on publish).
-4. **Title:** e.g., "ByteProof v1.0".
-
-### Step 3: Upload Files
-
-Upload the three distribution files:
-- **macOS Apple Silicon:** `ByteProof_Installer_AppleSilicon.dmg`
-- **macOS Intel:** `ByteProof_Installer_Intel.dmg`
-- **Windows:** `ByteProof_Windows.zip`
-
-### Step 4: Publish
-
-Click **Publish release**.
-
----
-
-## Part 3: Linking from Your Website
+1. Push a version tag to GitHub:
+   ```bash
+   git tag v1.6.0
+   git push origin v1.6.0
+   ```
+2. GitHub Actions builds `ByteProof_Windows.zip` and attaches it to a new
+   release with that tag.
+3. Upload the two DMGs to the same release:
+   ```bash
+   gh release upload v1.6.0 ByteProof_Installer_AppleSilicon.dmg ByteProof_Installer_Intel.dmg
+   ```
+4. Publish the release.
 
 **Latest release always:**
 `https://github.com/michael-zumba/ByteProof/releases/latest`
 
-**Direct links (replace tag and repo):**
+**Direct links (stable across releases):**
 - **Mac (Apple Silicon):** `https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg`
 - **Mac (Intel):** `https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg`
 - **Windows:** `https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip`
@@ -104,8 +129,10 @@ Click **Publish release**.
 ## In-App Updates
 
 ByteProof checks `https://www.bytemind.co.nz/byteproof-version.json` (defined in
-`src/app_version.py`) shortly after launch. Host a JSON file at that URL shaped
-like this (a copy is included in the repo as `byteproof-version.json.example`):
+`src/app_version.py`) shortly after launch. The file lives in the
+`michael-zumba/bytemind-website` repository and is pushed there automatically by
+the release script. A copy of the expected shape is included in the ByteProof
+repo as `byteproof-version.json.example`:
 
 ```json
 {
@@ -117,8 +144,6 @@ like this (a copy is included in the repo as `byteproof-version.json.example`):
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
 }
 ```
-
-Until that URL is live, the app silently skips the update check.
 
 When a user clicks **Remind Me Later**, ByteProof remembers that version and
 won't ask again until a newer version appears. Users can always choose
