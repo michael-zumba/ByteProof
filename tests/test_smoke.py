@@ -1656,11 +1656,13 @@ def test_settings_new_pages() -> None:
     dialog.show()
     app.processEvents()
 
-    assert dialog.sidebar.count() == 4
+    assert dialog.sidebar.count() == 5
     local_item = dialog.sidebar.item(2)
     assert local_item is not None and local_item.text() == "Local AI"
     license_item = dialog.sidebar.item(3)
     assert license_item is not None and license_item.text() == "License"
+    updates_item = dialog.sidebar.item(4)
+    assert updates_item is not None and updates_item.text() == "Updates"
 
     dialog.sidebar.setCurrentRow(2)
     dialog.change_page(2)
@@ -1672,6 +1674,12 @@ def test_settings_new_pages() -> None:
     assert dialog.settings["active_provider"] == "ByteProof Local (Qwen3)"
     assert dialog.settings["local_model"]["active_model"] == "qwen3-4b"
     assert dialog.settings["providers"]["ByteProof Local (Qwen3)"]["model"] == "qwen3-4b"
+
+    dialog.sidebar.setCurrentRow(4)
+    dialog.change_page(4)
+    app.processEvents()
+    assert dialog.update_check_btn.text() == "Check for Updates"
+    assert dialog.version_label.text() == settings.APP_VERSION
     dialog.close()
 
 

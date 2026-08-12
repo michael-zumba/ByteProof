@@ -913,7 +913,9 @@ class SettingsDialog(QDialog):
     chk_sound: QCheckBox
     open_hotkey_edit: QKeySequenceEdit
     proofread_hotkey_edit: QKeySequenceEdit
+    version_label: QLabel
     update_check_btn: QPushButton
+    update_status_label: QLabel
     temp_label: QLabel
     temp_slider: QSlider
     combo_spelling: QComboBox
@@ -968,7 +970,9 @@ class SettingsDialog(QDialog):
         self.sidebar = QListWidget()
         self.sidebar.setFixedWidth(190)
         self.sidebar.setObjectName("SettingsSidebar")
-        self.sidebar.addItems(["General", "Connect", "Local AI", "License"])
+        self.sidebar.addItems(
+            ["General", "Connect", "Local AI", "License", "Updates"]
+        )
         self.sidebar.currentRowChanged.connect(self.change_page)
         main_layout.addWidget(self.sidebar)
 
@@ -998,6 +1002,7 @@ class SettingsDialog(QDialog):
         self.init_connect_tab()
         self.init_local_tab()
         self.init_license_tab()
+        self.init_updates_tab()
         
         self.setStyleSheet("""
             QDialog {
@@ -1098,16 +1103,20 @@ class SettingsDialog(QDialog):
             return
         self.update_check_btn.setEnabled(False)
         self.update_check_btn.setText("Checking…")
+        self.update_status_label.setText("Checking for updates…")
         checker(
             force=True,
             done_callback=self._finish_update_check,
             parent_widget=self,
         )
 
-    def _finish_update_check(self) -> None:
+    def _finish_update_check(self, message: str = "") -> None:
         try:
             self.update_check_btn.setEnabled(True)
             self.update_check_btn.setText("Check for Updates")
+            self.update_status_label.setText(
+                message if message else "Check complete."
+            )
         except RuntimeError:
             # The settings dialog was closed while the check was running.
             pass
@@ -1179,24 +1188,6 @@ class SettingsDialog(QDialog):
         hotkey_layout.addRow("Proofread Selection:", self.proofread_hotkey_edit)
         
         layout.addWidget(hotkey_group)
-
-        updates_group = QGroupBox("Updates")
-        updates_layout = QVBoxLayout(updates_group)
-        updates_layout.setSpacing(12)
-        updates_hint = QLabel(
-            "ByteProof checks for new versions automatically. "
-            "You can also check right now."
-        )
-        updates_hint.setWordWrap(True)
-        updates_hint.setStyleSheet("color: #57534E; font-size: 12px;")
-        updates_layout.addWidget(updates_hint)
-
-        self.update_check_btn = QPushButton("Check for Updates")
-        self.update_check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update_check_btn.clicked.connect(self._start_update_check)
-        updates_layout.addWidget(self.update_check_btn)
-
-        layout.addWidget(updates_group)
         
         temp_group = QGroupBox("Proofreading Style (Temperature)")
         temp_layout = QVBoxLayout(temp_group)
@@ -2307,6 +2298,74 @@ class SettingsDialog(QDialog):
         lbl_copy.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_copy.setStyleSheet("color: #A89F9A; font-size: 11px; padding-top: 12px;")
         layout.addWidget(lbl_copy)
+
+        scroll.setWidget(content)
+        outer_layout.addWidget(scroll)
+        self.pages.addWidget(page)
+
+    def init_updates_tab(self) -> None:
+        page = QWidget()
+        outer_layout = QVBoxLayout(page)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(content)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setSpacing(18)
+
+        title = QLabel("Updates")
+        title.setObjectName("SettingsTitle")
+        layout.addWidget(title)
+
+        version_group = QGroupBox("Current Version")
+        version_layout = QVBoxLayout(version_group)
+        version_layout.setSpacing(10)
+
+        self.version_label = QLabel(APP_VERSION)
+        self.version_label.setStyleSheet(
+            "font-size: 30px; font-weight: 700; color: #1A3A2A; "
+            "letter-spacing: -0.5px;"
+        )
+        version_layout.addWidget(self.version_label)
+
+        hint = QLabel(
+            "ByteProof checks for new versions automatically when the app "
+            "opens. You can also check for a newer version at any time."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #57534E; font-size: 12px; line-height: 1.5;")
+        version_layout.addWidget(hint)
+
+        self.update_check_btn = QPushButton("Check for Updates")
+        self.update_check_btn.setMinimumSize(180, 44)
+        self.update_check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_check_btn.setStyleSheet(
+            "QPushButton { background-color: #1A3A2A; color: #FFFFFF; "
+            "border: 1px solid #143024; border-radius: 12px; "
+            "padding: 10px 24px; font-size: 13px; font-weight: 600; }"
+            "QPushButton:hover { background-color: #143024; }"
+            "QPushButton:pressed { background-color: #0E2419; }"
+            "QPushButton:disabled { background-color: #A9C7B3; "
+            "color: rgba(255,255,255,180); border-color: #79A88A; }"
+        )
+        self.update_check_btn.clicked.connect(self._start_update_check)
+        version_layout.addWidget(
+            self.update_check_btn,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+
+        self.update_status_label = QLabel("Ready when you are.")
+        self.update_status_label.setWordWrap(True)
+        self.update_status_label.setStyleSheet(
+            "color: #A89F9A; font-size: 11px;"
+        )
+        version_layout.addWidget(self.update_status_label)
+
+        layout.addWidget(version_group)
 
         scroll.setWidget(content)
         outer_layout.addWidget(scroll)
@@ -4509,14 +4568,13 @@ class ProofreaderApp(QMainWindow):
         self._update_check_done_callback = None
         parent = getattr(self, "_update_check_parent", None) or self
         self._update_check_parent = None
+        result_message = ""
         try:
             force = getattr(self, "_update_check_force", False)
             if not update_available or version_info is None:
+                result_message = f"You're up to date (v{APP_VERSION})."
                 if force:
-                    self._show_toast(
-                        f"You're up to date (v{APP_VERSION}).",
-                        kind="success",
-                    )
+                    self._show_toast(result_message, kind="success")
                 return
 
             remote_version = version_info.get("version", "")
@@ -4541,12 +4599,16 @@ class ProofreaderApp(QMainWindow):
                         "skipped_update_version"
                     ] = remote_version
                     save_runtime_settings(self.settings)
+                result_message = (
+                    f"Update available: {APP_NAME} {remote_version}."
+                )
                 return
 
+            result_message = f"Downloading {APP_NAME} {remote_version}…"
             self._download_update(version_info)
         finally:
             if done_callback is not None:
-                done_callback()
+                done_callback(result_message)
 
     def _download_update(self, version_info: dict[str, Any]) -> None:
         self.status_label.setText("Downloading update...")
