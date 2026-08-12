@@ -4,7 +4,7 @@ import sys
 import time
 import traceback
 
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QColor, QIcon, QPalette
 from PyQt6.QtWidgets import QApplication
 
 from config.deepseek_config import DEFAULT_MAX_OUTPUT_CHAT
@@ -74,6 +74,22 @@ def main() -> int:
     app.setApplicationName("ByteProof")
     app.setApplicationDisplayName("ByteProof")
     app.setOrganizationName("ByteMind Ltd")
+
+    # Force the ByteProof light palette so Windows dark mode cannot turn
+    # unstyled panels dark. macOS and Windows then look identical.
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor("#F7F4F0"))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor("#292524"))
+    palette.setColor(QPalette.ColorRole.Base, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#F1EDE8"))
+    palette.setColor(QPalette.ColorRole.Text, QColor("#292524"))
+    palette.setColor(QPalette.ColorRole.Button, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#292524"))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#292524"))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor("#1A3A2A"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+    app.setPalette(palette)
 
     icon_path = resource_path(os.path.join("logo", "logo.svg"))
     if os.path.exists(icon_path):

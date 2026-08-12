@@ -2573,6 +2573,8 @@ class ProofreaderApp(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         central_widget = QWidget()
+        central_widget.setObjectName("RootPanel")
+        central_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
         layout.setSpacing(16)
@@ -3705,6 +3707,10 @@ class ProofreaderApp(QMainWindow):
         ).replace("\\", "/")
         stylesheet = """
             QMainWindow {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #F9F7F4, stop:1 #F1EDE8);
+            }
+            #RootPanel {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #F9F7F4, stop:1 #F1EDE8);
             }
