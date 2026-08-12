@@ -1328,7 +1328,10 @@ class SettingsDialog(QDialog):
                 (
                     "Reviewer comments require a ByteProof license."
                     if comment_locked
-                    else "Adds a Word reviewer comment alongside tracked changes."
+                    else (
+                        "Adds a Word reviewer comment. Proofreading quality is "
+                        "the same with or without a comment."
+                    )
                 ),
                 self.combo_comment,
             )

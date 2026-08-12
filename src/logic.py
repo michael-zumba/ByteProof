@@ -1208,9 +1208,13 @@ def proofread_selection_once(
 
         reviewer_comment = ""
 
-        if comment_type != "None":
+        # Paid users always receive the deeper internal Language review as
+        # proofreading guidance, so toggling the reviewer-comment setting can
+        # never change the edits produced. The setting only controls whether a
+        # reviewer note is also inserted into Word.
+        if access.get("tier") != "free":
             try:
-                print(f"Generating {comment_type} comment for enhanced proofreading...")
+                print("Generating Language review for proofreading guidance...")
                 result = generate_comment(
                     current_text,
                     api_key,
@@ -1218,20 +1222,45 @@ def proofread_selection_once(
                     base_url,
                     model,
                     provider_name=active_provider,
-                    comment_type=comment_type,
+                    comment_type="Language",
                     spelling=spelling,
                     context=context,
                     cancel_event=cancel_event,
                 )
                 if result and result.strip():
-                    comment_result["text"] = result.strip()
                     reviewer_comment = result.strip()
-                    print("Comment generated and will be used as proofreading guidance.")
+                    print("Reviewer guidance generated.")
                 else:
-                    print("Comment generated but was empty.")
+                    print("Reviewer guidance generated but was empty.")
             except Exception as e:
-                comment_result["error"] = str(e)
-                print(f"Comment generation failed: {e}")
+                print(f"Reviewer guidance generation failed: {e}")
+
+        if comment_type != "None":
+            if comment_type == "Language" and reviewer_comment:
+                comment_result["text"] = reviewer_comment
+            else:
+                try:
+                    print(f"Generating {comment_type} comment for insertion...")
+                    result = generate_comment(
+                        current_text,
+                        api_key,
+                        max_tokens,
+                        base_url,
+                        model,
+                        provider_name=active_provider,
+                        comment_type=comment_type,
+                        spelling=spelling,
+                        context=context,
+                        cancel_event=cancel_event,
+                    )
+                    if result and result.strip():
+                        comment_result["text"] = result.strip()
+                        print(f"{comment_type} comment generated.")
+                    else:
+                        print(f"{comment_type} comment generated but was empty.")
+                except Exception as e:
+                    comment_result["error"] = str(e)
+                    print(f"Comment generation failed: {e}")
 
         protected_spans = _find_protected_spans(
             current_text, extra_spans=mask_spans

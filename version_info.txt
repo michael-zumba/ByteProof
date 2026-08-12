@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 6, 3, 0),
-    prodvers=(1, 6, 3, 0),
+    filevers=(1, 6, 4, 0),
+    prodvers=(1, 6, 4, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -15,11 +15,11 @@ VSVersionInfo(
         u'040904B0',
         [StringStruct(u'CompanyName', u'ByteMind Ltd'),
          StringStruct(u'FileDescription', u'ByteProof - AI academic proofreading for Microsoft Word'),
-         StringStruct(u'FileVersion', u'1.6.3'),
+         StringStruct(u'FileVersion', u'1.6.4'),
          StringStruct(u'InternalName', u'ByteProof'),
          StringStruct(u'OriginalFilename', u'ByteProof.exe'),
          StringStruct(u'ProductName', u'ByteProof'),
-         StringStruct(u'ProductVersion', u'1.6.3')])
+         StringStruct(u'ProductVersion', u'1.6.4')])
     ]),
     VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
   ]

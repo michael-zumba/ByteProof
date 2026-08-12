@@ -1076,6 +1076,7 @@ def test_citations_force_marker_prompt_not_segments() -> None:
         **_kwargs: Any,
     ) -> str:
         captured["source_text"] = source_text
+        captured["reviewer_comment"] = _kwargs.get("reviewer_comment", "")
         return "abc {{OBJ_0}} DEF"
 
     original = {
@@ -1085,6 +1086,7 @@ def test_citations_force_marker_prompt_not_segments() -> None:
         "requires": logic.provider_requires_api_key,
         "settings": logic.load_runtime_settings,
         "provider": logic.proofread_with_provider,
+        "generate_comment": logic.generate_comment,
     }
     logic.word_app = FakeWord()
     logic.get_access_status = lambda: {"tier": "paid", "free_mode_allowed": True}
@@ -1108,6 +1110,7 @@ def test_citations_force_marker_prompt_not_segments() -> None:
         "providers": {},
     }
     logic.proofread_with_provider = fake_provider
+    logic.generate_comment = lambda *_args, **_kwargs: "LANGUAGE_REVIEW"
     try:
         status, _original, corrected, _comment, _start = logic.proofread_selection_once(
             max_tokens=100
@@ -1115,6 +1118,7 @@ def test_citations_force_marker_prompt_not_segments() -> None:
         assert "Changes added as comment" in status
         assert "{{OBJ_0}}" in captured["source_text"]
         assert "===SEGMENT_0===" not in captured["source_text"]
+        assert captured["reviewer_comment"] == "LANGUAGE_REVIEW"
         assert corrected == "abc (X, 2020) DEF"
     finally:
         logic.word_app = original["word_app"]
@@ -1123,6 +1127,125 @@ def test_citations_force_marker_prompt_not_segments() -> None:
         logic.provider_requires_api_key = original["requires"]
         logic.load_runtime_settings = original["settings"]
         logic.proofread_with_provider = original["provider"]
+        logic.generate_comment = original["generate_comment"]
+
+
+def test_reviewer_guidance_always_runs_comment_optional() -> None:
+    """Proofreading output must not depend on the reviewer-comment setting.
+
+    Paid users always receive the internal Language review as guidance; the
+    setting only decides whether a reviewer note is inserted into Word.
+    """
+    from src import logic
+
+    calls: dict[str, list] = {
+        "comments": [],
+        "comment_generations": [],
+        "reviewer_comment": [],
+    }
+
+    class FakeWord:
+        def ensure_ready(self) -> None:
+            pass
+
+        def is_selection_in_table(self) -> bool:
+            return False
+
+        def ensure_track_changes_enabled(self) -> None:
+            pass
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return "abc def", 50, 56, "", ""
+
+        def selection_has_fields(self) -> bool:
+            return False
+
+        def add_comment(self, comment_text: str) -> None:
+            calls["comments"].append(comment_text)
+
+    def fake_generate_comment(*_args: Any, **kwargs: Any) -> str:
+        calls["comment_generations"].append(kwargs.get("comment_type"))
+        if kwargs.get("comment_type") == "Technical (Reviewer)":
+            return "TECH_COMMENT"
+        return "LANGUAGE_GUIDANCE"
+
+    def fake_provider(
+        source_text: str,
+        api_key: str,
+        max_tokens: int,
+        base_url: str,
+        model: str,
+        **_kwargs: Any,
+    ) -> str:
+        calls["reviewer_comment"].append(_kwargs.get("reviewer_comment", ""))
+        return "abc DEF"
+
+    current_comment_type = {"value": "None"}
+
+    original = {
+        "word_app": logic.word_app,
+        "access": logic.get_access_status,
+        "resolve": logic.resolve_provider_connection,
+        "requires": logic.provider_requires_api_key,
+        "settings": logic.load_runtime_settings,
+        "provider": logic.proofread_with_provider,
+        "generate_comment": logic.generate_comment,
+    }
+    logic.word_app = FakeWord()
+    logic.get_access_status = lambda: {"tier": "paid", "free_mode_allowed": True}
+    logic.resolve_provider_connection = lambda settings: (
+        "Fake",
+        "",
+        "http://fake",
+        "fake-model",
+    )
+    logic.provider_requires_api_key = lambda name: False
+    logic.load_runtime_settings = lambda: {
+        "general": {
+            "comment_type": current_comment_type["value"],
+            "auto_apply": False,
+            "temperature": 0.3,
+            "spelling": "UK/AU/NZ",
+            "style": "Precise (Minimal Changes)",
+            "context": "General Editing",
+        },
+        "active_provider": "Fake",
+        "providers": {},
+    }
+    logic.proofread_with_provider = fake_provider
+    logic.generate_comment = fake_generate_comment
+    try:
+        for comment_type, expected_note in [
+            ("None", None),
+            ("Language", "LANGUAGE_GUIDANCE"),
+            ("Technical (Reviewer)", "TECH_COMMENT"),
+        ]:
+            calls["comments"] = []
+            calls["comment_generations"] = []
+            calls["reviewer_comment"] = []
+            current_comment_type["value"] = comment_type
+            logic.proofread_selection_once(max_tokens=100)
+
+            # Guidance is always the same Language review regardless of the
+            # comment setting.
+            assert calls["reviewer_comment"] == ["LANGUAGE_GUIDANCE"]
+            assert "Language" in calls["comment_generations"]
+            if comment_type == "None":
+                assert "Technical (Reviewer)" not in calls["comment_generations"]
+                assert not any(
+                    "LANGUAGE_GUIDANCE" in text for text in calls["comments"]
+                )
+            else:
+                joined = "\n".join(calls["comments"])
+                assert "Reviewer note:\n" + expected_note in joined
+    finally:
+        logic.word_app = original["word_app"]
+        logic.get_access_status = original["access"]
+        logic.resolve_provider_connection = original["resolve"]
+        logic.provider_requires_api_key = original["requires"]
+        logic.load_runtime_settings = original["settings"]
+        logic.proofread_with_provider = original["provider"]
+        logic.generate_comment = original["generate_comment"]
 
 
 def test_apply_corrections_maps_offsets_around_fields() -> None:
@@ -2367,6 +2490,8 @@ def main() -> None:
     print("PASS plain-text citations are detected and masked")
     test_citations_force_marker_prompt_not_segments()
     print("PASS citations force marker prompt instead of blind segments")
+    test_reviewer_guidance_always_runs_comment_optional()
+    print("PASS reviewer guidance is independent of comment setting")
     test_apply_corrections_maps_offsets_around_fields()
     print("PASS apply corrections maps offsets around citation fields")
     test_api_call_with_retry_cancellation()
