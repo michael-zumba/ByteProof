@@ -109,10 +109,11 @@ xAI, Groq, Perplexity, or your own Ollama server.
 
 1. Download the installer for your chip (Apple Silicon or Intel).
 2. Open the `.dmg` and drag **ByteProof** to Applications.
-3. **First launch:** if macOS says it "cannot verify" ByteProof, right-click
-   **ByteProof** in Applications → choose **Open** → click **Open** again.
-   You only need to do this once (ByteProof is signed by ByteMind Ltd while
-   Apple notarization is in progress).
+3. **First launch:** if macOS says it "cannot verify" ByteProof, open
+   **System Settings → Privacy & Security**, scroll down to the **Security**
+   section, click **Open Anyway** next to the ByteProof message, then
+   confirm. You only need to do this once (ByteProof is signed by ByteMind
+   Ltd while Apple notarization is in progress).
 4. Grant Accessibility permission when prompted — required for hotkeys and
    Word integration.
 
