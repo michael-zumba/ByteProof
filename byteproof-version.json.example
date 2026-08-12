@@ -1,7 +1,7 @@
 {
-  "version": "1.6.2",
+  "version": "1.6.3",
   "release_date": "2026-08-12",
-  "release_notes": "Moved Check for Updates to its own Settings page with a polished layout",
+  "release_notes": "Fixed proofreading for text containing EndNote citations: punctuation now stays on the correct side, citation fields are preserved, and plain-text citations are protected from editing.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"

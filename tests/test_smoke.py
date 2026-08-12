@@ -914,6 +914,276 @@ def test_segment_reassembly_safety() -> None:
     assert _parse_segmented_response(response, 2) == ["Alpha", "Beta"]
 
 
+def test_fieldcode_pattern_matches_word_control_chars() -> None:
+    from src.logic import (
+        _FIELDCODE_PATTERN,
+        _find_protected_spans,
+        protect_special_chars,
+        restore_special_chars,
+    )
+
+    code = (
+        " ADDIN EN.CITE <EndNote><Cite>"
+        "<DisplayText>(Al-Qahtani & Elgharbawy, 2020)</DisplayText>"
+        "</Cite></EndNote>"
+    )
+    text = "sectors \x13" + code + " \x14(Al-Qahtani & Elgharbawy, 2020)\x15. A company"
+    start = text.index("\x13")
+    match = _FIELDCODE_PATTERN.match(text, start)
+    assert match is not None
+    assert match.end() > text.index("\x15")
+
+    protected, replacements = protect_special_chars(text)
+    assert "ADDIN" not in protected
+    assert "Al-Qahtani" not in protected
+    assert "{{OBJ_0}}" in protected
+    assert restore_special_chars(protected, replacements) == text
+
+    spans = _find_protected_spans(text)
+    assert spans == [(start, match.end())]
+
+
+def test_citation_fields_are_masked_and_mapped() -> None:
+    from src.logic import (
+        _CITATION_SPANS,
+        _find_protected_spans,
+        _locate_field_result_spans,
+        _merge_spans,
+        _visible_to_doc,
+        protect_special_chars,
+        restore_special_chars,
+    )
+
+    current_text = "abc (Al-Qahtani & Elgharbawy, 2020) def"
+    citation = "(Al-Qahtani & Elgharbawy, 2020)"
+    field_spans = [(54, 185, citation)]
+    result_spans = _locate_field_result_spans(current_text, field_spans, 50)
+    assert result_spans == [(4, 35)]
+
+    plain_spans = [
+        (m.start(), m.end()) for m in _CITATION_SPANS.finditer(current_text)
+    ]
+    assert plain_spans == [(4, 35)]
+    mask_spans = _merge_spans(result_spans + plain_spans)
+    assert mask_spans == [(4, 35)]
+
+    protected, replacements = protect_special_chars(
+        current_text, extra_spans=mask_spans
+    )
+    assert "Al-Qahtani" not in protected
+    assert "{{OBJ_0}}" in protected
+    assert restore_special_chars(protected, replacements) == current_text
+
+    protected_spans = _find_protected_spans(
+        current_text, extra_spans=mask_spans
+    )
+    assert protected_spans == [(3, 36)]
+
+    mapper = _visible_to_doc(50, field_spans, result_spans)
+    assert mapper(0) == 50
+    assert mapper(4) == 54
+    assert mapper(35) == 185
+    assert mapper(36) == 186
+    assert mapper(len(current_text)) == 50 + len(current_text) + 100
+
+
+def test_field_result_spans_use_document_positions_not_text_search() -> None:
+    from src.logic import _locate_field_result_spans
+
+    # The first "(X, 2020)" is plain text; the second is the Word field.
+    # A text search would wrongly map the field to the first occurrence.
+    current_text = "abc (X, 2020) def (X, 2020) ghi"
+    citation = "(X, 2020)"
+    # Selection starts at 50. Visible text before the field is 18 chars, so
+    # the field begins at doc 68. Hidden code length 10 + result 9 + end char
+    # 1 -> doc_end 88.
+    field_spans = [(68, 88, citation)]
+    result_spans = _locate_field_result_spans(current_text, field_spans, 50)
+    assert result_spans == [(18, 27)]
+    assert current_text[18:27] == citation
+
+
+def test_plain_text_citations_are_detected_and_masked() -> None:
+    from src.logic import (
+        _CITATION_SPANS,
+        _merge_spans,
+        protect_special_chars,
+        restore_special_chars,
+    )
+
+    text = (
+        "policies (He et al., 2022). "
+        "World Economic Forum (2023) and Smith et al. (2020) found "
+        "something (Depoers et al., 2016)."
+    )
+    spans = [
+        (m.start(), m.end()) for m in _CITATION_SPANS.finditer(text)
+    ]
+    spans = _merge_spans(spans)
+    masked_texts = [text[s:e] for s, e in spans]
+    assert "(He et al., 2022)" in masked_texts
+    assert "World Economic Forum (2023)" in masked_texts
+    assert "Smith et al. (2020)" in masked_texts
+    assert "(Depoers et al., 2016)" in masked_texts
+
+    protected, replacements = protect_special_chars(text, extra_spans=spans)
+    assert "He et al." not in protected
+    assert "World Economic Forum" not in protected
+    assert "{{OBJ_0}}" in protected
+    assert restore_special_chars(protected, replacements) == text
+
+
+def test_citations_force_marker_prompt_not_segments() -> None:
+    """Citations must be visible to the AI as markers.
+
+    The segmented path hides protected spans entirely, so the model cannot
+    keep sentence punctuation on the correct side of a citation (it moved
+    periods before citations and duplicated citation text). When citations
+    are present, the whole text is sent with {{OBJ_N}} markers instead.
+    """
+    from src import logic
+
+    captured: dict[str, str] = {}
+
+    class FakeWord:
+        def ensure_ready(self) -> None:
+            pass
+
+        def is_selection_in_table(self) -> bool:
+            return False
+
+        def ensure_track_changes_enabled(self) -> None:
+            pass
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return "abc (X, 2020) def", 50, 74, "", ""
+
+        def selection_has_fields(self) -> bool:
+            return True
+
+        def get_selection_field_spans(self) -> list[tuple[int, int, str]]:
+            return [(54, 74, "(X, 2020)")]
+
+        def add_comment(self, comment_text: str) -> None:
+            pass
+
+    def fake_provider(
+        source_text: str,
+        api_key: str,
+        max_tokens: int,
+        base_url: str,
+        model: str,
+        **_kwargs: Any,
+    ) -> str:
+        captured["source_text"] = source_text
+        return "abc {{OBJ_0}} DEF"
+
+    original = {
+        "word_app": logic.word_app,
+        "access": logic.get_access_status,
+        "resolve": logic.resolve_provider_connection,
+        "requires": logic.provider_requires_api_key,
+        "settings": logic.load_runtime_settings,
+        "provider": logic.proofread_with_provider,
+    }
+    logic.word_app = FakeWord()
+    logic.get_access_status = lambda: {"tier": "paid", "free_mode_allowed": True}
+    logic.resolve_provider_connection = lambda settings: (
+        "Fake",
+        "",
+        "http://fake",
+        "fake-model",
+    )
+    logic.provider_requires_api_key = lambda name: False
+    logic.load_runtime_settings = lambda: {
+        "general": {
+            "comment_type": "None",
+            "auto_apply": False,
+            "temperature": 0.3,
+            "spelling": "UK/AU/NZ",
+            "style": "Precise (Minimal Changes)",
+            "context": "General Editing",
+        },
+        "active_provider": "Fake",
+        "providers": {},
+    }
+    logic.proofread_with_provider = fake_provider
+    try:
+        status, _original, corrected, _comment, _start = logic.proofread_selection_once(
+            max_tokens=100
+        )
+        assert "Changes added as comment" in status
+        assert "{{OBJ_0}}" in captured["source_text"]
+        assert "===SEGMENT_0===" not in captured["source_text"]
+        assert corrected == "abc (X, 2020) DEF"
+    finally:
+        logic.word_app = original["word_app"]
+        logic.get_access_status = original["access"]
+        logic.resolve_provider_connection = original["resolve"]
+        logic.provider_requires_api_key = original["requires"]
+        logic.load_runtime_settings = original["settings"]
+        logic.proofread_with_provider = original["provider"]
+
+
+def test_apply_corrections_maps_offsets_around_fields() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return "", 50, 190, "", ""
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+        def delete_range(self, start: int, end: int) -> None:
+            self.calls.append(("delete", start, end))
+
+        def insert_at_position(self, pos: int, text: str) -> None:
+            self.calls.append(("insert", pos, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        citation = "(Al-Qahtani & Elgharbawy, 2020)"
+        current_text = "abc " + citation + " def"
+        corrected = "abc " + citation + " DEF"
+        field_spans = [(54, 185, citation)]
+        result_spans = logic._locate_field_result_spans(
+            current_text, field_spans, 50
+        )
+        protected_spans = logic._find_protected_spans(
+            current_text, extra_spans=result_spans
+        )
+
+        ok = logic.apply_corrections_with_diff(
+            current_text,
+            corrected,
+            start_offset=50,
+            protected_spans=protected_spans,
+            field_info=(field_spans, result_spans),
+        )
+        assert ok is True
+        assert logic.word_app.calls == [("replace", 186, 189, "DEF")]
+
+        # Edits that touch the citation itself must never be applied.
+        logic.word_app.calls = []
+        corrected = "abc (X, 2020) def"
+        ok = logic.apply_corrections_with_diff(
+            current_text,
+            corrected,
+            start_offset=50,
+            protected_spans=protected_spans,
+            field_info=(field_spans, result_spans),
+        )
+        assert ok is True
+        assert logic.word_app.calls == []
+    finally:
+        logic.word_app = original
+
+
 def test_api_call_with_retry_cancellation() -> None:
     import threading
 
@@ -2087,6 +2357,18 @@ def main() -> None:
     print("PASS GUI construction")
     test_segment_reassembly_safety()
     print("PASS segment reassembly safety")
+    test_fieldcode_pattern_matches_word_control_chars()
+    print("PASS Word field-code control characters are protected")
+    test_citation_fields_are_masked_and_mapped()
+    print("PASS citation fields are masked and mapped")
+    test_field_result_spans_use_document_positions_not_text_search()
+    print("PASS field result spans use document positions")
+    test_plain_text_citations_are_detected_and_masked()
+    print("PASS plain-text citations are detected and masked")
+    test_citations_force_marker_prompt_not_segments()
+    print("PASS citations force marker prompt instead of blind segments")
+    test_apply_corrections_maps_offsets_around_fields()
+    print("PASS apply corrections maps offsets around citation fields")
     test_api_call_with_retry_cancellation()
     print("PASS API call cancellation")
     test_provider_connection_tester()

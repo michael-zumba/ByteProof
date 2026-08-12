@@ -1,10 +1,26 @@
 # pyright: reportMissingModuleSource=false
+import html
+import json
 import os
 import platform
+import re
 import subprocess
-from typing import Any
+from typing import Any, NamedTuple
 
 WD_WITH_IN_TABLE = 12  # Word constant: wdWithInTable
+
+
+class FieldSpan(NamedTuple):
+    """A Word field inside the current selection.
+
+    doc_start is the position of the field begin character, doc_end is the
+    position after the field end character, and result_text is the visible
+    result Word displays for the field (e.g. an EndNote citation).
+    """
+
+    doc_start: int
+    doc_end: int
+    result_text: str
 
 
 class WordIntegration:
@@ -39,6 +55,10 @@ class WordIntegration:
         raise NotImplementedError
 
     def selection_has_fields(self) -> bool:
+        raise NotImplementedError
+
+    def get_selection_field_spans(self) -> list[FieldSpan]:
+        """Return the fields in the current selection as FieldSpan items."""
         raise NotImplementedError
 
 # --- Windows Implementation ---
@@ -171,6 +191,27 @@ class WindowsWordIntegration(WordIntegration):
         except Exception:
             return False
 
+    def get_selection_field_spans(self) -> list[FieldSpan]:
+        try:
+            word = self._get_word()
+            sel = word.Selection
+            spans: list[FieldSpan] = []
+            for field in sel.Fields:
+                try:
+                    spans.append(
+                        FieldSpan(
+                            int(field.Range.Start),
+                            int(field.Range.End),
+                            str(field.Result.Text or ""),
+                        )
+                    )
+                except Exception:
+                    continue
+            return spans
+        except Exception as e:
+            print(f"Error getting field spans (Windows): {e}")
+            return []
+
     def add_comment(self, comment_text: str) -> None:
         if not comment_text or not comment_text.strip():
             print("Skipping empty comment insertion.")
@@ -258,12 +299,15 @@ class MacOSWordIntegration(WordIntegration):
             set mySelection to selection
             set myRange to text object of mySelection
             
-            -- Get selection content and start position (0-based)
-            -- CRITICAL: Compute endPos from startPos + text length, NOT from
-            -- end of content, which diverges when selection spans paragraphs
-            -- due to Word's internal paragraph marker counting.
+            -- Get selection content and start position (0-based).
             set startPos to start of content of myRange
             set myContent to content of myRange
+
+            -- CRITICAL: Use the real range end. Word's internal character
+            -- positions include hidden field code characters (e.g. EndNote
+            -- citations), so startPos + (length of myContent) is too small
+            -- whenever the selection contains a field.
+            set endPos to end of content of myRange
             
             -- Context Before (approx 30 words -> ~250 chars)
             set contextBefore to ""
@@ -277,7 +321,6 @@ class MacOSWordIntegration(WordIntegration):
             -- Context After
             set docRange to text object of active document
             set docEnd to end of content of docRange
-            set endPos to startPos + (length of myContent)
             
             set contextAfter to ""
             if endPos < docEnd then
@@ -463,6 +506,167 @@ class MacOSWordIntegration(WordIntegration):
             return int(res.strip()) > 0
         except Exception:
             return False
+
+    def get_selection_field_spans(self) -> list[FieldSpan]:
+        """Return fields in the current selection on macOS.
+
+        Word's AppleScript dictionary exposes the field code range and code
+        text, but not the result range directly. The visible result normally
+        matches the citation text embedded in the field code (EndNote's
+        DisplayText or Zotero's formatted citation); a bounded character scan
+        is used as a fallback for other field types.
+        """
+        list_script = """
+        on run
+            try
+                tell application "Microsoft Word"
+                    if not (exists active document) then return ""
+                    set fs to fields of text object of selection
+                    set out to ""
+                    repeat with i from 1 to (count of fs)
+                        set f to item i of fs
+                        set codeStart to start of content of field code of f
+                        set codeEnd to end of content of field code of f
+                        set codeText to ""
+                        try
+                            set codeText to content of field code of f
+                        end try
+                        set out to out & (codeStart as string) & "###FIELD_SPAN###" & (codeEnd as string) & "###FIELD_SPAN###" & codeText & "###FIELD_END###"
+                    end repeat
+                    return out
+                end tell
+            on error
+                return ""
+            end try
+        end run
+        """
+        try:
+            raw = self._run_applescript(list_script)
+        except Exception as e:
+            print(f"Error listing Word fields (macOS): {e}")
+            return []
+
+        spans: list[FieldSpan] = []
+        for chunk in raw.split("###FIELD_END###"):
+            if "###FIELD_SPAN###" not in chunk:
+                continue
+            parts = chunk.split("###FIELD_SPAN###")
+            if len(parts) < 3:
+                continue
+            try:
+                code_start = int(parts[0].strip())
+                code_end = int(parts[1].strip())
+            except ValueError:
+                continue
+            code_text = parts[2]
+            result_start = code_end + 1
+
+            expected = self._field_result_from_code(code_text)
+            if expected is not None:
+                result_end = result_start + len(expected)
+                actual = self._mac_read_range_text(result_start, result_end)
+                if actual == expected:
+                    spans.append(
+                        FieldSpan(
+                            max(0, code_start - 1),
+                            result_end + 1,
+                            actual,
+                        )
+                    )
+                    continue
+
+            result_text, result_end = self._mac_scan_field_result(result_start)
+            spans.append(
+                FieldSpan(
+                    max(0, code_start - 1),
+                    result_end + 1,
+                    result_text,
+                )
+            )
+        return spans
+
+    def _mac_read_range_text(self, start: int, end: int) -> str:
+        script = """
+        on run argv
+            set aStart to (item 1 of argv) as integer
+            set aEnd to (item 2 of argv) as integer
+            try
+                tell application "Microsoft Word"
+                    set r to create range active document start aStart end aEnd
+                    return content of r
+                end tell
+            on error
+                return ""
+            end try
+        end run
+        """
+        try:
+            return self._run_applescript(script, str(start), str(end))
+        except Exception:
+            return ""
+
+    def _mac_scan_field_result(self, result_start: int) -> tuple[str, int]:
+        script = """
+        on run argv
+            set resultStart to (item 1 of argv) as integer
+            try
+                tell application "Microsoft Word"
+                    set out to ""
+                    set p to resultStart
+                    repeat 500 times
+                        set r to create range active document start p end (p + 1)
+                        set c to ""
+                        try
+                            set c to content of r
+                        on error
+                            set c to missing value
+                        end try
+                        if c is missing value or c is "" then
+                            return "###SCAN###" & out & "###SCAN###" & (p as string)
+                        end if
+                        set out to out & c
+                        set p to p + 1
+                    end repeat
+                    return "###SCAN###" & out & "###SCAN###" & (p as string)
+                end tell
+            on error
+                return ""
+            end try
+        end run
+        """
+        try:
+            res = self._run_applescript(script, str(result_start))
+        except Exception:
+            return "", result_start
+        if "###SCAN###" in res:
+            parts = res.split("###SCAN###")
+            if len(parts) >= 3:
+                try:
+                    return parts[1], int(parts[2])
+                except ValueError:
+                    pass
+        return "", result_start
+
+    @staticmethod
+    def _field_result_from_code(code_text: str) -> str | None:
+        """Extract the visible result text from EndNote/Zotero field code."""
+        if not code_text:
+            return None
+        match = re.search(r"<DisplayText>(.*?)</DisplayText>", code_text, re.DOTALL)
+        if match:
+            return html.unescape(match.group(1))
+        for key in ("formattedCitation", "plainCitation"):
+            match = re.search(
+                re.escape(key) + r'"\s*:\s*("(?:\\.|[^"\\])*")',
+                code_text,
+                re.DOTALL,
+            )
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except Exception:
+                    continue
+        return None
 
     def add_comment(self, comment_text: str) -> None:
         import subprocess as sp

@@ -70,7 +70,22 @@ def normalize_for_comparison(text: str) -> str:
     return text
 
 
-def _find_protected_spans(text: str) -> list[tuple[int, int]]:
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Sort spans and merge overlapping/adjacent intervals."""
+    ordered = sorted((s, e) for s, e in spans if e > s)
+    merged: list[tuple[int, int]] = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _find_protected_spans(
+    text: str,
+    extra_spans: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     i = 0
     while i < len(text):
@@ -107,7 +122,19 @@ def _find_protected_spans(text: str) -> list[tuple[int, int]]:
         ):
             spans.append((i, i + 1))
         i += 1
-    return spans
+    if extra_spans:
+        # Extend each field result span by one character on each side so
+        # boundary edits (e.g. inserting punctuation next to a citation) are
+        # never applied inside the hidden field code.
+        for start, end in extra_spans:
+            if end <= start:
+                continue
+            if start > 0:
+                start -= 1
+            if end < len(text):
+                end += 1
+            spans.append((start, end))
+    return _merge_spans(spans)
 
 
 def _range_overlaps_protected(
@@ -120,6 +147,86 @@ def _range_overlaps_protected(
 
 
 
+
+
+def _locate_field_result_spans(
+    current_text: str,
+    field_spans: list[tuple[int, int, str]],
+    start_offset: int,
+) -> list[tuple[int, int]]:
+    """Compute each field's visible result span from its document range.
+
+    Word hides the field code characters between the field's begin and end
+    characters. The visible result is the last ``len(result_text)`` visible
+    characters before the field end character, so the span can be derived
+    exactly from the field's document range. This is robust even when the
+    same citation text also appears elsewhere in the selection as plain text
+    (a text search would map the field to the wrong occurrence).
+    """
+    spans: list[tuple[int, int]] = []
+    hidden_before = 0
+    for doc_start, doc_end, result_text in field_spans:
+        result_len = len(result_text)
+        # Field layout: [begin][code][separator][result][end].
+        # The end character is the last hidden character, so the visible
+        # result ends one character before doc_end.
+        result_start_doc = doc_end - 1 - result_len
+        hidden_in_field = doc_end - doc_start - result_len - 1
+        vis_start = result_start_doc - start_offset - hidden_before - hidden_in_field
+        vis_end = vis_start + result_len
+        if vis_start < 0 or vis_end > len(current_text):
+            raise ValueError("Field result lies outside the selection")
+        if current_text[vis_start:vis_end] != result_text:
+            raise ValueError("Field result text does not match the selection")
+        spans.append((vis_start, vis_end))
+        hidden_before += doc_end - doc_start - result_len
+    return spans
+
+
+def _visible_to_doc(
+    start_offset: int,
+    field_spans: list[tuple[int, int, str]],
+    result_spans: list[tuple[int, int]],
+) -> Callable[[int], int]:
+    """Build a mapper from visible-text offsets to real Word positions.
+
+    Word's internal character positions include hidden field code characters,
+    so after each field the document offset is shifted by the field's hidden
+    code length.
+    """
+    hidden_lengths: list[int] = []
+    for (doc_start, doc_end, _), (vis_start, vis_end) in zip(
+        field_spans, result_spans
+    ):
+        hidden_lengths.append(max(0, doc_end - doc_start - (vis_end - vis_start)))
+
+    def mapper(visible_offset: int) -> int:
+        hidden_before = sum(
+            hidden
+            for hidden, (_, vis_end) in zip(hidden_lengths, result_spans)
+            if vis_end <= visible_offset
+        )
+        return start_offset + visible_offset + hidden_before
+
+    return mapper
+
+
+_FIELD_XML_CLEANUP = re.compile(
+    r"(?s)<EndNote>.*?</EndNote>"
+    r"|<Cite>.*?</Cite>"
+    r"|<record>.*?</record>"
+    r"|<DisplayText>.*?</DisplayText>"
+    r"|\bADDIN\s+(?:EN\.CITE|ZOTERO_ITEM)\b"
+)
+
+
+def _clean_field_code_context(text: str) -> str:
+    """Strip Word field code payloads from AI context strings."""
+    text = _FIELDCODE_PATTERN.sub("", text)
+    text = _FIELD_XML_CLEANUP.sub("", text)
+    return "".join(
+        ch for ch in text if ord(ch) not in (0x13, 0x14, 0x15)
+    )
 
 
 SEGMENT_BOUNDARY = "\n===SEGMENT_BOUNDARY===\n"
@@ -205,6 +312,7 @@ def apply_corrections_with_diff(
     corrected_text: str,
     start_offset: int,
     protected_spans: list[tuple[int, int]] | None = None,
+    field_info: tuple[list[tuple[int, int, str]], list[tuple[int, int]]] | None = None,
 ) -> bool:
     try:
         _, current_start, _, _, _ = word_app.get_selection_info()
@@ -218,10 +326,11 @@ def apply_corrections_with_diff(
     if protected_spans is None:
         protected_spans = []
 
-    has_fields = word_app.selection_has_fields()
-    if has_fields and protected_spans:
-        word_app.replace_selection_content(corrected_text)
-        return True
+    field_spans: list[tuple[int, int, str]] = []
+    result_spans: list[tuple[int, int]] = []
+    if field_info is not None:
+        field_spans, result_spans = field_info
+    mapper = _visible_to_doc(start_offset, field_spans, result_spans)
 
     matcher = difflib.SequenceMatcher(None, original_text, corrected_text, autojunk=False)
 
@@ -231,8 +340,8 @@ def apply_corrections_with_diff(
         if tag == "equal":
             continue
 
-        doc_start = start_offset + i1
-        doc_end = start_offset + i2
+        doc_start = mapper(i1)
+        doc_end = mapper(i2)
 
         if _range_overlaps_protected(i1, i2, protected_spans):
             continue
@@ -852,13 +961,25 @@ def test_provider_connection(
     except Exception as exc:
         return False, f"Unexpected error: {exc}"
 
-_FIELDCODE_PATTERN = re.compile(r'\{ADDIN\s+(?:EN\.CITE|ZOTERO_ITEM).*?\}(?!\})')
+_FIELDCODE_PATTERN = re.compile(
+    r"(?:\{ADDIN\s+(?:EN\.CITE|ZOTERO_ITEM).*?\}(?!\})"
+    r"|[\x13]\s*ADDIN\s+(?:EN\.CITE|ZOTERO_ITEM).*?[\x15])",
+    re.DOTALL,
+)
 
 _PAREN_CITE = re.compile(
     r"\([A-Z][A-Za-z\u2019'.\-]*(?:\s+[A-Z][A-Za-z\u2019'.\-]+)*(?:(?:\s+(?:and|&)\s+[A-Z][A-Za-z\u2019'.\-]*(?:\s+[A-Z][A-Za-z\u2019'.\-]+)*)|(?:,?\s+et\s+al\.))?"
     r",?\s*\d{4}[a-z]?(?:,\s*p\.?\s*\d+)?"
     r"(?:\s*;\s*[A-Z][A-Za-z\u2019'.\-]*(?:\s+[A-Z][A-Za-z\u2019'.\-]+)*(?:(?:\s+(?:and|&)\s+[A-Z][A-Za-z\u2019'.\-]*(?:\s+[A-Z][A-Za-z\u2019'.\-]+)*)|(?:,?\s+et\s+al\.))?,?\s*\d{4}[a-z]?)*"
     r"\)"
+)
+
+_NARRATIVE_CITE = re.compile(
+    r"[A-Z][A-Za-z\u2019'.\-]*(?:\s+(?:and\s+)?[A-Z][A-Za-z\u2019'.\-]+)*(?:\s+et\s+al\.)?\s*\(\d{4}[a-z]?\)"
+)
+
+_CITATION_SPANS = re.compile(
+    r"(?:" + _PAREN_CITE.pattern + r")|(?:" + _NARRATIVE_CITE.pattern + r")"
 )
 
 
@@ -877,12 +998,27 @@ def _is_protected_at(text: str, pos: int) -> Match[str] | None:
     return None
 
 
-def protect_special_chars(text: str) -> tuple[str, dict[str, str]]:
+def protect_special_chars(
+    text: str,
+    extra_spans: list[tuple[int, int]] | None = None,
+) -> tuple[str, dict[str, str]]:
     replacements: dict[str, str] = {}
     obj_counter = 0
     final_text = ""
+    extra = sorted((s, e) for s, e in (extra_spans or []) if e > s)
+    extra_idx = 0
     i = 0
     while i < len(text):
+        if extra_idx < len(extra) and i == extra[extra_idx][0]:
+            start, end = extra[extra_idx]
+            marker = f"{{{{OBJ_{obj_counter}}}}}"
+            replacements[marker] = text[start:end]
+            final_text += marker
+            obj_counter += 1
+            i = end
+            extra_idx += 1
+            continue
+
         match = _FIELDCODE_PATTERN.match(text, i)
         if match:
             marker = f"{{{{OBJ_{obj_counter}}}}}"
@@ -962,6 +1098,8 @@ def proofread_selection_once(
         # internal character counting. osascript/Python may introduce \n or \r\n, which throws off
         # the replacement indices for multi-paragraph selections.
         current_text = current_text.replace('\r\n', '\r').replace('\n', '\r')
+        context_before = _clean_field_code_context(context_before)
+        context_after = _clean_field_code_context(context_after)
         
         if not current_text.strip():
             return "Selection is empty.", None, None, None, 0
@@ -972,8 +1110,53 @@ def proofread_selection_once(
         print(f"Proofreading selection ({len(current_text)} chars)...")
         if cancel_event is not None and cancel_event.is_set():
             raise TaskCancelledError()
+
+        # Word counts hidden field code characters (EndNote/Zotero citations)
+        # in document positions but not in the visible selection text. Locate
+        # those fields so they can be protected from editing and so diff edits
+        # can be mapped back to the correct Word positions.
+        field_spans: list[tuple[int, int, str]] = []
+        field_result_spans: list[tuple[int, int]] = []
+        plain_citation_spans: list[tuple[int, int]] = []
+        codes_shown = any(ord(ch) in (0x13, 0x14, 0x15) for ch in current_text)
+        if not codes_shown and word_app.selection_has_fields():
+            try:
+                field_spans = word_app.get_selection_field_spans()
+                if not field_spans:
+                    raise ValueError("No field spans returned")
+                field_result_spans = _locate_field_result_spans(
+                    current_text, field_spans, start_offset
+                )
+            except Exception as e:
+                print(f"Could not map citation fields in selection: {e}")
+                return (
+                    (
+                        "Skipped: ByteProof couldn't safely map a citation in "
+                        "the selected text. Try selecting text without the "
+                        "citation."
+                    ),
+                    None,
+                    None,
+                    None,
+                    0,
+                )
+
+        if not codes_shown:
+            plain_citation_spans = [
+                (match.start(), match.end())
+                for match in _CITATION_SPANS.finditer(current_text)
+            ]
+
+        # Citations must be visible to the AI as {{OBJ_N}} markers (never as
+        # invisible gaps), otherwise the model cannot keep sentence
+        # punctuation on the correct side of the citation. Merge the Word
+        # field spans with any plain-text citation spans so both are masked.
+        mask_spans = _merge_spans(field_result_spans + plain_citation_spans)
+        citation_like = bool(field_spans or plain_citation_spans)
         
-        protected_text, replacements = protect_special_chars(current_text)
+        protected_text, replacements = protect_special_chars(
+            current_text, extra_spans=mask_spans
+        )
         
         runtime_settings = settings or load_runtime_settings()
         active_provider, api_key, base_url, model = resolve_provider_connection(runtime_settings)
@@ -1050,12 +1233,14 @@ def proofread_selection_once(
                 comment_result["error"] = str(e)
                 print(f"Comment generation failed: {e}")
 
-        protected_spans = _find_protected_spans(current_text)
+        protected_spans = _find_protected_spans(
+            current_text, extra_spans=mask_spans
+        )
         editable_segments = _extract_segments_from_text(current_text, protected_spans)
         if cancel_event is not None and cancel_event.is_set():
             raise TaskCancelledError()
 
-        if len(editable_segments) > 1:
+        if len(editable_segments) > 1 and not citation_like:
             segmented_prompt = _build_segmented_prompt(editable_segments)
             segmented_instructions = (
                 "Proofread each SEGMENT above independently. "
@@ -1142,6 +1327,11 @@ def proofread_selection_once(
                     current_text, corrected,
                     start_offset=start_offset,
                     protected_spans=protected_spans,
+                    field_info=(
+                        (field_spans, field_result_spans)
+                        if field_spans
+                        else None
+                    ),
                 )
                 result_status = "Proofreading complete." + warning_suffix
             else:
