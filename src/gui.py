@@ -819,6 +819,89 @@ class CacheCleanupWorker(QThread):
         self.done.emit(result)
 
 
+class UpdateDialog(QDialog):
+    """Polished, properly sized update prompt with branded buttons."""
+
+    def __init__(
+        self,
+        current_version: str,
+        new_version: str,
+        release_date: str,
+        release_notes: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Update Available")
+        self.setModal(True)
+        self.setMinimumWidth(440)
+        self.result_action = "remind"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 22)
+        layout.setSpacing(12)
+
+        title = QLabel(f"{APP_NAME} {new_version} is available")
+        title.setStyleSheet("font-size: 19px; font-weight: 700; color: #1A3A2A;")
+        layout.addWidget(title)
+
+        subtitle = QLabel(
+            f"You're using {APP_NAME} {current_version}."
+            + (f" Released {release_date}." if release_date else "")
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #57534E; font-size: 13px;")
+        layout.addWidget(subtitle)
+
+        if release_notes:
+            notes = QTextEdit()
+            notes.setReadOnly(True)
+            notes.setPlainText(release_notes)
+            notes.setFixedHeight(130)
+            notes.setStyleSheet(
+                "QTextEdit { background-color: #FFFFFF; border: 1px solid #E8E4E0; "
+                "border-radius: 12px; padding: 12px; color: #44403C; "
+                "font-size: 13px; selection-background-color: #D6E4DB; }"
+            )
+            layout.addWidget(notes)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        buttons.setContentsMargins(0, 8, 0, 0)
+
+        remind_btn = QPushButton("Remind Me Later")
+        remind_btn.setMinimumSize(150, 40)
+        remind_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        remind_btn.clicked.connect(lambda: self._finish("remind"))
+        buttons.addWidget(remind_btn)
+
+        buttons.addStretch()
+
+        download_btn = QPushButton("Download and Install")
+        download_btn.setMinimumSize(170, 40)
+        download_btn.setDefault(True)
+        download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        download_btn.clicked.connect(lambda: self._finish("download"))
+        buttons.addWidget(download_btn)
+
+        layout.addLayout(buttons)
+
+        self.setStyleSheet(
+            "QDialog { background-color: #F7F4F0; }"
+            "QPushButton { background-color: #FFFFFF; border: 1px solid #E8E4E0; "
+            "border-radius: 10px; color: #292524; padding: 8px 18px; "
+            "font-size: 13px; font-weight: 600; }"
+            "QPushButton:hover { background-color: #FAF8F5; border-color: #C4BDB7; }"
+            "QPushButton:default { background-color: #1A3A2A; color: #FFFFFF; "
+            "border: 1px solid #143024; }"
+            "QPushButton:default:hover { background-color: #143024; }"
+        )
+        self.adjustSize()
+
+    def _finish(self, action: str) -> None:
+        self.result_action = action
+        self.accept()
+
+
 class SettingsDialog(QDialog):
     settings: dict[str, Any]
     sidebar: QListWidget
@@ -830,6 +913,7 @@ class SettingsDialog(QDialog):
     chk_sound: QCheckBox
     open_hotkey_edit: QKeySequenceEdit
     proofread_hotkey_edit: QKeySequenceEdit
+    update_check_btn: QPushButton
     temp_label: QLabel
     temp_slider: QSlider
     combo_spelling: QComboBox
@@ -1007,6 +1091,27 @@ class SettingsDialog(QDialog):
     def change_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
 
+    def _start_update_check(self) -> None:
+        parent = self.parent()
+        checker = getattr(parent, "_check_for_app_updates", None)
+        if checker is None:
+            return
+        self.update_check_btn.setEnabled(False)
+        self.update_check_btn.setText("Checking…")
+        checker(
+            force=True,
+            done_callback=self._finish_update_check,
+            parent_widget=self,
+        )
+
+    def _finish_update_check(self) -> None:
+        try:
+            self.update_check_btn.setEnabled(True)
+            self.update_check_btn.setText("Check for Updates")
+        except RuntimeError:
+            # The settings dialog was closed while the check was running.
+            pass
+
     def init_general_tab(self) -> None:
         page = QWidget()
         outer_layout = QVBoxLayout(page)
@@ -1074,6 +1179,24 @@ class SettingsDialog(QDialog):
         hotkey_layout.addRow("Proofread Selection:", self.proofread_hotkey_edit)
         
         layout.addWidget(hotkey_group)
+
+        updates_group = QGroupBox("Updates")
+        updates_layout = QVBoxLayout(updates_group)
+        updates_layout.setSpacing(12)
+        updates_hint = QLabel(
+            "ByteProof checks for new versions automatically. "
+            "You can also check right now."
+        )
+        updates_hint.setWordWrap(True)
+        updates_hint.setStyleSheet("color: #57534E; font-size: 12px;")
+        updates_layout.addWidget(updates_hint)
+
+        self.update_check_btn = QPushButton("Check for Updates")
+        self.update_check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_check_btn.clicked.connect(self._start_update_check)
+        updates_layout.addWidget(self.update_check_btn)
+
+        layout.addWidget(updates_group)
         
         temp_group = QGroupBox("Proofreading Style (Temperature)")
         temp_layout = QVBoxLayout(temp_group)
@@ -4362,8 +4485,15 @@ class ProofreaderApp(QMainWindow):
             )
             return
 
-    def _check_for_app_updates(self, force: bool = False) -> None:
+    def _check_for_app_updates(
+        self,
+        force: bool = False,
+        done_callback: Any = None,
+        parent_widget: QWidget | None = None,
+    ) -> None:
         self._update_check_force = force
+        self._update_check_done_callback = done_callback
+        self._update_check_parent = parent_widget
         self.update_check_worker = UpdateCheckWorker(APP_VERSION)
         self.update_check_worker.found.connect(self._handle_update_check_result)
         self.update_check_worker.start()
@@ -4375,39 +4505,48 @@ class ProofreaderApp(QMainWindow):
     def _handle_update_check_result(
         self, update_available: bool, version_info: dict[str, Any] | None
     ) -> None:
-        force = getattr(self, "_update_check_force", False)
-        if not update_available or version_info is None:
-            if force:
-                self._show_toast(f"You're up to date (v{APP_VERSION}).", kind="success")
-            return
+        done_callback = getattr(self, "_update_check_done_callback", None)
+        self._update_check_done_callback = None
+        parent = getattr(self, "_update_check_parent", None) or self
+        self._update_check_parent = None
+        try:
+            force = getattr(self, "_update_check_force", False)
+            if not update_available or version_info is None:
+                if force:
+                    self._show_toast(
+                        f"You're up to date (v{APP_VERSION}).",
+                        kind="success",
+                    )
+                return
 
-        remote_version = version_info.get("version", "")
-        release_date = version_info.get("release_date", "")
-        release_notes = version_info.get("release_notes", "")
-        if not force and is_update_dismissed(remote_version, self.settings):
-            return
-        self.pending_update_version = remote_version
+            remote_version = version_info.get("version", "")
+            release_date = version_info.get("release_date", "")
+            release_notes = version_info.get("release_notes", "")
+            if not force and is_update_dismissed(remote_version, self.settings):
+                return
+            self.pending_update_version = remote_version
 
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Update Available")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.setText(f"{APP_NAME} {remote_version} is available (you have {APP_VERSION}).")
-        info_text = f"Released: {release_date}"
-        if release_notes:
-            info_text += f"\n\n{release_notes}"
-        msg.setInformativeText(info_text)
-        download_btn = msg.addButton("Download and Install", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Remind Me Later", QMessageBox.ButtonRole.RejectRole)
-        msg.setDefaultButton(download_btn)
-        msg.exec()
+            dialog = UpdateDialog(
+                APP_VERSION,
+                remote_version,
+                release_date,
+                release_notes,
+                parent=parent,
+            )
+            dialog.exec()
 
-        if msg.clickedButton() != download_btn:
-            if remote_version:
-                self.settings.setdefault("general", {})["skipped_update_version"] = remote_version
-                save_runtime_settings(self.settings)
-            return
+            if dialog.result_action != "download":
+                if remote_version:
+                    self.settings.setdefault("general", {})[
+                        "skipped_update_version"
+                    ] = remote_version
+                    save_runtime_settings(self.settings)
+                return
 
-        self._download_update(version_info)
+            self._download_update(version_info)
+        finally:
+            if done_callback is not None:
+                done_callback()
 
     def _download_update(self, version_info: dict[str, Any]) -> None:
         self.status_label.setText("Downloading update...")
