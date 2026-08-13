@@ -1,0 +1,10 @@
+{
+  "identity_name": "ByteMind.ByteProof",
+  "publisher": "CN=4B25323B-AC94-4609-8F92-3AB67A94C5FF",
+  "publisher_display_name": "ByteMind",
+  "display_name": "ByteProof",
+  "description": "ByteProof - AI academic proofreading for Microsoft Word",
+  "min_version": "10.0.17763.0",
+  "max_version_tested": "10.0.26100.0",
+  "architecture": "x64"
+}

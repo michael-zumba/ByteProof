@@ -121,6 +121,9 @@ xAI, Groq, Perplexity, or your own Ollama server.
 
 1. Download `ByteProof_Windows.zip`.
 2. Extract the zip and run `ByteProof.exe`.
+3. If Windows shows **"Windows protected your PC"**, click **More info →
+   Run anyway** — this is expected for a new, unsigned app. The Microsoft
+   Store version, which installs without any warning, is in preparation.
 
 No special Windows permissions are required for hotkeys or Word integration.
 

@@ -1,9 +1,10 @@
 # How to Build and Distribute "ByteProof" App
 
 This guide explains how to ship a new ByteProof release from your Mac: it
-builds the signed/notarized macOS DMGs locally, kicks off the Windows build in
-GitHub Actions at the same time, uploads everything to a GitHub Release, and
-then publishes the update feed to the ByteMind website.
+builds the signed/notarized macOS DMGs locally, kicks off the Windows build
+(ZIP + Microsoft Store MSIX) in GitHub Actions at the same time, uploads
+everything to a GitHub Release, and then publishes the update feed to the
+ByteMind website.
 
 ## One-command release (recommended)
 
@@ -29,7 +30,7 @@ What happens automatically:
    and the website update feed.
 2. The script commits, tags (`v1.6.0`), and pushes — GitHub Actions immediately
    starts building `ByteProof_Windows.zip` on a Windows runner.
-3. While GitHub builds Windows, the script builds
+3. While GitHub builds the Windows ZIP and MSIX, the script builds
    `ByteProof_Installer_AppleSilicon.dmg` and `ByteProof_Installer_Intel.dmg`
    on your Mac.
 4. When both are finished, it uploads the two DMGs to the GitHub Release, which
@@ -123,6 +124,17 @@ prefer to do it by hand:
 - **Mac (Apple Silicon):** `https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg`
 - **Mac (Intel):** `https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg`
 - **Windows:** `https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip`
+
+## Microsoft Store (Windows)
+
+Each release also produces `ByteProof_Installer_x64.msix` for the Microsoft
+Store. Microsoft signs the package during certification, so Store users
+install without SmartScreen warnings and no paid certificate is required.
+
+Before the MSIX is built, set the Store identity in
+`packaging/windows/msix-config.json` (get the values from Partner Center →
+Product management → Product identity). Until then, releases ship the ZIP
+only. Full instructions: [MICROSOFT_STORE_GUIDE.md](MICROSOFT_STORE_GUIDE.md).
 
 ---
 

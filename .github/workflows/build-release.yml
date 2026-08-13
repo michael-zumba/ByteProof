@@ -29,12 +29,23 @@ jobs:
       - name: Create distribution zip
         shell: pwsh
         run: Compress-Archive -Path dist\ByteProof\* -DestinationPath ByteProof_Windows.zip -Force
+      - name: Build MSIX package for Microsoft Store
+        shell: pwsh
+        run: ./packaging/windows/build-msix.ps1 -AppDir dist\ByteProof -ConfigPath packaging\windows\msix-config.json -AssetsDir packaging\windows\Assets -Output ByteProof_Installer_x64.msix
       - uses: actions/upload-artifact@v4
         with:
           name: ByteProof-Windows
-          path: ByteProof_Windows.zip
-      - name: Attach to GitHub Release
+          path: |
+            ByteProof_Windows.zip
+            ByteProof_Installer_x64.msix
+          if-no-files-found: warn
+      - name: Attach ZIP to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ByteProof_Windows.zip
+      - name: Attach MSIX to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') && hashFiles('ByteProof_Installer_x64.msix') != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ByteProof_Installer_x64.msix

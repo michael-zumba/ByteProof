@@ -45,6 +45,8 @@ MANIFEST
 *.dmg
 *.pkg
 *.zip
+*.msix
+*.msixupload
 
 # Local upload scratch
 .uploads/
