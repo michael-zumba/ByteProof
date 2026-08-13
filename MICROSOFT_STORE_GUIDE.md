@@ -63,15 +63,15 @@ workflow log for the message telling you to update `msix-config.json`.
 
 You'll need:
 
-- **Description** — reuse the text from the ByteProof website/README.
+- **Description** — copy-paste text is ready in
+  `packaging/windows/store-listing.md`.
 - **At least one screenshot** — PNG, 1366×768 or larger (1920×1080 is ideal).
-  Take real screenshots of ByteProof running on Windows.
+  Take real screenshots of ByteProof running on Windows (see the listing pack
+  for suggested shots).
 - **Logo** — `packaging/windows/listing/StoreLogo300x300.png` is already
   generated from your app logo.
-- **Privacy policy URL** — required by the Store. ByteProof sends document
-  content to AI providers when a user connects their own key, and the
-  activation server handles licensing, so you need a privacy policy page on
-  bytemind.co.nz before submitting.
+- **Privacy policy URL** — ready:
+  `https://www.bytemind.co.nz/privacy.html`
 - **Pricing** — set the app to **Free**. ByteProof's $35 NZD license and
   trial are handled inside the app, not through Store billing.
 
