@@ -55,4 +55,13 @@ Keep the most important content in the top two-thirds of the image — the Store
 
 ## Logo
 
-Use `packaging/windows/listing/StoreLogo300x300.png` from this repo.
+Use these files from `packaging/windows/listing/`:
+
+- `StoreLogo300x300.png` — 1:1 app tile icon (300×300, strongly recommended)
+- `PosterArt_9x16.png` — 9:16 poster art (1296×2304)
+- `BoxArt_1x1.png` — 1:1 box art (1080×1080)
+- `SuperHeroArt_16x9.png` — optional 16:9 hero art (1920×1080, no text;
+  recommended by Microsoft for apps)
+
+All are PNG and far below the 50 MB limit. Regenerate them any time with:
+`python3 packaging/windows/make_store_art.py`
