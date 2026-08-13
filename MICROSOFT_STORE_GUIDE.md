@@ -105,6 +105,6 @@ live.
 | Problem | Fix |
 |---|---|
 | Store rejects the package: publisher doesn't match | Copy `Publisher` from Partner Center **Product identity** exactly (including `CN=`), update `msix-config.json`, rebuild. The build creates a matching certificate automatically. |
-| MSIX wasn't produced in the workflow | `msix-config.json` still has `REPLACE_...` values, or the Windows SDK wasn't available (release still works, MSIX is skipped with a log message). |
+| MSIX wasn't produced in the workflow | `msix-config.json` still has `REPLACE_...` values, or the SDK tools download failed (release still works, MSIX is skipped with a log message). Check the workflow log for the exact message. |
 | Package identity can't be changed later | The identity is locked once the app is created. Double-check the values before your first submission; fix the config and rebuild before submitting. |
 | Certification feedback | Read the report in Partner Center, fix, rebuild, resubmit. The most common issues are missing screenshots, a missing privacy policy URL, and capability/age-rating questions. |

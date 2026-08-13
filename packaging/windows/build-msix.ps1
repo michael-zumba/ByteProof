@@ -16,14 +16,39 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$script:BootstrapDir = $null
+
 function Find-KitTool {
     param([string]$Name)
+
+    # 1) Use an installed Windows SDK if one is available.
     $roots = @(
         "$env:ProgramFiles(x86)\Windows Kits\10\bin",
         "$env:ProgramFiles\Windows Kits\10\bin"
     )
     $tool = $roots |
         ForEach-Object { Get-ChildItem -Path $_ -Filter "$Name.exe" -Recurse -ErrorAction SilentlyContinue } |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1
+    if ($null -ne $tool) { return $tool }
+
+    # 2) Fall back to the official Windows SDK BuildTools NuGet package.
+    #    This works on GitHub runners and dev machines without admin rights.
+    if ($null -eq $script:BootstrapDir) {
+        $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+        $script:BootstrapDir = Join-Path $tempRoot "windows-sdk-buildtools"
+        $nupkg = Join-Path $tempRoot "Microsoft.Windows.SDK.BuildTools.nupkg"
+        if (-not (Test-Path $nupkg)) {
+            Write-Host "Windows SDK tools not installed; downloading Microsoft.Windows.SDK.BuildTools ..."
+            Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Windows.SDK.BuildTools" -OutFile $nupkg
+        }
+        if (Test-Path $script:BootstrapDir) { Remove-Item -Recurse -Force $script:BootstrapDir }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($nupkg, $script:BootstrapDir)
+    }
+
+    $tool = Get-ChildItem -Path (Join-Path $script:BootstrapDir "bin") -Filter "$Name.exe" -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match "\\x64\\" } |
         Sort-Object FullName -Descending |
         Select-Object -First 1
     return $tool
