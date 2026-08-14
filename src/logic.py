@@ -358,7 +358,11 @@ def apply_corrections_with_diff(
     start_offset: int,
     protected_spans: list[tuple[int, int]] | None = None,
     field_info: tuple[list[tuple[int, int, str]], list[tuple[int, int]]] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> bool:
+    if cancel_event is not None and cancel_event.is_set():
+        raise TaskCancelledError()
+
     try:
         current_visible, current_start, current_end, _, _ = word_app.get_selection_info()
         if abs(current_start - start_offset) > 10:
@@ -402,18 +406,24 @@ def apply_corrections_with_diff(
     # hidden characters remain after accounting for fields, so skip the
     # selection scan entirely when there are none.
     if get_hidden_spans is not None and missing_hidden_chars != 0:
-        try:
-            hidden_spans = get_hidden_spans(
-                current_start,
-                current_end,
-                field_spans,
-                max(0, missing_hidden_chars),
-            )
-        except TypeError:
+        def _scan_hidden_spans() -> list[tuple[int, int]]:
             try:
-                hidden_spans = get_hidden_spans(current_start, current_end)
+                return get_hidden_spans(
+                    current_start,
+                    current_end,
+                    field_spans,
+                    max(0, missing_hidden_chars),
+                )
             except TypeError:
-                hidden_spans = get_hidden_spans()
+                try:
+                    return get_hidden_spans(current_start, current_end)
+                except TypeError:
+                    return get_hidden_spans()
+
+        if cancel_event is not None:
+            hidden_spans = _run_with_cancel(cancel_event, _scan_hidden_spans)
+        else:
+            hidden_spans = _scan_hidden_spans()
 
     hidden_items = _build_hidden_items(
         start_offset, field_spans, result_spans, hidden_spans
@@ -474,6 +484,8 @@ def apply_corrections_with_diff(
 
     try:
         for doc_start, doc_end, new_text in edits:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TaskCancelledError()
             if doc_start == doc_end:
                 word_app.insert_at_position(doc_start, new_text)
             elif new_text:
@@ -1478,6 +1490,7 @@ def proofread_selection_once(
                         if field_spans
                         else None
                     ),
+                    cancel_event=cancel_event,
                 )
                 result_status = "Proofreading complete." + warning_suffix
             else:

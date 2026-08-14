@@ -1533,6 +1533,52 @@ def test_apply_corrections_skips_hidden_scan_for_clean_selection() -> None:
         logic.word_app = original
 
 
+def test_apply_corrections_cancels_during_hidden_scan() -> None:
+    import threading
+    import time
+
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return "abcd efghi", 0, 12, "", ""
+
+        def get_selection_hidden_spans(self, *args, **kwargs):
+            time.sleep(0.2)
+            return [(10, 12)]
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+        def delete_range(self, start: int, end: int) -> None:
+            self.calls.append(("delete", start, end))
+
+        def insert_at_position(self, pos: int, text: str) -> None:
+            self.calls.append(("insert", pos, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    cancel_event = threading.Event()
+    threading.Timer(0.03, cancel_event.set).start()
+    try:
+        try:
+            logic.apply_corrections_with_diff(
+                "abcd efghi",
+                "abcd efghi!",
+                start_offset=0,
+                cancel_event=cancel_event,
+            )
+            raise AssertionError("expected TaskCancelledError")
+        except logic.TaskCancelledError:
+            pass
+        assert logic.word_app.calls == []
+    finally:
+        logic.word_app = original
+
+
 def test_windows_hidden_span_revision_filtering() -> None:
     from src.word_integration import WindowsWordIntegration
 
@@ -2799,6 +2845,8 @@ def main() -> None:
     print("PASS apply corrections aborts when selection text changed")
     test_apply_corrections_skips_hidden_scan_for_clean_selection()
     print("PASS apply corrections skips hidden scan for clean selection")
+    test_apply_corrections_cancels_during_hidden_scan()
+    print("PASS apply corrections cancels during hidden scan")
     test_windows_hidden_span_revision_filtering()
     print("PASS Windows hidden span revision filtering")
     test_macos_hidden_span_parsing()
