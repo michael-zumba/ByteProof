@@ -1,7 +1,7 @@
 {
-  "version": "1.6.4",
-  "release_date": "2026-08-12",
-  "release_notes": "Reviewer comments no longer change proofreading output: the deeper review always guides editing, and the comment setting only controls whether a reviewer note is inserted.",
+  "version": "1.6.5",
+  "release_date": "2026-08-14",
+  "release_notes": "Fixed repeated proofreading of text that already contains tracked changes, so edits stay exactly aligned on every pass.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
