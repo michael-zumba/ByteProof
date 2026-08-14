@@ -1,4 +1,5 @@
 import difflib
+import itertools
 import json
 import os
 import re
@@ -10,7 +11,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from re import Match
-from typing import Any
+from typing import Any, cast
 
 import certifi
 
@@ -183,6 +184,59 @@ def _locate_field_result_spans(
     return spans
 
 
+def _build_hidden_items(
+    start_offset: int,
+    field_spans: list[tuple[int, int, str]],
+    result_spans: list[tuple[int, int]],
+    deletion_spans: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
+    """Build (visible_boundary, hidden_length) items for offset mapping.
+
+    Word omits tracked deletions and field-code characters from the text
+    ByteProof reads, but they still consume internal document positions. For
+    fields the existing mapping treats the whole hidden block as sitting after
+    the field result, which is equivalent for every offset outside the
+    protected field. Tracked deletions contribute a hidden block at the
+    visible position where their characters were removed.
+    """
+    intervals: list[tuple[int, int]] = []
+    for (doc_start, doc_end, _), (vis_start, vis_end) in zip(
+        field_spans, result_spans
+    ):
+        hidden_len = doc_end - doc_start - (vis_end - vis_start)
+        if hidden_len > 0:
+            intervals.append((doc_end - hidden_len, doc_end))
+    for span_start, span_end in deletion_spans or []:
+        if span_end > span_start:
+            intervals.append((span_start, span_end))
+
+    items: list[tuple[int, int]] = []
+    visible = 0
+    cursor = start_offset
+    for span_start, span_end in _merge_spans(intervals):
+        if span_end <= cursor:
+            continue
+        if span_start > cursor:
+            visible += span_start - cursor
+        else:
+            span_start = cursor
+        if span_end > span_start:
+            items.append((visible, span_end - span_start))
+        cursor = span_end
+    return items
+
+
+def _map_visible_offset(
+    start_offset: int,
+    items: list[tuple[int, int]],
+    visible_offset: int,
+) -> int:
+    hidden_before = sum(
+        length for boundary, length in items if boundary <= visible_offset
+    )
+    return start_offset + visible_offset + hidden_before
+
+
 def _visible_to_doc(
     start_offset: int,
     field_spans: list[tuple[int, int, str]],
@@ -194,19 +248,10 @@ def _visible_to_doc(
     so after each field the document offset is shifted by the field's hidden
     code length.
     """
-    hidden_lengths: list[int] = []
-    for (doc_start, doc_end, _), (vis_start, vis_end) in zip(
-        field_spans, result_spans
-    ):
-        hidden_lengths.append(max(0, doc_end - doc_start - (vis_end - vis_start)))
+    items = _build_hidden_items(start_offset, field_spans, result_spans)
 
     def mapper(visible_offset: int) -> int:
-        hidden_before = sum(
-            hidden
-            for hidden, (_, vis_end) in zip(hidden_lengths, result_spans)
-            if vis_end <= visible_offset
-        )
-        return start_offset + visible_offset + hidden_before
+        return _map_visible_offset(start_offset, items, visible_offset)
 
     return mapper
 
@@ -315,9 +360,15 @@ def apply_corrections_with_diff(
     field_info: tuple[list[tuple[int, int, str]], list[tuple[int, int]]] | None = None,
 ) -> bool:
     try:
-        _, current_start, _, _, _ = word_app.get_selection_info()
+        current_visible, current_start, current_end, _, _ = word_app.get_selection_info()
         if abs(current_start - start_offset) > 10:
             print(f"Aborting: Selection moved (Expected {start_offset}, got {current_start}).")
+            return False
+        normalized_current = (
+            current_visible.replace("\r\n", "\r").replace("\n", "\r")
+        )
+        if normalized_current != original_text:
+            print("Aborting: Selection text changed since proofreading.")
             return False
     except Exception as e:
         print(f"Error verifying selection: {e}")
@@ -330,7 +381,25 @@ def apply_corrections_with_diff(
     result_spans: list[tuple[int, int]] = []
     if field_info is not None:
         field_spans, result_spans = field_info
-    mapper = _visible_to_doc(start_offset, field_spans, result_spans)
+
+    hidden_spans: list[tuple[int, int]] = []
+    get_hidden_spans = cast(
+        Callable[..., list[tuple[int, int]]] | None,
+        getattr(word_app, "get_selection_hidden_spans", None),
+    )
+    if get_hidden_spans is not None:
+        try:
+            hidden_spans = get_hidden_spans(current_start, current_end)
+        except TypeError:
+            hidden_spans = get_hidden_spans()
+
+    hidden_items = _build_hidden_items(
+        start_offset, field_spans, result_spans, hidden_spans
+    )
+    boundaries = sorted(boundary for boundary, _ in hidden_items)
+
+    def map_offset(visible_offset: int) -> int:
+        return _map_visible_offset(start_offset, hidden_items, visible_offset)
 
     matcher = difflib.SequenceMatcher(None, original_text, corrected_text, autojunk=False)
 
@@ -340,20 +409,46 @@ def apply_corrections_with_diff(
         if tag == "equal":
             continue
 
-        doc_start = mapper(i1)
-        doc_end = mapper(i2)
-
         if _range_overlaps_protected(i1, i2, protected_spans):
             continue
 
-        if tag == "replace":
-            edits.append((doc_start, doc_end, corrected_text[j1:j2]))
-        elif tag == "delete":
-            edits.append((doc_start, doc_end, ""))
-        elif tag == "insert":
-            edits.append((doc_start, doc_start, corrected_text[j1:j2]))
+        new_text = corrected_text[j1:j2]
 
-    edits.sort(key=lambda e: e[0], reverse=True)
+        if tag == "insert":
+            pos = map_offset(i1)
+            edits.append((pos, pos, new_text))
+            continue
+
+        # A visible span can straddle hidden deleted characters. Mutating a
+        # Word range that includes those hidden characters does not delete the
+        # visible text after them, so split the span into per-segment edits.
+        split_points = [i1] + [
+            boundary for boundary in boundaries if i1 < boundary < i2
+        ] + [i2]
+        for seg_start, seg_end in itertools.pairwise(split_points):
+            doc_start = map_offset(seg_start)
+            edits.append((doc_start, doc_start + (seg_end - seg_start), ""))
+
+        if tag == "replace" and new_text:
+            if len(split_points) == 2:
+                # No hidden boundary inside: keep Word's combined replace.
+                doc_start = map_offset(i1)
+                edits.pop()
+                edits.append((doc_start, doc_start + (i2 - i1), new_text))
+            else:
+                edits.append((map_offset(i1), map_offset(i1), new_text))
+
+    def _apply_priority(edit: tuple[int, int, str]) -> int:
+        start, end, text = edit
+        if start == end:
+            return 0  # insert
+        if not text:
+            return 2  # delete
+        return 1  # replace
+
+    # Apply right-to-left. At equal positions, deletes and replaces must run
+    # before an insert so the insert is not consumed by the delete/replace.
+    edits.sort(key=lambda e: (e[0], _apply_priority(e)), reverse=True)
 
     try:
         for doc_start, doc_end, new_text in edits:

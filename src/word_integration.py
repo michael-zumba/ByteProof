@@ -61,6 +61,18 @@ class WordIntegration:
         """Return the fields in the current selection as FieldSpan items."""
         raise NotImplementedError
 
+    def get_selection_hidden_spans(
+        self, start: int = 0, end: int = 0
+    ) -> list[tuple[int, int]]:
+        """Return document positions of text hidden from the selection text.
+
+        Tracked deletions still occupy Word's internal character positions but
+        are omitted from Range.Text / AppleScript ``content``. Every such span
+        must be compensated for when mapping visible-text offsets back to
+        absolute document positions.
+        """
+        raise NotImplementedError
+
 # --- Windows Implementation ---
 
 class WindowsWordIntegration(WordIntegration):
@@ -210,6 +222,36 @@ class WindowsWordIntegration(WordIntegration):
             return spans
         except Exception as e:
             print(f"Error getting field spans (Windows): {e}")
+            return []
+
+    def get_selection_hidden_spans(
+        self, start: int = 0, end: int = 0
+    ) -> list[tuple[int, int]]:
+        """Tracked deletions (and moved-from text) inside the selection."""
+        try:
+            word = self._get_word()
+            if not word.Documents.Count:
+                return []
+            doc = word.ActiveDocument
+            sel = word.Selection
+            if int(sel.End) <= int(sel.Start):
+                return []
+
+            spans: list[tuple[int, int]] = []
+            # wdRevisionDelete = 2, wdRevisionMovedFrom = 17,
+            # wdRevisionCellDeletion = 20. These hide text from Range.Text.
+            hidden_types = (2, 17, 20)
+            for rev in doc.Range(int(sel.Start), int(sel.End)).Revisions:
+                try:
+                    if int(rev.Type) in hidden_types:
+                        spans.append(
+                            (int(rev.Range.Start), int(rev.Range.End))
+                        )
+                except Exception:
+                    continue
+            return spans
+        except Exception as e:
+            print(f"Error getting hidden spans (Windows): {e}")
             return []
 
     def add_comment(self, comment_text: str) -> None:
@@ -411,6 +453,7 @@ class MacOSWordIntegration(WordIntegration):
                     else
                         set theRange to create range active document start absPos end (absPos + 1)
                         set existingChar to content of theRange
+                        if existingChar is missing value then set existingChar to ""
                         set content of theRange to newText & existingChar
                     end if
                 end tell
@@ -583,6 +626,74 @@ class MacOSWordIntegration(WordIntegration):
                     result_text,
                 )
             )
+        return spans
+
+    def get_selection_hidden_spans(
+        self, start: int = 0, end: int = 0
+    ) -> list[tuple[int, int]]:
+        """Return tracked-deletion spans overlapping the current selection.
+
+        Word's AppleScript dictionary exposes revisions on the document but
+        not scoped to a range, so enumerate document revisions and filter by
+        the selection bounds. Only deletion revisions hide text from
+        ``content``; insertions and formatting revisions occupy no hidden
+        characters.
+        """
+        script = """
+        on run argv
+            set selStart to (item 1 of argv) as integer
+            set selEnd to (item 2 of argv) as integer
+            try
+                tell application "Microsoft Word"
+                    if not (exists active document) then return ""
+                    set selStory to story type of (text object of selection)
+                    set out to ""
+                    set revs to revisions of active document
+                    set n to count of revs
+                    repeat with i from 1 to n
+                        set rev to revision i of active document
+                        try
+                            set tp to (get «class 3117» of rev) as string
+                        on error
+                            set tp to ""
+                        end try
+                        if tp is "revision delete" then
+                            try
+                                set rr to text object of rev
+                                if (story type of rr) is selStory then
+                                    set rs to start of content of rr
+                                    set re to end of content of rr
+                                    if rs < selEnd and re > selStart then
+                                        set out to out & (rs as string) & "###HSPAN###" & (re as string) & "###HSEND###"
+                                    end if
+                                end if
+                            end try
+                        end if
+                    end repeat
+                    return out
+                end tell
+            on error
+                return ""
+            end try
+        end run
+        """
+        try:
+            raw = self._run_applescript(script, str(start), str(end))
+        except Exception as e:
+            print(f"Error listing Word revisions (macOS): {e}")
+            return []
+
+        spans: list[tuple[int, int]] = []
+        for chunk in raw.split("###HSEND###"):
+            if "###HSPAN###" not in chunk:
+                continue
+            parts = chunk.split("###HSPAN###")
+            if len(parts) < 2:
+                continue
+            try:
+                spans.append((int(parts[0].strip()), int(parts[1].strip())))
+            except ValueError:
+                continue
         return spans
 
     def _mac_read_range_text(self, start: int, end: int) -> str:

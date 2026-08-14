@@ -1254,9 +1254,16 @@ def test_apply_corrections_maps_offsets_around_fields() -> None:
     class FakeWord:
         def __init__(self) -> None:
             self.calls: list[tuple] = []
+            self.text = ""
+            self.hidden_spans: list[tuple[int, int]] = []
 
         def get_selection_info(self) -> tuple[str, int, int, str, str]:
-            return "", 50, 190, "", ""
+            return self.text, 50, 190, "", ""
+
+        def get_selection_hidden_spans(
+            self, start: int = 0, end: int = 0
+        ) -> list[tuple[int, int]]:
+            return self.hidden_spans
 
         def replace_range(self, start: int, end: int, text: str) -> None:
             self.calls.append(("replace", start, end, text))
@@ -1272,6 +1279,7 @@ def test_apply_corrections_maps_offsets_around_fields() -> None:
     try:
         citation = "(Al-Qahtani & Elgharbawy, 2020)"
         current_text = "abc " + citation + " def"
+        logic.word_app.text = current_text
         corrected = "abc " + citation + " DEF"
         field_spans = [(54, 185, citation)]
         result_spans = logic._locate_field_result_spans(
@@ -1305,6 +1313,254 @@ def test_apply_corrections_maps_offsets_around_fields() -> None:
         assert logic.word_app.calls == []
     finally:
         logic.word_app = original
+
+
+def test_revision_mapper_compensates_tracked_deletions() -> None:
+    from src.logic import _build_hidden_items, _map_visible_offset
+
+    # Visible text is "abcdeFGhij" but Word still counts the deleted "fg"
+    # characters at internal positions 7-9.
+    items = _build_hidden_items(0, [], [], [(7, 9)])
+    assert items == [(7, 2)]
+    assert _map_visible_offset(0, items, 6) == 6
+    assert _map_visible_offset(0, items, 7) == 9
+    assert _map_visible_offset(0, items, 10) == 12
+
+
+def test_apply_corrections_maps_offsets_around_tracked_deletions() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.text = ""
+            self.hidden_spans: list[tuple[int, int]] = []
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return self.text, 0, 12, "", ""
+
+        def get_selection_hidden_spans(
+            self, start: int = 0, end: int = 0
+        ) -> list[tuple[int, int]]:
+            return self.hidden_spans
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+        def delete_range(self, start: int, end: int) -> None:
+            self.calls.append(("delete", start, end))
+
+        def insert_at_position(self, pos: int, text: str) -> None:
+            self.calls.append(("insert", pos, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        current = "abcdeFGhij"
+        logic.word_app.text = current
+        logic.word_app.hidden_spans = [(7, 9)]
+        ok = logic.apply_corrections_with_diff(
+            current, "abcdeFGHij", start_offset=0
+        )
+        assert ok is True
+        assert logic.word_app.calls == [("replace", 9, 10, "H")]
+    finally:
+        logic.word_app = original
+
+
+def test_apply_corrections_splits_edits_straddling_tracked_deletions() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.text = ""
+            self.hidden_spans: list[tuple[int, int]] = []
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return self.text, 0, 12, "", ""
+
+        def get_selection_hidden_spans(
+            self, start: int = 0, end: int = 0
+        ) -> list[tuple[int, int]]:
+            return self.hidden_spans
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+        def delete_range(self, start: int, end: int) -> None:
+            self.calls.append(("delete", start, end))
+
+        def insert_at_position(self, pos: int, text: str) -> None:
+            self.calls.append(("insert", pos, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        # Visible text hides a deletion of "fg" at internal positions 5-7.
+        # Replacing visible "eh" with "X" straddles that hidden span.
+        current = "abcdehij"
+        logic.word_app.text = current
+        logic.word_app.hidden_spans = [(5, 7)]
+        ok = logic.apply_corrections_with_diff(
+            current, "abcdXij", start_offset=0
+        )
+        assert ok is True
+        assert logic.word_app.calls == [
+            ("delete", 7, 8),
+            ("delete", 4, 5),
+            ("insert", 4, "X"),
+        ]
+    finally:
+        logic.word_app = original
+
+
+def test_apply_corrections_combines_fields_and_tracked_deletions() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.text = ""
+            self.hidden_spans: list[tuple[int, int]] = []
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return self.text, 50, 195, "", ""
+
+        def get_selection_hidden_spans(
+            self, start: int = 0, end: int = 0
+        ) -> list[tuple[int, int]]:
+            return self.hidden_spans
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+        def delete_range(self, start: int, end: int) -> None:
+            self.calls.append(("delete", start, end))
+
+        def insert_at_position(self, pos: int, text: str) -> None:
+            self.calls.append(("insert", pos, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        citation = "(Al-Qahtani & Elgharbawy, 2020)"
+        current = "abc " + citation + " def"
+        logic.word_app.text = current
+        # A tracked deletion sits between the field and the trailing text.
+        logic.word_app.hidden_spans = [(186, 189)]
+        field_spans = [(54, 185, citation)]
+        result_spans = logic._locate_field_result_spans(
+            current, field_spans, 50
+        )
+        ok = logic.apply_corrections_with_diff(
+            current,
+            "abc " + citation + " DEF",
+            start_offset=50,
+            field_info=(field_spans, result_spans),
+        )
+        assert ok is True
+        assert logic.word_app.calls == [("replace", 189, 192, "DEF")]
+    finally:
+        logic.word_app = original
+
+
+def test_apply_corrections_aborts_when_selection_text_changed() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return "changed text", 0, 12, "", ""
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+        def delete_range(self, start: int, end: int) -> None:
+            self.calls.append(("delete", start, end))
+
+        def insert_at_position(self, pos: int, text: str) -> None:
+            self.calls.append(("insert", pos, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        ok = logic.apply_corrections_with_diff(
+            "original text", "corrected text", start_offset=0
+        )
+        assert ok is False
+        assert logic.word_app.calls == []
+    finally:
+        logic.word_app = original
+
+
+def test_windows_hidden_span_revision_filtering() -> None:
+    from src.word_integration import WindowsWordIntegration
+
+    class _RevRange:
+        def __init__(self, start: int, end: int) -> None:
+            self.Start = start
+            self.End = end
+
+    class _Revision:
+        def __init__(self, rev_type: int, start: int, end: int) -> None:
+            self.Type = rev_type
+            self.Range = _RevRange(start, end)
+
+    class _RevisionCollection:
+        def __init__(self, items: list[_Revision]) -> None:
+            self._items = items
+
+        def __iter__(self):
+            return iter(self._items)
+
+    class _RangeWithRevisions:
+        def __init__(self, revs: _RevisionCollection) -> None:
+            self.Revisions = revs
+
+    class _Doc:
+        def __init__(self, revs: _RevisionCollection) -> None:
+            self._revs = revs
+
+        def Range(self, start: int, end: int) -> _RangeWithRevisions:
+            return _RangeWithRevisions(self._revs)
+
+    class _Documents:
+        Count = 1
+
+    class _Selection:
+        Start = 0
+        End = 10
+
+    class _Word:
+        Documents = _Documents()
+        ActiveDocument = _Doc(
+            _RevisionCollection(
+                [
+                    _Revision(2, 1, 3),   # wdRevisionDelete
+                    _Revision(1, 4, 5),   # insertion: visible, skip
+                    _Revision(17, 5, 7),  # wdRevisionMovedFrom
+                    _Revision(3, 8, 9),   # property: skip
+                ]
+            )
+        )
+        Selection = _Selection()
+
+    integration = WindowsWordIntegration()
+    integration._get_word = lambda: _Word()
+    assert integration.get_selection_hidden_spans() == [(1, 3), (5, 7)]
+
+
+def test_macos_hidden_span_parsing() -> None:
+    from src.word_integration import MacOSWordIntegration
+
+    integration = MacOSWordIntegration()
+    integration._run_applescript = lambda script, *args: (
+        "7###HSPAN###9###HSEND###12###HSPAN###15###HSEND###"
+    )
+    assert integration.get_selection_hidden_spans(0, 20) == [(7, 9), (12, 15)]
 
 
 def test_api_call_with_retry_cancellation() -> None:
@@ -2494,6 +2750,20 @@ def main() -> None:
     print("PASS reviewer guidance is independent of comment setting")
     test_apply_corrections_maps_offsets_around_fields()
     print("PASS apply corrections maps offsets around citation fields")
+    test_revision_mapper_compensates_tracked_deletions()
+    print("PASS revision mapper compensates tracked deletions")
+    test_apply_corrections_maps_offsets_around_tracked_deletions()
+    print("PASS apply corrections maps offsets around tracked deletions")
+    test_apply_corrections_splits_edits_straddling_tracked_deletions()
+    print("PASS apply corrections splits edits straddling tracked deletions")
+    test_apply_corrections_combines_fields_and_tracked_deletions()
+    print("PASS apply corrections combines fields and tracked deletions")
+    test_apply_corrections_aborts_when_selection_text_changed()
+    print("PASS apply corrections aborts when selection text changed")
+    test_windows_hidden_span_revision_filtering()
+    print("PASS Windows hidden span revision filtering")
+    test_macos_hidden_span_parsing()
+    print("PASS macOS hidden span parsing")
     test_api_call_with_retry_cancellation()
     print("PASS API call cancellation")
     test_provider_connection_tester()
