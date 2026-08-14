@@ -92,6 +92,7 @@ create-dmg \
   --icon "$APP_NAME.app" 200 190 \
   --hide-extension "$APP_NAME.app" \
   --app-drop-link 400 185 \
+  --skip-jenkins \
   "$DMG_NAME" \
   "dist/$APP_NAME.app"
 
