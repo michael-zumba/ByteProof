@@ -1,7 +1,7 @@
 {
-  "version": "1.6.5",
+  "version": "1.6.6",
   "release_date": "2026-08-14",
-  "release_notes": "Fixed repeated proofreading of text that already contains tracked changes, so edits stay exactly aligned on every pass.",
+  "release_notes": "Dramatically faster Word proofreading on long manuscripts: only the selected paragraph is scanned, and clean paragraphs skip the scan entirely.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
