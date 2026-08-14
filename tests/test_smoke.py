@@ -1496,6 +1496,43 @@ def test_apply_corrections_aborts_when_selection_text_changed() -> None:
         logic.word_app = original
 
 
+def test_apply_corrections_skips_hidden_scan_for_clean_selection() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.hidden_calls = 0
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return "abcd efghi", 0, 10, "", ""
+
+        def get_selection_hidden_spans(self, *args, **kwargs):
+            self.hidden_calls += 1
+            return []
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+        def delete_range(self, start: int, end: int) -> None:
+            self.calls.append(("delete", start, end))
+
+        def insert_at_position(self, pos: int, text: str) -> None:
+            self.calls.append(("insert", pos, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        ok = logic.apply_corrections_with_diff(
+            "abcd efghi", "abcd efghi!", start_offset=0
+        )
+        assert ok is True
+        assert logic.word_app.hidden_calls == 0
+        assert logic.word_app.calls == [("insert", 10, "!")]
+    finally:
+        logic.word_app = original
+
+
 def test_windows_hidden_span_revision_filtering() -> None:
     from src.word_integration import WindowsWordIntegration
 
@@ -2760,6 +2797,8 @@ def main() -> None:
     print("PASS apply corrections combines fields and tracked deletions")
     test_apply_corrections_aborts_when_selection_text_changed()
     print("PASS apply corrections aborts when selection text changed")
+    test_apply_corrections_skips_hidden_scan_for_clean_selection()
+    print("PASS apply corrections skips hidden scan for clean selection")
     test_windows_hidden_span_revision_filtering()
     print("PASS Windows hidden span revision filtering")
     test_macos_hidden_span_parsing()

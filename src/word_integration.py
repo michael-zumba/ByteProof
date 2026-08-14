@@ -62,7 +62,11 @@ class WordIntegration:
         raise NotImplementedError
 
     def get_selection_hidden_spans(
-        self, start: int = 0, end: int = 0
+        self,
+        start: int = 0,
+        end: int = 0,
+        exclude_spans: list[tuple[int, int]] | None = None,
+        max_hidden: int = 0,
     ) -> list[tuple[int, int]]:
         """Return document positions of text hidden from the selection text.
 
@@ -225,7 +229,11 @@ class WindowsWordIntegration(WordIntegration):
             return []
 
     def get_selection_hidden_spans(
-        self, start: int = 0, end: int = 0
+        self,
+        start: int = 0,
+        end: int = 0,
+        exclude_spans: list[tuple[int, int]] | None = None,
+        max_hidden: int = 0,
     ) -> list[tuple[int, int]]:
         """Tracked deletions (and moved-from text) inside the selection."""
         try:
@@ -629,47 +637,77 @@ class MacOSWordIntegration(WordIntegration):
         return spans
 
     def get_selection_hidden_spans(
-        self, start: int = 0, end: int = 0
+        self,
+        start: int = 0,
+        end: int = 0,
+        exclude_spans: list[tuple[int, int]] | None = None,
+        max_hidden: int = 0,
     ) -> list[tuple[int, int]]:
-        """Return tracked-deletion spans overlapping the current selection.
+        """Return tracked-deletion spans inside the current selection.
 
-        Word's AppleScript dictionary exposes revisions on the document but
-        not scoped to a range, so enumerate document revisions and filter by
-        the selection bounds. Only deletion revisions hide text from
-        ``content``; insertions and formatting revisions occupy no hidden
-        characters.
+        Word does not expose a range-scoped revision collection through
+        AppleScript, but it does omit deleted characters from ``content``
+        while still counting them in document positions. A one-pass character
+        scan over the selection locates those missing positions without ever
+        touching revisions elsewhere in a long document. Field spans are
+        excluded because field-code characters are hidden for a different
+        reason and are already mapped separately.
         """
+        exclude_spans = exclude_spans or []
+        exclude_args: list[str] = []
+        for span_start, span_end in exclude_spans:
+            exclude_args.extend((str(span_start), str(span_end)))
+
         script = """
         on run argv
-            set selStart to (item 1 of argv) as integer
-            set selEnd to (item 2 of argv) as integer
+            set aStart to (item 1 of argv) as integer
+            set aEnd to (item 2 of argv) as integer
+            set maxHidden to (item 3 of argv) as integer
+            set out to ""
+            set argCount to count of argv
+            set foundCount to 0
             try
                 tell application "Microsoft Word"
                     if not (exists active document) then return ""
-                    set selStory to story type of (text object of selection)
-                    set out to ""
-                    set revs to revisions of active document
-                    set n to count of revs
-                    repeat with i from 1 to n
-                        set rev to revision i of active document
-                        try
-                            set tp to (get «class 3117» of rev) as string
-                        on error
-                            set tp to ""
-                        end try
-                        if tp is "revision delete" then
-                            try
-                                set rr to text object of rev
-                                if (story type of rr) is selStory then
-                                    set rs to start of content of rr
-                                    set re to end of content of rr
-                                    if rs < selEnd and re > selStart then
-                                        set out to out & (rs as string) & "###HSPAN###" & (re as string) & "###HSEND###"
-                                    end if
+                    set d to active document
+                    set runStart to -1
+                    repeat with p from aStart to (aEnd - 1)
+                        set excluded to false
+                        repeat with i from 4 to argCount by 2
+                            if p >= (item i of argv as integer) and p < (item (i + 1) of argv as integer) then
+                                set excluded to true
+                                exit repeat
+                            end if
+                        end repeat
+                        if not excluded then
+                            set r to create range d start p end (p + 1)
+                            set c to content of r
+                            if c is missing value then
+                                if runStart is -1 then set runStart to p
+                                set foundCount to foundCount + 1
+                            else
+                                if runStart is not -1 then
+                                    set out to out & (runStart as string) & "###HSPAN###" & (p as string) & "###HSEND###"
+                                    set runStart to -1
                                 end if
-                            end try
+                            end if
+                        else
+                            if runStart is not -1 then
+                                set out to out & (runStart as string) & "###HSPAN###" & (p as string) & "###HSEND###"
+                                set runStart to -1
+                            end if
+                        end if
+                        if maxHidden > 0 and foundCount >= maxHidden then
+                            if runStart is not -1 then
+                                set out to out & (runStart as string) & "###HSPAN###" & ((p + 1) as string) & "###HSEND###"
+                                set runStart to -1
+                            end if
+                            exit repeat
                         end if
                     end repeat
+                    if runStart is not -1 then
+                        set out to out & (runStart as string) & "###HSPAN###" & (aEnd as string) & "###HSEND###"
+                    end if
                     return out
                 end tell
             on error
@@ -677,10 +715,11 @@ class MacOSWordIntegration(WordIntegration):
             end try
         end run
         """
+        args = [str(start), str(end), str(max_hidden)] + exclude_args
         try:
-            raw = self._run_applescript(script, str(start), str(end))
+            raw = self._run_applescript(script, *args)
         except Exception as e:
-            print(f"Error listing Word revisions (macOS): {e}")
+            print(f"Error scanning Word selection (macOS): {e}")
             return []
 
         spans: list[tuple[int, int]] = []

@@ -387,11 +387,33 @@ def apply_corrections_with_diff(
         Callable[..., list[tuple[int, int]]] | None,
         getattr(word_app, "get_selection_hidden_spans", None),
     )
-    if get_hidden_spans is not None:
+    field_hidden_total = 0
+    for (doc_start, doc_end, _), (vis_start, vis_end) in zip(
+        field_spans, result_spans
+    ):
+        field_hidden_total += max(
+            0, doc_end - doc_start - (vis_end - vis_start)
+        )
+    expected_visible_length = (current_end - current_start) - field_hidden_total
+    missing_hidden_chars = expected_visible_length - len(original_text)
+
+    # The common case is a clean paragraph selected inside a heavily revised
+    # manuscript. Word's visible text length already tells us whether any
+    # hidden characters remain after accounting for fields, so skip the
+    # selection scan entirely when there are none.
+    if get_hidden_spans is not None and missing_hidden_chars != 0:
         try:
-            hidden_spans = get_hidden_spans(current_start, current_end)
+            hidden_spans = get_hidden_spans(
+                current_start,
+                current_end,
+                field_spans,
+                max(0, missing_hidden_chars),
+            )
         except TypeError:
-            hidden_spans = get_hidden_spans()
+            try:
+                hidden_spans = get_hidden_spans(current_start, current_end)
+            except TypeError:
+                hidden_spans = get_hidden_spans()
 
     hidden_items = _build_hidden_items(
         start_offset, field_spans, result_spans, hidden_spans
