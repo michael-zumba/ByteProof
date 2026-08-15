@@ -1109,6 +1109,20 @@ def test_field_result_mapping_accounts_for_tracked_deletions() -> None:
     )
 
 
+def test_macos_field_spans_use_word_result_range() -> None:
+    from src.word_integration import FieldSpan, MacOSWordIntegration
+
+    integration = MacOSWordIntegration()
+    raw = (
+        "58###FIELD_SPAN###92###FIELD_SPAN###93###FIELD_SPAN###114"
+        "###FIELD_SPAN###United Nations (2020)###FIELD_END###"
+    )
+    integration._run_applescript = lambda script, *args: raw
+
+    spans = integration.get_selection_field_spans()
+    assert spans == [FieldSpan(57, 115, "United Nations (2020)")]
+
+
 def test_plain_text_citations_are_detected_and_masked() -> None:
     from src.logic import (
         _CITATION_SPANS,
@@ -3096,6 +3110,8 @@ def main() -> None:
     print("PASS field result ambiguous match still raises")
     test_field_result_mapping_accounts_for_tracked_deletions()
     print("PASS field result mapping accounts for tracked deletions")
+    test_macos_field_spans_use_word_result_range()
+    print("PASS macOS field spans use Word result range")
     test_plain_text_citations_are_detected_and_masked()
     print("PASS plain-text citations are detected and masked")
     test_citations_force_marker_prompt_not_segments()

@@ -568,12 +568,12 @@ class MacOSWordIntegration(WordIntegration):
     def get_selection_field_spans(self) -> list[FieldSpan]:
         """Return fields in the current selection on macOS.
 
-        Word's AppleScript dictionary exposes the field code range and code
-        text, but not the result range directly. The visible result normally
-        matches the citation text embedded in the field code (EndNote's
-        DisplayText or Zotero's formatted citation); a bounded character scan
-        (up to FIELD_RESULT_SCAN_LIMIT characters, ~a page) is used as a
-        fallback for other field types.
+        Word exposes each field's ``result range``, which reports the exact
+        visible result text and its document range. Use that as the primary
+        source; it avoids DisplayText parsing and the character-by-character
+        scan that previously caused position drift on tracked-change text.
+        The bounded scan remains only as a fallback for fields whose result
+        range cannot be materialized.
         """
         list_script = """
         on run
@@ -584,13 +584,25 @@ class MacOSWordIntegration(WordIntegration):
                     set out to ""
                     repeat with i from 1 to (count of fs)
                         set f to item i of fs
-                        set codeStart to start of content of field code of f
-                        set codeEnd to end of content of field code of f
-                        set codeText to ""
+                        set codeStart to -1
+                        set codeEnd to -1
                         try
-                            set codeText to content of field code of f
+                            set codeStart to start of content of field code of f
+                            set codeEnd to end of content of field code of f
                         end try
-                        set out to out & (codeStart as string) & "###FIELD_SPAN###" & (codeEnd as string) & "###FIELD_SPAN###" & codeText & "###FIELD_END###"
+                        set resultStart to -1
+                        set resultEnd to -1
+                        set resultText to ""
+                        try
+                            set rr to result range of f
+                            set rt to content of rr
+                            if rt is not missing value then
+                                set resultText to rt
+                                set resultStart to start of content of rr
+                                set resultEnd to end of content of rr
+                            end if
+                        end try
+                        set out to out & (codeStart as string) & "###FIELD_SPAN###" & (codeEnd as string) & "###FIELD_SPAN###" & (resultStart as string) & "###FIELD_SPAN###" & (resultEnd as string) & "###FIELD_SPAN###" & resultText & "###FIELD_END###"
                     end repeat
                     return out
                 end tell
@@ -610,31 +622,23 @@ class MacOSWordIntegration(WordIntegration):
             if "###FIELD_SPAN###" not in chunk:
                 continue
             parts = chunk.split("###FIELD_SPAN###")
-            if len(parts) < 3:
+            if len(parts) < 5:
                 continue
             try:
                 code_start = int(parts[0].strip())
                 code_end = int(parts[1].strip())
+                result_start = int(parts[2].strip())
+                result_end = int(parts[3].strip())
             except ValueError:
                 continue
-            code_text = parts[2]
-            result_start = code_end + 1
-
-            expected = self._field_result_from_code(code_text)
-            if expected is not None:
-                result_end = result_start + len(expected)
-                actual = self._mac_read_range_text(result_start, result_end)
-                if actual == expected:
-                    spans.append(
-                        FieldSpan(
-                            max(0, code_start - 1),
-                            result_end + 1,
-                            actual,
-                        )
-                    )
-                    continue
-
-            result_text, result_end = self._mac_scan_field_result(result_start)
+            result_text = parts[4]
+            if code_start <= 0 or result_start <= 0 or result_end <= result_start:
+                # Unusual field Word couldn't fully describe. Fall back to the
+                # bounded scan so the rest of the selection still maps.
+                if code_end > 0:
+                    result_text, result_end = self._mac_scan_field_result(code_end + 1)
+                else:
+                    result_text = ""
             spans.append(
                 FieldSpan(
                     max(0, code_start - 1),

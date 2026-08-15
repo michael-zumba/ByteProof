@@ -20,6 +20,7 @@ from .local_model import resolve_model_id, start_local_server
 from .settings import (
     LOCAL_MODEL_PROVIDER,
     PROVIDERS,
+    get_app_support_dir,
     load_runtime_settings,
     resource_path,
 )
@@ -293,6 +294,47 @@ def _clean_field_code_context(text: str) -> str:
     return "".join(
         ch for ch in text if ord(ch) not in (0x13, 0x14, 0x15)
     )
+
+
+def _log_citation_mapping_failure(
+    error: Exception,
+    current_text: str,
+    start_offset: int,
+    end_offset: int,
+    field_spans: list[tuple[int, int, str]],
+    deletion_spans: list[tuple[int, int]],
+) -> None:
+    """Append a compact, redacted diagnostic when citation mapping fails."""
+    try:
+        path = os.path.join(get_app_support_dir(), "citation-mapping.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        def _preview(text: str, limit: int) -> str:
+            text = text or ""
+            return text[:limit] + ("..." if len(text) > limit else "")
+
+        record = {
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "error": f"{type(error).__name__}: {error}",
+            "start_offset": start_offset,
+            "end_offset": end_offset,
+            "visible_len": len(current_text),
+            "visible_preview": _preview(current_text, 200),
+            "field_spans": [
+                {
+                    "start": start,
+                    "end": end,
+                    "result_len": len(result_text),
+                    "result_preview": _preview(result_text, 80),
+                }
+                for start, end, result_text in field_spans
+            ],
+            "deletion_spans": deletion_spans,
+        }
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 SEGMENT_BOUNDARY = "\n===SEGMENT_BOUNDARY===\n"
@@ -1332,6 +1374,14 @@ def proofread_selection_once(
                 )
             except Exception as e:
                 print(f"Could not map citation fields in selection: {e}")
+                _log_citation_mapping_failure(
+                    e,
+                    current_text,
+                    start_offset,
+                    end_offset,
+                    field_spans,
+                    tracked_deletion_spans,
+                )
                 return (
                     (
                         "Skipped: ByteProof couldn't safely map a citation in "
