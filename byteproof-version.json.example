@@ -1,7 +1,7 @@
 {
-  "version": "1.6.7",
-  "release_date": "2026-08-14",
-  "release_notes": "Double-Esc now reliably cancels long Word proofreading jobs, including while Word is being scanned or edited.",
+  "version": "1.6.8",
+  "release_date": "2026-08-15",
+  "release_notes": "Priced at NZD $49 (GST incl.) one-time. Licensing is now Polar-only, the macOS build is a single parameterized script, text normalization is shared between Word and generic editing, and Settings now flags cloud providers that send text externally.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
