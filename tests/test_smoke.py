@@ -2343,8 +2343,59 @@ def test_local_model_catalog_and_recommendation() -> None:
         assert local_model.recommend_model({"total_ram_gb": 8.0})["id"] == "phi4-mini"
         assert local_model.recommend_model({"total_ram_gb": 16.0})["id"] == "qwen3-8b"
         assert local_model.recommend_model({"total_ram_gb": 24.0})["id"] == "qwen3-14b"
+        # Newer MoE options are catalogued (with checksums) for 24 GB+ users
+        # without changing the proven defaults.
+        for model_id, min_ram in (("gpt-oss-20b", 24), ("qwen3-30b-a3b", 32)):
+            entry = local_model.get_model(model_id)
+            assert entry["sha256"]
+            assert entry["size_bytes"] > 10_000_000_000
+            assert entry["min_ram_gb"] == min_ram
     finally:
         local_model.LOCAL_MODEL_DIR = original_dir
+
+
+def test_local_server_command_flags() -> None:
+    from src import local_model
+
+    cmd = local_model._build_server_cmd(
+        "/fake/llama-server",
+        "/fake/model.gguf",
+        "qwen3-4b",
+        17881,
+        {
+            "system": "Darwin",
+            "machine": "arm64",
+            "is_apple_silicon": True,
+            "cpu_count": 10,
+            "total_ram_gb": 24.0,
+        },
+    )
+    assert "--flash-attn" in cmd and "on" in cmd
+    assert "--n-gpu-layers" in cmd
+    assert "--cache-type-k" in cmd and "q8_0" in cmd
+    assert "--cache-type-v" in cmd and "q8_0" in cmd
+    assert "--mlock" in cmd  # 24 GB RAM vs ~2.3 GB model fits comfortably
+    assert "--reasoning-budget" in cmd and "0" in cmd
+    assert "--no-webui" in cmd
+
+    # 8 GB Intel/Windows machines: no Metal flash attention, no mlock.
+    cmd_win = local_model._build_server_cmd(
+        "/fake/llama-server.exe",
+        "/fake/model.gguf",
+        "phi4-mini",
+        17881,
+        {
+            "system": "Windows",
+            "machine": "x86_64",
+            "is_apple_silicon": False,
+            "cpu_count": 4,
+            "total_ram_gb": 8.0,
+        },
+    )
+    assert "--flash-attn" not in cmd_win
+    assert "--mlock" not in cmd_win
+    assert "--threads" in cmd_win
+    assert "--cache-type-k" in cmd_win
 
 
 def test_local_model_download_with_checksum_and_resume() -> None:
@@ -2983,6 +3034,8 @@ def main() -> None:
     print("PASS sound module")
     test_local_model_catalog_and_recommendation()
     print("PASS local model catalog + recommendation")
+    test_local_server_command_flags()
+    print("PASS local server command flags")
     test_local_model_download_with_checksum_and_resume()
     print("PASS local model download (checksum + resume)")
     test_local_model_disk_space_check()

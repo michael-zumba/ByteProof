@@ -7,9 +7,9 @@ progress, resume, and SHA-256 verification. After that, proofreading is
 private and offline. Local AI remains available in the limited free mode after
 the 7-day trial (3 proofreads/day); the $49 license unlocks unlimited use.
 
-The catalog is intentionally small and conservative: Qwen3 models are Apache
-2.0 and Phi-4 Mini is MIT, which are both safe to bundle and redistribute in a
-commercial app.
+The catalog is intentionally conservative: Qwen3 models are Apache 2.0,
+Phi-4 Mini is MIT, and the newer MoE options (gpt-oss-20b, Qwen3-30B-A3B) are
+Apache 2.0, which are all safe to bundle and redistribute in a commercial app.
 """
 
 from __future__ import annotations
@@ -42,11 +42,12 @@ LLAMA_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/l
 LLAMA_DOWNLOAD_URL = "https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{asset}"
 MODEL_MANIFEST_URL = "https://www.bytemind.co.nz/byteproof-models.json"
 
-# Pinned to a known-good release. The b10331+ launcher layout hangs when
-# spawned from Python on this setup, so do not bump without re-testing
-# `llama-server --version` after extraction. Set to None to follow GitHub
-# latest instead.
-PINNED_LLAMA_RELEASE: str | None = "b8059"
+# Pinned to a known-good release. b10436 was verified to spawn cleanly from
+# Python on this setup (`llama-server --version` exits 0) and to serve a chat
+# completion with the flags below. Earlier b10331-era launcher layouts hung
+# when spawned from Python, so do not bump without re-running that check.
+# Set to None to follow GitHub latest instead.
+PINNED_LLAMA_RELEASE: str | None = "b10436"
 
 
 class DownloadCancelledError(RuntimeError):
@@ -139,6 +140,32 @@ MODEL_CATALOG: list[dict[str, Any]] = [
         "min_ram_gb": 20,
         "license": "Apache 2.0",
         "description": "Highest local quality; needs ~20 GB RAM or a 24 GB+ Apple Silicon Mac.",
+    },
+    {
+        "id": "gpt-oss-20b",
+        "name": "GPT-OSS 20B",
+        "params": "20.9B (3.6B active)",
+        "tag": "Flagship MoE",
+        "file": "gpt-oss-20b-Q4_K_M.gguf",
+        "url": "https://huggingface.co/ggfox00000/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-Q4_K_M.gguf",
+        "size_bytes": 15805136480,
+        "sha256": "c19729483d64b0076038d5b6df38dfc37f09312d6034cac90935a84a671c55a9",
+        "min_ram_gb": 24,
+        "license": "Apache 2.0",
+        "description": "OpenAI's open-weight MoE (3.6B active per token) — near-frontier quality with fast decode. Needs a 24 GB+ machine.",
+    },
+    {
+        "id": "qwen3-30b-a3b",
+        "name": "Qwen3 30B-A3B",
+        "params": "30B (3B active)",
+        "tag": "Premium MoE",
+        "file": "Qwen3-30B-A3B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf",
+        "size_bytes": 18556685824,
+        "sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+        "min_ram_gb": 32,
+        "license": "Apache 2.0",
+        "description": "Qwen's MoE flagship (3B active per token) — premium quality for 32 GB+ machines.",
     },
 ]
 
@@ -589,6 +616,48 @@ def _http_get(url: str, timeout: float = 3.0) -> int | None:
         return None
 
 
+def _build_server_cmd(
+    runtime_path: str,
+    model_path: str,
+    model_id: str,
+    port: int,
+    hardware: dict[str, Any] | None = None,
+) -> list[str]:
+    """Build the llama-server command line for the current platform.
+
+    Flags are kept compatible with both the previously pinned runtime (b8059)
+    and newer releases (b10436+): flash attention is enabled on Apple Silicon
+    (Metal), the KV cache uses q8_0 to reduce memory traffic, and mlock keeps
+    the model resident on macOS when it comfortably fits in RAM.
+    """
+    hw = hardware or detect_hardware()
+    cmd = [
+        runtime_path,
+        "--host", LOCAL_SERVER_HOST,
+        "--port", str(port),
+        "--model", model_path,
+        "--ctx-size", "8192",
+        "--parallel", "1",
+        "--no-webui",
+        "--reasoning-budget", "0",
+        "--alias", model_id,
+        "--cache-type-k", "q8_0",
+        "--cache-type-v", "q8_0",
+    ]
+    if hw.get("is_apple_silicon"):
+        cmd += ["--flash-attn", "on", "--n-gpu-layers", "999"]
+    else:
+        cmd += ["--threads", str(max(2, hw.get("cpu_count", 4) - 1))]
+    if hw.get("system") == "Darwin":
+        try:
+            model_size_gb = get_model(model_id)["size_bytes"] / (1024 ** 3)
+        except KeyError:
+            model_size_gb = 0.0
+        if hw.get("total_ram_gb", 0) >= model_size_gb + 6:
+            cmd += ["--mlock"]
+    return cmd
+
+
 class LocalModelServer:
     """Manages a single llama.cpp server process for ByteProof."""
 
@@ -624,23 +693,15 @@ class LocalModelServer:
             self.model_id, progress_callback, cancel_event=cancel_event
         )
 
-        os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
-        cmd = [
-            self.runtime_path,
-            "--host", LOCAL_SERVER_HOST,
-            "--port", str(self.port),
-            "--model", self.model_path,
-            "--ctx-size", "8192",
-            "--parallel", "1",
-            "--no-webui",
-            "--reasoning-budget", "0",
-            "--alias", self.model_id,
-        ]
         hw = detect_hardware()
-        if hw.get("is_apple_silicon"):
-            cmd += ["--n-gpu-layers", "999"]
-        else:
-            cmd += ["--threads", str(max(2, hw.get("cpu_count", 4) - 1))]
+        os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+        cmd = _build_server_cmd(
+            self.runtime_path,
+            self.model_path,
+            self.model_id,
+            self.port,
+            hw,
+        )
 
         creation_flags = 0
         if platform.system() == "Windows":
