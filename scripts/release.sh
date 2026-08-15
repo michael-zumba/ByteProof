@@ -68,6 +68,14 @@ fi
 
 cd "$ROOT"
 
+# Release artifacts must always match committed code, including when a release
+# is resumed after a failed DMG build with the tag already pushed.
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    echo "Error: ByteProof has uncommitted changes. Commit or stash them first:" >&2
+    git status --porcelain --untracked-files=no >&2
+    exit 1
+fi
+
 # --- Step 1-2: bump version, commit, push tag (skipped if tag already exists) -
 
 TAG_EXISTS=0
@@ -77,12 +85,6 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1 ||
 fi
 
 if [[ "$TAG_EXISTS" -eq 0 ]]; then
-    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-        echo "Error: ByteProof has uncommitted changes. Commit or stash them first:" >&2
-        git status --porcelain --untracked-files=no >&2
-        exit 1
-    fi
-
     echo "=== Bumping ByteProof to $VERSION ==="
     python3 "$ROOT/tools/bump_version.py" "$VERSION" "$NOTES"
 

@@ -50,7 +50,8 @@ fi
 ARCH=$(arch -x86_64 "$VENV_PYTHON" -c "import platform; print(platform.machine())")
 if [ "$ARCH" != "x86_64" ]; then
     echo "Error: venv Python is not x86_64 (got $ARCH)."
-    echo "Recreate .venv_x86 with: arch -x86_64 /usr/bin/python3 -m venv .venv_x86"
+    echo "Recreate .venv_x86 with:"
+    echo "  arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m venv .venv_x86"
     exit 1
 fi
 echo "Verified: x86_64 Python at $VENV_PYTHON"

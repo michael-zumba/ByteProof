@@ -17,7 +17,7 @@
 #
 # Usage:
 #   BYTEPROOF_DEV_ID="Developer ID Application: Your Name (TEAMID)" \
-#     ./tools/notarize.sh [path/to/ByteProof.app]
+#     ./scripts/notarize.sh [path/to/ByteProof.app]
 
 set -euo pipefail
 
@@ -39,7 +39,7 @@ if [ ! -d "$APP_PATH" ]; then
 fi
 
 echo "Re-signing with Apple Developer ID..."
-codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP_PATH"
+codesign --deep --force --options runtime --timestamp --sign "$IDENTITY" "$APP_PATH"
 codesign --verify --deep --strict "$APP_PATH"
 
 echo "Packaging for notarization..."
