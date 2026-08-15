@@ -9,6 +9,13 @@ from typing import Any, NamedTuple
 
 WD_WITH_IN_TABLE = 12  # Word constant: wdWithInTable
 
+# How many characters of a field's visible result the macOS fallback scan may
+# read before giving up. A page of text is roughly 3,000-3,500 characters, so
+# 4,000 covers any realistic citation/field result while keeping the scan
+# bounded. The scan normally stops at the field's end character, so this is
+# only a safety net for fields whose visible result is a full page or longer.
+FIELD_RESULT_SCAN_LIMIT = 4000
+
 
 class FieldSpan(NamedTuple):
     """A Word field inside the current selection.
@@ -565,7 +572,8 @@ class MacOSWordIntegration(WordIntegration):
         text, but not the result range directly. The visible result normally
         matches the citation text embedded in the field code (EndNote's
         DisplayText or Zotero's formatted citation); a bounded character scan
-        is used as a fallback for other field types.
+        (up to FIELD_RESULT_SCAN_LIMIT characters, ~a page) is used as a
+        fallback for other field types.
         """
         list_script = """
         on run
@@ -756,14 +764,14 @@ class MacOSWordIntegration(WordIntegration):
             return ""
 
     def _mac_scan_field_result(self, result_start: int) -> tuple[str, int]:
-        script = """
+        script = f"""
         on run argv
             set resultStart to (item 1 of argv) as integer
             try
                 tell application "Microsoft Word"
                     set out to ""
                     set p to resultStart
-                    repeat 500 times
+                    repeat {FIELD_RESULT_SCAN_LIMIT} times
                         set r to create range active document start p end (p + 1)
                         set c to ""
                         try

@@ -1019,6 +1019,64 @@ def test_field_result_spans_use_document_positions_not_text_search() -> None:
     assert current_text[18:27] == citation
 
 
+def test_long_citation_result_maps_fully() -> None:
+    from src.logic import _locate_field_result_spans
+
+    # A citation whose visible result is longer than the old 500-char scan
+    # bound must still map to its full span (regression for the page-sized
+    # scan limit).
+    prefix = "First paragraph text. "  # 22 visible chars before the field
+    suffix = " Second paragraph text."
+    citation = "Long citation result word. " * 90  # 26 * 90 = 2340 chars
+    current_text = prefix + citation + suffix
+    start_offset = 50
+    begin_doc = start_offset + len(prefix)
+    code_len = 30
+    result_start = begin_doc + code_len + 1
+    doc_end = result_start + len(citation) + 1
+    field_spans = [(begin_doc, doc_end, citation)]
+
+    result_spans = _locate_field_result_spans(
+        current_text, field_spans, start_offset
+    )
+    assert result_spans == [(22, 22 + len(citation))]
+    assert current_text[22:22 + len(citation)] == citation
+
+
+def test_field_result_unique_match_recovers_mismatched_span() -> None:
+    from src.logic import _locate_field_result_spans
+
+    # If Word's positions disagree with the visible text by a character, a
+    # unique text match safely recovers the span (the old behaviour aborted
+    # the whole proofread).
+    current_text = "abc (X, 2020) def"
+    citation = "(X, 2020)"
+    start_offset = 50
+    # Slightly wrong doc_end (93 instead of 94) makes the strict position
+    # check fail; the citation is unique, so the fallback must recover.
+    field_spans = [(53, 93, citation)]
+    result_spans = _locate_field_result_spans(
+        current_text, field_spans, start_offset
+    )
+    assert result_spans == [(4, 13)]
+
+
+def test_field_result_ambiguous_match_still_raises() -> None:
+    from src.logic import _locate_field_result_spans
+
+    # When the result text appears more than once, a text search would be
+    # unsafe, so the mapping must keep raising (and the proofread skips).
+    current_text = "(X, 2020) and (X, 2020)"
+    citation = "(X, 2020)"
+    field_spans = [(52, 92, citation)]
+    try:
+        _locate_field_result_spans(current_text, field_spans, 50)
+    except ValueError as exc:
+        assert "does not match" in str(exc)
+        return
+    raise AssertionError("Expected ValueError for ambiguous citation text")
+
+
 def test_plain_text_citations_are_detected_and_masked() -> None:
     from src.logic import (
         _CITATION_SPANS,
@@ -2843,6 +2901,12 @@ def main() -> None:
     print("PASS citation fields are masked and mapped")
     test_field_result_spans_use_document_positions_not_text_search()
     print("PASS field result spans use document positions")
+    test_long_citation_result_maps_fully()
+    print("PASS long citation result maps fully")
+    test_field_result_unique_match_recovers_mismatched_span()
+    print("PASS field result unique match recovery")
+    test_field_result_ambiguous_match_still_raises()
+    print("PASS field result ambiguous match still raises")
     test_plain_text_citations_are_detected_and_masked()
     print("PASS plain-text citations are detected and masked")
     test_citations_force_marker_prompt_not_segments()

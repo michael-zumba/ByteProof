@@ -177,7 +177,16 @@ def _locate_field_result_spans(
         if vis_start < 0 or vis_end > len(current_text):
             raise ValueError("Field result lies outside the selection")
         if current_text[vis_start:vis_end] != result_text:
-            raise ValueError("Field result text does not match the selection")
+            # Word can represent the field result slightly differently from
+            # the selection text (character-level differences), or the result
+            # may be truncated by a bounded scan. Recover when the result
+            # text appears exactly once in the selection; abort only when a
+            # text search would be ambiguous (e.g. the citation also appears
+            # as plain text elsewhere).
+            match = current_text.find(result_text)
+            if match == -1 or current_text.find(result_text, match + 1) != -1:
+                raise ValueError("Field result text does not match the selection")
+            vis_start, vis_end = match, match + len(result_text)
         spans.append((vis_start, vis_end))
         hidden_before += doc_end - doc_start - result_len
     return spans
