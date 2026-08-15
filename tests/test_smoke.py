@@ -1266,8 +1266,13 @@ def test_proofread_repolish_with_citation_and_tracked_deletions() -> None:
             return [(71, 91, "(X, 2020)")]
 
         def get_selection_hidden_spans(
-            self, start: int = 0, end: int = 0
+            self,
+            start: int = 0,
+            end: int = 0,
+            exclude_spans: list[tuple[int, int]] | None = None,
+            max_hidden: int = 0,
         ) -> list[tuple[int, int]]:
+            assert exclude_spans == [(71, 91)]
             return [(68, 71)]
 
         def add_comment(self, comment_text: str) -> None:

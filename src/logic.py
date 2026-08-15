@@ -432,11 +432,15 @@ def apply_corrections_with_diff(
         # skip the selection scan entirely when there are none.
         if get_hidden_spans is not None and missing_hidden_chars != 0:
             def _scan_hidden_spans() -> list[tuple[int, int]]:
+                exclude_field_spans = [
+                    (doc_start, doc_end)
+                    for doc_start, doc_end, _ in field_spans
+                ]
                 try:
                     return get_hidden_spans(
                         current_start,
                         current_end,
-                        field_spans,
+                        exclude_field_spans,
                         max(0, missing_hidden_chars),
                     )
                 except TypeError:
@@ -1297,11 +1301,15 @@ def proofread_selection_once(
                 )
                 if get_hidden_spans is not None and missing_hidden_chars != 0:
                     def _scan_tracked_deletions() -> list[tuple[int, int]]:
+                        exclude_field_spans = [
+                            (doc_start, doc_end)
+                            for doc_start, doc_end, _ in field_spans
+                        ]
                         try:
                             return get_hidden_spans(
                                 start_offset,
                                 end_offset,
-                                field_spans,
+                                exclude_field_spans,
                                 max(0, missing_hidden_chars),
                             )
                         except TypeError:
