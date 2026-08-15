@@ -1,7 +1,7 @@
 {
-  "version": "1.6.8",
+  "version": "1.6.9",
   "release_date": "2026-08-15",
-  "release_notes": "Priced at NZD $49 (GST incl.) one-time. Licensing is now Polar-only, the macOS build is a single parameterized script, text normalization is shared between Word and generic editing, and Settings now flags cloud providers that send text externally.",
+  "release_notes": "Citation mapping now handles longer citations safely (page-length scan with safe recovery), the local AI engine is upgraded to llama.cpp b10436 with flash attention, q8_0 KV cache and mlock on macOS, and Local AI adds GPT-OSS 20B and Qwen3 30B-A3B for 24 GB+ machines.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
