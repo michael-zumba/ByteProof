@@ -1123,6 +1123,29 @@ def test_macos_field_spans_use_word_result_range() -> None:
     assert spans == [FieldSpan(57, 115, "United Nations (2020)")]
 
 
+def test_citation_text_mapping_fast_path() -> None:
+    from src.logic import _locate_field_result_spans_by_text
+
+    # Unique citation text: the visible text alone is sufficient and no
+    # tracked-deletion scan is needed.
+    assert _locate_field_result_spans_by_text(
+        "abc (X, 2020) def",
+        [(54, 74, "(X, 2020)")],
+    ) == [(4, 13)]
+
+    # Duplicated citation text is ambiguous, so the fast path must refuse and
+    # let the caller fall back to deletion-aware document mapping.
+    try:
+        _locate_field_result_spans_by_text(
+            "(X, 2020) abc (X, 2020)",
+            [(54, 74, "(X, 2020)")],
+        )
+    except ValueError as exc:
+        assert "ambiguous" in str(exc)
+        return
+    raise AssertionError("Expected ValueError for duplicated citation text")
+
+
 def test_plain_text_citations_are_detected_and_masked() -> None:
     from src.logic import (
         _CITATION_SPANS,
@@ -3112,6 +3135,8 @@ def main() -> None:
     print("PASS field result mapping accounts for tracked deletions")
     test_macos_field_spans_use_word_result_range()
     print("PASS macOS field spans use Word result range")
+    test_citation_text_mapping_fast_path()
+    print("PASS citation text mapping fast path")
     test_plain_text_citations_are_detected_and_masked()
     print("PASS plain-text citations are detected and masked")
     test_citations_force_marker_prompt_not_segments()

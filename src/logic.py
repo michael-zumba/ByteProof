@@ -206,6 +206,34 @@ def _locate_field_result_spans(
     return spans
 
 
+def _locate_field_result_spans_by_text(
+    current_text: str,
+    field_spans: list[tuple[int, int, str]],
+) -> list[tuple[int, int]]:
+    """Locate citation fields using only the visible text.
+
+    When every field's exact result text is unique in the selection, the
+    visible text is sufficient and no tracked-deletion scan is required. This
+    treats a previously-edited selection like a first-time selection. If any
+    result text is duplicated, raise so the caller can fall back to the
+    deletion-aware document-position mapping.
+    """
+    spans: list[tuple[int, int]] = []
+    for _doc_start, _doc_end, result_text in sorted(
+        field_spans, key=lambda item: item[0]
+    ):
+        if not result_text:
+            spans.append((0, 0))
+            continue
+        first = current_text.find(result_text)
+        if first == -1:
+            raise ValueError("Field result text does not match the selection")
+        if current_text.find(result_text, first + 1) != -1:
+            raise ValueError("Field result text is ambiguous")
+        spans.append((first, first + len(result_text)))
+    return spans
+
+
 def _build_hidden_items(
     start_offset: int,
     field_spans: list[tuple[int, int, str]],
@@ -1325,53 +1353,60 @@ def proofread_selection_once(
                 field_spans = word_app.get_selection_field_spans()
                 if not field_spans:
                     raise ValueError("No field spans returned")
-                # Tracked deletions are hidden from the selection text but
-                # still counted in Word's document positions. Reuse the same
-                # hidden-span scan as the apply step so re-proofreading text
-                # that already contains tracked changes maps citations at the
-                # correct visible position.
-                field_hidden_total = sum(
-                    max(0, doc_end - doc_start - len(result_text))
-                    for doc_start, doc_end, result_text in field_spans
-                )
-                expected_visible_length = (
-                    (end_offset - start_offset) - field_hidden_total
-                )
-                missing_hidden_chars = expected_visible_length - len(current_text)
-                get_hidden_spans = getattr(
-                    word_app, "get_selection_hidden_spans", None
-                )
-                if get_hidden_spans is not None and missing_hidden_chars != 0:
-                    def _scan_tracked_deletions() -> list[tuple[int, int]]:
-                        exclude_field_spans = [
-                            (doc_start, doc_end)
-                            for doc_start, doc_end, _ in field_spans
-                        ]
-                        try:
-                            return get_hidden_spans(
-                                start_offset,
-                                end_offset,
-                                exclude_field_spans,
-                                max(0, missing_hidden_chars),
-                            )
-                        except TypeError:
+                # Fast path: treat the visible text as the source of truth and
+                # locate citations by their exact result text. This avoids the
+                # tracked-deletion scan entirely for the common re-polish
+                # case where each citation text is unique in the selection.
+                try:
+                    field_result_spans = _locate_field_result_spans_by_text(
+                        current_text, field_spans
+                    )
+                    tracked_deletion_spans = []
+                except ValueError:
+                    # Duplicate or unlocatable citation text needs Word's
+                    # document positions plus tracked-deletion ranges.
+                    field_hidden_total = sum(
+                        max(0, doc_end - doc_start - len(result_text))
+                        for doc_start, doc_end, result_text in field_spans
+                    )
+                    expected_visible_length = (
+                        (end_offset - start_offset) - field_hidden_total
+                    )
+                    missing_hidden_chars = expected_visible_length - len(current_text)
+                    get_hidden_spans = getattr(
+                        word_app, "get_selection_hidden_spans", None
+                    )
+                    if get_hidden_spans is not None and missing_hidden_chars != 0:
+                        def _scan_tracked_deletions() -> list[tuple[int, int]]:
+                            exclude_field_spans = [
+                                (doc_start, doc_end)
+                                for doc_start, doc_end, _ in field_spans
+                            ]
                             try:
-                                return get_hidden_spans(start_offset, end_offset)
+                                return get_hidden_spans(
+                                    start_offset,
+                                    end_offset,
+                                    exclude_field_spans,
+                                    max(0, missing_hidden_chars),
+                                )
                             except TypeError:
-                                return get_hidden_spans()
+                                try:
+                                    return get_hidden_spans(start_offset, end_offset)
+                                except TypeError:
+                                    return get_hidden_spans()
 
-                    if cancel_event is not None:
-                        tracked_deletion_spans = _run_with_cancel(
-                            cancel_event, _scan_tracked_deletions
-                        )
-                    else:
-                        tracked_deletion_spans = _scan_tracked_deletions()
-                field_result_spans = _locate_field_result_spans(
-                    current_text,
-                    field_spans,
-                    start_offset,
-                    tracked_deletion_spans,
-                )
+                        if cancel_event is not None:
+                            tracked_deletion_spans = _run_with_cancel(
+                                cancel_event, _scan_tracked_deletions
+                            )
+                        else:
+                            tracked_deletion_spans = _scan_tracked_deletions()
+                    field_result_spans = _locate_field_result_spans(
+                        current_text,
+                        field_spans,
+                        start_offset,
+                        tracked_deletion_spans,
+                    )
             except Exception as e:
                 print(f"Could not map citation fields in selection: {e}")
                 _log_citation_mapping_failure(
