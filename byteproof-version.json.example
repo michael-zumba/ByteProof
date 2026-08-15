@@ -1,7 +1,7 @@
 {
-  "version": "1.6.9",
+  "version": "1.6.10",
   "release_date": "2026-08-15",
-  "release_notes": "Citation mapping now handles longer citations safely (page-length scan with safe recovery), the local AI engine is upgraded to llama.cpp b10436 with flash attention, q8_0 KV cache and mlock on macOS, and Local AI adds GPT-OSS 20B and Qwen3 30B-A3B for 24 GB+ machines.",
+  "release_notes": "Re-proofreading text that already contains tracked changes is now reliable and much faster. Citations are mapped from Word's exact result ranges, duplicated citations fall back safely, and the tracked-deletion scan is skipped in the common case.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
