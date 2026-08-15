@@ -153,6 +153,7 @@ def _locate_field_result_spans(
     current_text: str,
     field_spans: list[tuple[int, int, str]],
     start_offset: int,
+    deletion_spans: list[tuple[int, int]] | None = None,
 ) -> list[tuple[int, int]]:
     """Compute each field's visible result span from its document range.
 
@@ -162,7 +163,14 @@ def _locate_field_result_spans(
     exactly from the field's document range. This is robust even when the
     same citation text also appears elsewhere in the selection as plain text
     (a text search would map the field to the wrong occurrence).
+
+    Tracked deletions are omitted from ``current_text`` but still consume
+    document positions, so any deletion spans before a field result must be
+    subtracted from the computed visible offset.
     """
+    deletions = sorted(
+        (start, end) for start, end in (deletion_spans or []) if end > start
+    )
     spans: list[tuple[int, int]] = []
     hidden_before = 0
     for doc_start, doc_end, result_text in field_spans:
@@ -173,6 +181,11 @@ def _locate_field_result_spans(
         result_start_doc = doc_end - 1 - result_len
         hidden_in_field = doc_end - doc_start - result_len - 1
         vis_start = result_start_doc - start_offset - hidden_before - hidden_in_field
+        for del_start, del_end in deletions:
+            overlap_start = max(del_start, start_offset)
+            overlap_end = min(del_end, result_start_doc)
+            if overlap_end > overlap_start:
+                vis_start -= overlap_end - overlap_start
         vis_end = vis_start + result_len
         if vis_start < 0 or vis_end > len(current_text):
             raise ValueError("Field result lies outside the selection")
@@ -366,6 +379,7 @@ def apply_corrections_with_diff(
     start_offset: int,
     protected_spans: list[tuple[int, int]] | None = None,
     field_info: tuple[list[tuple[int, int, str]], list[tuple[int, int]]] | None = None,
+    hidden_spans: list[tuple[int, int]] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> bool:
     if cancel_event is not None and cancel_event.is_set():
@@ -394,44 +408,47 @@ def apply_corrections_with_diff(
     if field_info is not None:
         field_spans, result_spans = field_info
 
-    hidden_spans: list[tuple[int, int]] = []
-    get_hidden_spans = cast(
-        Callable[..., list[tuple[int, int]]] | None,
-        getattr(word_app, "get_selection_hidden_spans", None),
-    )
-    field_hidden_total = 0
-    for (doc_start, doc_end, _), (vis_start, vis_end) in zip(
-        field_spans, result_spans
-    ):
-        field_hidden_total += max(
-            0, doc_end - doc_start - (vis_end - vis_start)
+    # Tracked deletions are normally discovered by the proofread step before
+    # this point; when absent, compute them here (the same one-pass scan).
+    hidden_spans = list(hidden_spans or [])
+    if not hidden_spans:
+        get_hidden_spans = cast(
+            Callable[..., list[tuple[int, int]]] | None,
+            getattr(word_app, "get_selection_hidden_spans", None),
         )
-    expected_visible_length = (current_end - current_start) - field_hidden_total
-    missing_hidden_chars = expected_visible_length - len(original_text)
+        field_hidden_total = 0
+        for (doc_start, doc_end, _), (vis_start, vis_end) in zip(
+            field_spans, result_spans
+        ):
+            field_hidden_total += max(
+                0, doc_end - doc_start - (vis_end - vis_start)
+            )
+        expected_visible_length = (current_end - current_start) - field_hidden_total
+        missing_hidden_chars = expected_visible_length - len(original_text)
 
-    # The common case is a clean paragraph selected inside a heavily revised
-    # manuscript. Word's visible text length already tells us whether any
-    # hidden characters remain after accounting for fields, so skip the
-    # selection scan entirely when there are none.
-    if get_hidden_spans is not None and missing_hidden_chars != 0:
-        def _scan_hidden_spans() -> list[tuple[int, int]]:
-            try:
-                return get_hidden_spans(
-                    current_start,
-                    current_end,
-                    field_spans,
-                    max(0, missing_hidden_chars),
-                )
-            except TypeError:
+        # The common case is a clean paragraph selected inside a heavily
+        # revised manuscript. Word's visible text length already tells us
+        # whether any hidden characters remain after accounting for fields, so
+        # skip the selection scan entirely when there are none.
+        if get_hidden_spans is not None and missing_hidden_chars != 0:
+            def _scan_hidden_spans() -> list[tuple[int, int]]:
                 try:
-                    return get_hidden_spans(current_start, current_end)
+                    return get_hidden_spans(
+                        current_start,
+                        current_end,
+                        field_spans,
+                        max(0, missing_hidden_chars),
+                    )
                 except TypeError:
-                    return get_hidden_spans()
+                    try:
+                        return get_hidden_spans(current_start, current_end)
+                    except TypeError:
+                        return get_hidden_spans()
 
-        if cancel_event is not None:
-            hidden_spans = _run_with_cancel(cancel_event, _scan_hidden_spans)
-        else:
-            hidden_spans = _scan_hidden_spans()
+            if cancel_event is not None:
+                hidden_spans = _run_with_cancel(cancel_event, _scan_hidden_spans)
+            else:
+                hidden_spans = _scan_hidden_spans()
 
     hidden_items = _build_hidden_items(
         start_offset, field_spans, result_spans, hidden_spans
@@ -1229,7 +1246,7 @@ def proofread_selection_once(
             
         word_app.ensure_track_changes_enabled()
         
-        current_text, start_offset, _, context_before, context_after = word_app.get_selection_info()
+        current_text, start_offset, end_offset, context_before, context_after = word_app.get_selection_info()
         
         # CRITICAL: Normalize newlines in original text to \r to perfectly match Microsoft Word's 
         # internal character counting. osascript/Python may introduce \n or \r\n, which throws off
@@ -1255,14 +1272,55 @@ def proofread_selection_once(
         field_spans: list[tuple[int, int, str]] = []
         field_result_spans: list[tuple[int, int]] = []
         plain_citation_spans: list[tuple[int, int]] = []
+        tracked_deletion_spans: list[tuple[int, int]] = []
         codes_shown = any(ord(ch) in (0x13, 0x14, 0x15) for ch in current_text)
         if not codes_shown and word_app.selection_has_fields():
             try:
                 field_spans = word_app.get_selection_field_spans()
                 if not field_spans:
                     raise ValueError("No field spans returned")
+                # Tracked deletions are hidden from the selection text but
+                # still counted in Word's document positions. Reuse the same
+                # hidden-span scan as the apply step so re-proofreading text
+                # that already contains tracked changes maps citations at the
+                # correct visible position.
+                field_hidden_total = sum(
+                    max(0, doc_end - doc_start - len(result_text))
+                    for doc_start, doc_end, result_text in field_spans
+                )
+                expected_visible_length = (
+                    (end_offset - start_offset) - field_hidden_total
+                )
+                missing_hidden_chars = expected_visible_length - len(current_text)
+                get_hidden_spans = getattr(
+                    word_app, "get_selection_hidden_spans", None
+                )
+                if get_hidden_spans is not None and missing_hidden_chars != 0:
+                    def _scan_tracked_deletions() -> list[tuple[int, int]]:
+                        try:
+                            return get_hidden_spans(
+                                start_offset,
+                                end_offset,
+                                field_spans,
+                                max(0, missing_hidden_chars),
+                            )
+                        except TypeError:
+                            try:
+                                return get_hidden_spans(start_offset, end_offset)
+                            except TypeError:
+                                return get_hidden_spans()
+
+                    if cancel_event is not None:
+                        tracked_deletion_spans = _run_with_cancel(
+                            cancel_event, _scan_tracked_deletions
+                        )
+                    else:
+                        tracked_deletion_spans = _scan_tracked_deletions()
                 field_result_spans = _locate_field_result_spans(
-                    current_text, field_spans, start_offset
+                    current_text,
+                    field_spans,
+                    start_offset,
+                    tracked_deletion_spans,
                 )
             except Exception as e:
                 print(f"Could not map citation fields in selection: {e}")
@@ -1498,6 +1556,7 @@ def proofread_selection_once(
                         if field_spans
                         else None
                     ),
+                    hidden_spans=tracked_deletion_spans,
                     cancel_event=cancel_event,
                 )
                 result_status = "Proofreading complete." + warning_suffix

@@ -1077,6 +1077,38 @@ def test_field_result_ambiguous_match_still_raises() -> None:
     raise AssertionError("Expected ValueError for ambiguous citation text")
 
 
+def test_field_result_mapping_accounts_for_tracked_deletions() -> None:
+    from src.logic import _locate_field_result_spans
+
+    # Re-proofreading tracked-change text is the failure this guards against:
+    # the first citation is plain text, the second is the Word field, and a
+    # tracked deletion before the field shifts Word's document positions
+    # without changing the visible text. Deletion spans must be subtracted so
+    # the field maps to the second occurrence.
+    current_text = "zzz (X, 2020) yyy (X, 2020) www"
+    citation = "(X, 2020)"
+    start_offset = 50
+    field_spans = [(71, 91, citation)]  # result occupies visible 18..27
+    deletion_spans = [(68, 71)]         # three tracked-deleted chars before it
+
+    result_spans = _locate_field_result_spans(
+        current_text, field_spans, start_offset, deletion_spans
+    )
+    assert result_spans == [(18, 27)]
+    assert current_text[18:27] == citation
+
+    # Without the deletion spans the position math is wrong, and the citation
+    # is duplicated so the safe unique-match fallback must refuse to guess.
+    try:
+        _locate_field_result_spans(current_text, field_spans, start_offset)
+    except ValueError as exc:
+        assert "does not match" in str(exc)
+        return
+    raise AssertionError(
+        "Expected ValueError when tracked deletions are not accounted for"
+    )
+
+
 def test_plain_text_citations_are_detected_and_masked() -> None:
     from src.logic import (
         _CITATION_SPANS,
@@ -1194,6 +1226,105 @@ def test_citations_force_marker_prompt_not_segments() -> None:
         assert "===SEGMENT_0===" not in captured["source_text"]
         assert captured["reviewer_comment"] == "LANGUAGE_REVIEW"
         assert corrected == "abc (X, 2020) DEF"
+    finally:
+        logic.word_app = original["word_app"]
+        logic.get_access_status = original["access"]
+        logic.resolve_provider_connection = original["resolve"]
+        logic.provider_requires_api_key = original["requires"]
+        logic.load_runtime_settings = original["settings"]
+        logic.proofread_with_provider = original["provider"]
+        logic.generate_comment = original["generate_comment"]
+
+
+def test_proofread_repolish_with_citation_and_tracked_deletions() -> None:
+    """Re-proofreading tracked-change text must not skip citation fields.
+
+    The first citation is plain text, the second is a Word field, and a
+    tracked deletion before the field shifts Word's internal positions.
+    """
+    from src import logic
+
+    captured: dict[str, str] = {}
+
+    class FakeWord:
+        def ensure_ready(self) -> None:
+            pass
+
+        def is_selection_in_table(self) -> bool:
+            return False
+
+        def ensure_track_changes_enabled(self) -> None:
+            pass
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return "zzz (X, 2020) yyy (X, 2020) www", 50, 95, "", ""
+
+        def selection_has_fields(self) -> bool:
+            return True
+
+        def get_selection_field_spans(self) -> list[tuple[int, int, str]]:
+            return [(71, 91, "(X, 2020)")]
+
+        def get_selection_hidden_spans(
+            self, start: int = 0, end: int = 0
+        ) -> list[tuple[int, int]]:
+            return [(68, 71)]
+
+        def add_comment(self, comment_text: str) -> None:
+            captured["comment"] = comment_text
+
+    def fake_provider(
+        source_text: str,
+        api_key: str,
+        max_tokens: int,
+        base_url: str,
+        model: str,
+        **_kwargs: Any,
+    ) -> str:
+        captured["source_text"] = source_text
+        return "zzz {{OBJ_0}} yyy {{OBJ_1}} WWW"
+
+    original = {
+        "word_app": logic.word_app,
+        "access": logic.get_access_status,
+        "resolve": logic.resolve_provider_connection,
+        "requires": logic.provider_requires_api_key,
+        "settings": logic.load_runtime_settings,
+        "provider": logic.proofread_with_provider,
+        "generate_comment": logic.generate_comment,
+    }
+    logic.word_app = FakeWord()
+    logic.get_access_status = lambda: {"tier": "paid", "free_mode_allowed": True}
+    logic.resolve_provider_connection = lambda settings: (
+        "Fake",
+        "",
+        "http://fake",
+        "fake-model",
+    )
+    logic.provider_requires_api_key = lambda name: False
+    logic.load_runtime_settings = lambda: {
+        "general": {
+            "comment_type": "None",
+            "auto_apply": False,
+            "temperature": 0.3,
+            "spelling": "UK/AU/NZ",
+            "style": "Precise (Minimal Changes)",
+            "context": "General Editing",
+        },
+        "active_provider": "Fake",
+        "providers": {},
+    }
+    logic.proofread_with_provider = fake_provider
+    logic.generate_comment = lambda *_args, **_kwargs: ""
+    try:
+        status, _original, corrected, _comment, _start = (
+            logic.proofread_selection_once(max_tokens=100)
+        )
+        assert not status.startswith("Skipped:"), status
+        assert status.startswith("Changes added as comment"), status
+        assert corrected == "zzz (X, 2020) yyy (X, 2020) WWW"
+        assert "{{OBJ_0}}" in captured["source_text"]
+        assert "{{OBJ_1}}" in captured["source_text"]
     finally:
         logic.word_app = original["word_app"]
         logic.get_access_status = original["access"]
@@ -2958,10 +3089,14 @@ def main() -> None:
     print("PASS field result unique match recovery")
     test_field_result_ambiguous_match_still_raises()
     print("PASS field result ambiguous match still raises")
+    test_field_result_mapping_accounts_for_tracked_deletions()
+    print("PASS field result mapping accounts for tracked deletions")
     test_plain_text_citations_are_detected_and_masked()
     print("PASS plain-text citations are detected and masked")
     test_citations_force_marker_prompt_not_segments()
     print("PASS citations force marker prompt instead of blind segments")
+    test_proofread_repolish_with_citation_and_tracked_deletions()
+    print("PASS repolish with citation + tracked deletions")
     test_reviewer_guidance_always_runs_comment_optional()
     print("PASS reviewer guidance is independent of comment setting")
     test_apply_corrections_maps_offsets_around_fields()
