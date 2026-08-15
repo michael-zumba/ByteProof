@@ -4737,6 +4737,38 @@ class ProofreaderApp(QMainWindow):
                 self.status_label.setText(status_text)
             return
 
+        if status_text.startswith("APPLY_REVIEW:"):
+            if self.isVisible():
+                self.status_label.setText(
+                    "Review the changes, then click Apply."
+                )
+            else:
+                self.status_label.setText(
+                    "Changes ready — review and apply in ByteProof."
+                )
+                self._show_toast(
+                    "Couldn't apply automatically. Review and apply.",
+                    kind="warning",
+                )
+            if original and corrected:
+                self.display_diff(original, corrected)
+                self.diff_word_count.setText(
+                    f"{len(corrected.split())} words"
+                )
+                self.pending_generic_apply = {
+                    "mode": "word",
+                    "original": original,
+                    "corrected": corrected,
+                    "comment": comment,
+                    "review_start": review_start,
+                }
+                self.apply_btn.setText("Apply Changes")
+                self.apply_btn.setVisible(True)
+                self.apply_btn.setEnabled(True)
+                if self.apply_menu_action is not None:
+                    self.apply_menu_action.setEnabled(True)
+            return
+
         if status_text.startswith("REVIEW_NEEDED:"):
             sim_pct = status_text.split(":", 1)[1]
             try:

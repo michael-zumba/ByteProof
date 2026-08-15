@@ -457,15 +457,21 @@ def apply_corrections_with_diff(
 
     try:
         current_visible, current_start, current_end, _, _ = word_app.get_selection_info()
-        if abs(current_start - start_offset) > 10:
-            print(f"Aborting: Selection moved (Expected {start_offset}, got {current_start}).")
-            return False
         normalized_current = (
             current_visible.replace("\r\n", "\r").replace("\n", "\r")
         )
         if normalized_current != original_text:
-            print("Aborting: Selection text changed since proofreading.")
-            return False
+            # Word can occasionally report a shifted selection after AI work.
+            # Re-read once; the text must still match, but the new start
+            # position is authoritative for mapping edits back.
+            current_visible, current_start, current_end, _, _ = word_app.get_selection_info()
+            normalized_current = (
+                current_visible.replace("\r\n", "\r").replace("\n", "\r")
+            )
+            if normalized_current != original_text:
+                print("Aborting: Selection text changed since proofreading.")
+                return False
+        start_offset = current_start
     except Exception as e:
         print(f"Error verifying selection: {e}")
         return False
@@ -1640,7 +1646,7 @@ def proofread_selection_once(
             if auto_apply:
                 if cancel_event is not None and cancel_event.is_set():
                     raise TaskCancelledError()
-                apply_corrections_with_diff(
+                applied = apply_corrections_with_diff(
                     current_text, corrected,
                     start_offset=start_offset,
                     protected_spans=protected_spans,
@@ -1652,7 +1658,13 @@ def proofread_selection_once(
                     hidden_spans=tracked_deletion_spans,
                     cancel_event=cancel_event,
                 )
-                result_status = "Proofreading complete." + warning_suffix
+                if applied:
+                    result_status = "Proofreading complete." + warning_suffix
+                else:
+                    # Surface the apply failure instead of claiming success and
+                    # adding only the reviewer comment.
+                    result_status = f"APPLY_REVIEW:{similarity:.3f}"
+                    comment_result["text"] = None
             else:
                 suggestion_comment = "Proofreading suggestion:\n\n" + corrected
                 if comment_result["text"] is not None and comment_result["text"].strip():

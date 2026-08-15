@@ -1495,6 +1495,35 @@ def test_reviewer_guidance_always_runs_comment_optional() -> None:
         logic.generate_comment = original["generate_comment"]
 
 
+def test_apply_corrections_uses_current_selection_position() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.text = ""
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return self.text, 7, 18, "", ""
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        # The start offset passed in is stale; Word now reports the same text
+        # at a new position. The apply step must use the current position.
+        logic.word_app.text = "abcdeFGhij"
+        ok = logic.apply_corrections_with_diff(
+            "abcdeFGhij", "abcdeFGHij", start_offset=999
+        )
+        assert ok is True
+        assert logic.word_app.calls == [("replace", 14, 15, "H")]
+    finally:
+        logic.word_app = original
+
+
 def test_apply_corrections_maps_offsets_around_fields() -> None:
     from src import logic
 
@@ -3145,6 +3174,8 @@ def main() -> None:
     print("PASS repolish with citation + tracked deletions")
     test_reviewer_guidance_always_runs_comment_optional()
     print("PASS reviewer guidance is independent of comment setting")
+    test_apply_corrections_uses_current_selection_position()
+    print("PASS apply uses current selection position")
     test_apply_corrections_maps_offsets_around_fields()
     print("PASS apply corrections maps offsets around citation fields")
     test_revision_mapper_compensates_tracked_deletions()
