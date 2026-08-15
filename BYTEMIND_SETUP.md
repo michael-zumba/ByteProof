@@ -80,68 +80,41 @@ identity; losing it means granting Accessibility once more.
 
 ## Still to do before selling
 
-### 1. Stripe
+### 1. Licensing (Polar — live)
 
-Done. The ByteMind Stripe payment link is live in `src/settings.py`:
+Polar is the canonical payment and license owner. The checkout link lives in
+`src/settings.py` (`POLAR_CHECKOUT_URL`) and the price is managed in the
+Polar dashboard:
 
 ```python
-STRIPE_PAYMENT_URL = "https://buy.stripe.com/3cIcN50KZfX1bP3dN73Nm05"
+POLAR_ORGANIZATION_ID = "..."   # Polar -> Settings -> Organization -> ID
+POLAR_CHECKOUT_URL = "https://buy.polar.sh/..."   # Polar -> Products -> Checkout Links
 ```
 
-The purchase button and trial-expired flow open this link directly. If you
-later want to change the price, update the button label in `src/gui.py`
-(`Purchase License ($35)` and the trial-expired copy).
+The current price is **NZD $49 incl. GST, one-time**. If you change the price
+in the Polar dashboard, also update the button label in `src/gui.py`
+(`Purchase License ($49)`) and the trial-expired copy to match.
 
-#### Automatic activation after payment
+#### How activation works (Polar)
 
-ByteProof supports two automatic activation paths:
+1. The customer pays on the Polar checkout page; Polar emails them a license
+   key and shows it in their customer portal.
+2. In the app, Settings → License → "Already Paid? Activate with License Key",
+   paste the key. The app registers this computer's fingerprint with Polar.
+3. Polar enforces the 2-device limit on its own durable servers. To switch
+   machines, "Deactivate This Computer" frees the slot.
 
-1. **Stripe session deep link** (recommended): set the Stripe Payment Link's
-   success URL to `byteproof://activate?session={CHECKOUT_SESSION_ID}`. After
-   checkout, ByteProof opens, verifies the paid session with the ByteMind
-   server, and activates this computer automatically.
-2. **Email/auto lookup** (needs the ByteMind server): the app's
-   "I've Paid — Activate Automatically" button (also in the trial-expired
-   dialog) asks for the checkout email, then POSTs it with the machine
-   fingerprint to `ACTIVATION_API_URL` in `src/activation.py`:
-   `https://byteproof-api.onrender.com/api/byteproof/activate`. The server must verify
-   the Stripe payment and return `{"license_key": "..."}`. Send buyers a
-   fallback link `byteproof://activate?email=<email>` in the fulfilment email.
+**Developer access:** developer emails are handled locally in
+`src/settings.py` (`DEVELOPER_EMAILS`); those addresses unlock full access
+without a key.
 
-**To complete path 2**, deploy the ready-made service in `server/`
-(FastAPI + Stripe webhook + license generation). Use the included
-`render.yaml` blueprint on Render, set the three secrets (`STRIPE_SECRET_KEY`,
-`STRIPE_WEBHOOK_SECRET`, `BYTEPROOF_LICENSE_PRIVATE_KEY`), and point
-the app at the Render service URL (currently
-`https://byteproof-api.onrender.com`). Follow `server/README.md`.
-Until that endpoint is live, path 1 (emailed key link) works fully and path 2
-shows a clear "server not reachable" message.
+#### Legacy Stripe-era server (`server/`) — dev only
 
-**Activation email:** the webhook also sends a backup activation email with a
-one-click link. Add SMTP secrets in Render (`BYTEPROOF_SMTP_HOST`,
-`BYTEPROOF_SMTP_USER`, `BYTEPROOF_SMTP_PASSWORD`, optionally
-`BYTEPROOF_SMTP_PORT`, `BYTEPROOF_SMTP_FROM`, `BYTEPROOF_SMTP_TLS`) — see
-`server/README.md`. If they are missing, payments still activate in-app; the
-email is skipped.
-
-**Developer access:** set `BYTEPROOF_DEV_EMAILS` in Render to a
-comma-separated list of your own email addresses. Those addresses can
-activate on any number of computers with full access and no payment or
-device-limit checks.
-
-**Device limit:** each license allows **2 computers**. The server registry
-(`licenses.json`) is the source of truth; a third computer is rejected until
-one is deactivated. The app's Settings → License → "Deactivate This Computer"
-calls `POST /api/byteproof/deactivate`, frees the slot, and removes the local
-key. The license payload is also stored in the macOS Keychain / Windows
-Credential Manager and re-verified (signature + machine fingerprint) on every
-app launch, so editing `license.json` cannot bypass licensing.
-
-**User-facing UX:** activation is email-based. The License tab offers
-"Already Paid? Activate with Email" and never asks users for a key. Keys exist
-only internally (generated server-side, stored in the app). The manual key
-deep link (`byteproof://activate?key=...`) still works as a hidden support
-path for ByteMind staff to recover lost activations.
+The old FastAPI + Stripe email-activation server in `server/` is retained only
+for pre-Polar buyers and local testing. It is unreachable from the app while
+Polar is configured and should not be deployed to production. `render.yaml`
+and `Dockerfile` exist only for that legacy path; remove them when the legacy
+registry is retired. See `server/README.md`.
 
 ### 2. Update feed
 
@@ -158,7 +131,7 @@ the app silently skips update checks.
   when 3 days or fewer remain.
 - After the trial expires, ByteProof enters a limited free mode: Local AI only,
   3 proofreads per day, and no reviewer comments. Cloud providers and unlimited
-  use require the $35 license.
+  use require the $49 license.
 - Hitting the daily cap or trying a cloud provider shows a purchase dialog with
   a recap of how many selections were proofread during the trial, plus
   **Purchase**, **Activate License**, and **I've Paid — Activate Automatically**.
@@ -214,8 +187,8 @@ Rules of thumb:
 ## Rebuilding
 
 ```bash
-./build_macos.sh          # Apple Silicon DMG
-./build_macos_intel.sh    # Intel DMG (needs .venv_x86, see README)
+./build_macos.sh arm64     # Apple Silicon DMG
+./build_macos.sh x86_64    # Intel DMG (needs .venv_x86, see README)
 build_windows.bat         # on a Windows machine
 ```
 

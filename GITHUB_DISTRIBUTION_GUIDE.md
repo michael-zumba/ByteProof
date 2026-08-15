@@ -75,7 +75,7 @@ deactivate
 Then build:
 
 ```bash
-./build_macos_intel.sh
+./build_macos.sh x86_64
 ```
 
 **Output:** `ByteProof_Installer_Intel.dmg` in the project root.

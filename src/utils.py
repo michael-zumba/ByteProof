@@ -1,6 +1,29 @@
 import random
 
 
+def normalize_text(text: str, collapse_whitespace: bool = True) -> str:
+    """Canonical normalization shared by Word and generic-editing comparisons.
+
+    Handles the subtle differences between what Word and other apps return
+    for the same visible text: CR/LF variants, non-breaking spaces, and
+    smart quotes. When ``collapse_whitespace`` is true, runs of any whitespace
+    are collapsed to a single space (generic-app comparisons); Word keeps the
+    original spacing so diff offsets stay meaningful.
+    """
+    text = (
+        text.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\xa0", " ")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+    )
+    if collapse_whitespace:
+        return " ".join(text.split())
+    return text
+
+
 def clean_api_keys(keys: list[str]) -> list[str]:
     return [key.strip() for key in keys if isinstance(key, str) and key.strip()]
 

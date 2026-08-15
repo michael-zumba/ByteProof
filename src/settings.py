@@ -17,11 +17,9 @@ COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
 SUPPORT_EMAIL = "bytemind.nz@gmail.com"
 
-STRIPE_PAYMENT_URL = "https://buy.stripe.com/3cIcN50KZfX1bP3dN73Nm05"
-
-# Polar licensing (the VoiceInk approach). Fill POLAR_ORGANIZATION_ID from
-# Polar -> Settings -> Organization -> ID, then replace STRIPE_PAYMENT_URL with
-# your Polar checkout link (Polar -> Products -> Checkout Links -> New Link).
+# Polar licensing is the canonical payment + license-owner path (the VoiceInk
+# approach). Prices and checkout links are managed in the Polar dashboard;
+# set these env vars to override them for development.
 POLAR_API_URL = "https://api.polar.sh"
 POLAR_ORGANIZATION_ID = os.environ.get(
     "BYTEPROOF_POLAR_ORGANIZATION_ID", ""
@@ -72,7 +70,7 @@ PROVIDERS = {
             "ByteProof downloads a small local model (Phi-4 Mini or Qwen3) to "
             "your computer and runs it privately — no API key, no account, "
             "and it stays available in the limited free mode after your "
-            "7-day trial. The $35 license unlocks unlimited use.\n\n"
+            "7-day trial. The $49 license unlocks unlimited use.\n\n"
             "Open the Local AI tab to pick a model and download it. The "
             "recommended size depends on your RAM."
         ),

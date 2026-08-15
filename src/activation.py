@@ -1,15 +1,14 @@
-"""License activation: Polar-first (the VoiceInk approach) with a legacy
-email/server fallback until the Polar account is configured.
+"""License activation: Polar is the canonical payment + licensing owner.
 
-Once Polar is set up (POLAR_ORGANIZATION_ID), customers buy on Polar's
-checkout page, Polar emails them a license key, and the app activates that key
-with this computer's fingerprint. Polar enforces the 2-device limit on its own
-durable servers - no custom activation server whose data could be lost on
-redeploy.
+Customers buy on Polar's checkout page, Polar emails them a license key, and
+the app activates that key with this computer's fingerprint. Polar enforces
+the device limit on its own durable servers - no custom activation server
+whose data could be lost on redeploy.
 
-Until Polar is configured, the old email-based activation server remains as a
-fallback so existing Stripe buyers can still activate with the email they used
-at checkout.
+Legacy Stripe-era code below (the old email/activation server) is retained
+only for local development and any pre-Polar buyers. It is unreachable while
+``POLAR_ORGANIZATION_ID`` is configured, which is the production default, and
+should be deleted once no pre-Polar buyer remains.
 
 Known developer emails can always unlock full access locally, without a key.
 """
@@ -38,9 +37,14 @@ from .settings import APP_NAME, DEVELOPER_EMAILS, POLAR_ORGANIZATION_ID
 
 URL_SCHEME = "byteproof"
 
-ACTIVATION_API_URL = "https://byteproof-api.onrender.com/api/byteproof/activate"
-ACTIVATION_DEACTIVATE_URL = "https://byteproof-api.onrender.com/api/byteproof/deactivate"
-ACTIVATION_VALIDATE_URL = "https://byteproof-api.onrender.com/api/byteproof/validate"
+# ---------------------------------------------------------------------------
+# Legacy Stripe-era activation server (dev-only; unreachable while Polar is
+# configured). Retained for pre-Polar buyers and local testing. Remove these
+# URLs together with server/ once the legacy registry is retired.
+# ---------------------------------------------------------------------------
+LEGACY_ACTIVATION_API_URL = "https://byteproof-api.onrender.com/api/byteproof/activate"
+LEGACY_ACTIVATION_DEACTIVATE_URL = "https://byteproof-api.onrender.com/api/byteproof/deactivate"
+LEGACY_ACTIVATION_VALIDATE_URL = "https://byteproof-api.onrender.com/api/byteproof/validate"
 
 
 def _looks_like_email(value: str) -> bool:
@@ -82,9 +86,9 @@ def _post_json(url: str, payload: dict) -> dict:
 
 
 def _server_activate_with_email(email: str) -> dict:
-    """Legacy fallback: verify payment on the ByteMind server (Stripe era)."""
+    """Legacy fallback: verify payment on the old Stripe-era ByteMind server."""
     data = _post_json(
-        ACTIVATION_API_URL,
+        LEGACY_ACTIVATION_API_URL,
         {
             "email": email.strip(),
             "machine_fingerprint": _get_machine_fingerprint(),
@@ -105,9 +109,9 @@ def _server_activate_with_email(email: str) -> dict:
 
 
 def _server_deactivate(email: str) -> dict:
-    """Legacy fallback: free this machine's slot on the ByteMind server."""
+    """Legacy fallback: free this machine's slot on the old ByteMind server."""
     data = _post_json(
-        ACTIVATION_DEACTIVATE_URL,
+        LEGACY_ACTIVATION_DEACTIVATE_URL,
         {
             "email": email,
             "machine_fingerprint": _get_machine_fingerprint(),
@@ -183,17 +187,6 @@ def activate_with_email(email: str) -> dict:
     return activate_with_key(email)
 
 
-def activate_with_session(session_id: str) -> dict:
-    return {
-        "ok": False,
-        "error": (
-            "This activation method is no longer used. Your license key was "
-            "sent to your email after purchase - open Settings → License and "
-            "paste the key to activate this computer."
-        ),
-    }
-
-
 def deactivate_license() -> dict:
     """Free this computer's slot, then remove the local license."""
     info = get_license_info()
@@ -238,14 +231,24 @@ def validate_license_remote() -> dict:
         return {"ok": True, "status": status}
 
     if info.get("provider") == "legacy" and info.get("email"):
-        return _post_json(
-            ACTIVATION_VALIDATE_URL,
+        data = _post_json(
+            LEGACY_ACTIVATION_VALIDATE_URL,
             {
                 "email": info["email"],
                 "machine_fingerprint": _get_machine_fingerprint(),
                 "app": APP_NAME,
             },
         )
+        # Normalize the legacy server's {"valid": ...} shape to the same
+        # {"ok": ...} contract Polar uses, so callers never mix the two.
+        if data.get("valid"):
+            return {"ok": True, "status": "valid", "email": info["email"]}
+        return {
+            "ok": False,
+            "error": data.get("error") or (
+                "This license is no longer valid on this computer."
+            ),
+        }
 
     # Developer licenses are local; nothing to validate online.
     return {"ok": True, "provider": info.get("provider")}

@@ -23,7 +23,7 @@ from .settings import (
     load_runtime_settings,
     resource_path,
 )
-from .utils import mask_api_key, select_api_key
+from .utils import mask_api_key, normalize_text, select_api_key
 from .word_integration import get_word_integration
 
 # Initialize platform-specific Word integration
@@ -66,9 +66,8 @@ def resolve_provider_connection(
     return active_provider, api_key, base_url, model
 
 def normalize_for_comparison(text: str) -> str:
-    text = text.replace('\xa0', ' ')
-    text = text.replace('\u201c', '"').replace('\u201d', '"').replace('\u2018', "'").replace('\u2019', "'")
-    return text
+    """Normalize smart quotes/nbsp for Word comparison (keeps whitespace)."""
+    return normalize_text(text, collapse_whitespace=False)
 
 
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:

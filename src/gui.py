@@ -111,7 +111,6 @@ from .settings import (
     POLAR_ORGANIZATION_ID,
     PRODUCT_URL,
     PROVIDERS,
-    STRIPE_PAYMENT_URL,
     SUPPORT_EMAIL,
     resource_path,
     save_runtime_settings,
@@ -154,8 +153,8 @@ def _format_bytes(size: int) -> str:
 
 
 def open_purchase_url(parent: QWidget | None = None) -> None:
-    """Open the Polar/Stripe checkout page, or explain that payments are pending."""
-    purchase_url = POLAR_CHECKOUT_URL or STRIPE_PAYMENT_URL
+    """Open the Polar checkout page, or explain that payments are pending."""
+    purchase_url = POLAR_CHECKOUT_URL
     if "REPLACE_WITH" in purchase_url:
         QMessageBox.information(
             parent,
@@ -169,22 +168,15 @@ def open_purchase_url(parent: QWidget | None = None) -> None:
 
 
 def already_paid_label() -> str:
-    """Button label: license key once Polar is live, email during Stripe era."""
-    if POLAR_ORGANIZATION_ID:
-        return "Already Paid? Activate with License Key"
-    return "Already Paid? Activate with Email"
+    """Button label for activating a purchased license key."""
+    return "Already Paid? Activate with License Key"
 
 
 def activation_prompt() -> tuple[str, str]:
-    """Dialog title/prompt for activation, matching the current checkout mode."""
-    if POLAR_ORGANIZATION_ID:
-        return (
-            "Activate with License Key",
-            "Paste the license key from your Polar receipt email:",
-        )
+    """Dialog title/prompt for activating a Polar license key."""
     return (
-        "Activate with Email",
-        "Enter the email you used at checkout:",
+        "Activate with License Key",
+        "Paste the license key from your Polar receipt email:",
     )
 
 
@@ -751,7 +743,10 @@ class GenericApplyWorker(QThread):
                 after,
             )
             if ok_verify:
-                self.done.emit(True, f"Applied to {app_name}.")
+                self.done.emit(
+                    True,
+                    f"Applied to {app_name}. Press Cmd/Ctrl+Z to undo.",
+                )
             else:
                 self.done.emit(
                     False,
@@ -1533,6 +1528,17 @@ class SettingsDialog(QDialog):
 
             info_layout.addWidget(lbl_status)
 
+            if not provider_info.get("is_local") and not is_ollama:
+                privacy_note = QLabel(
+                    "Selected text is sent to this provider — Local AI keeps "
+                    "everything on your computer."
+                )
+                privacy_note.setStyleSheet(
+                    "color: #A89F9A; font-size: 10px;"
+                )
+                privacy_note.setWordWrap(True)
+                info_layout.addWidget(privacy_note)
+
             row.addLayout(info_layout, stretch=1)
             
             btn_activate = QPushButton("Use")
@@ -1636,7 +1642,7 @@ class SettingsDialog(QDialog):
         subtitle = QLabel(
             "Private, offline proofreading on your computer. Download once and "
             "run it locally — no account, no API key, no internet needed. "
-            "The $35 license unlocks unlimited use."
+            "The $49 license unlocks unlimited use."
         )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
@@ -2229,7 +2235,7 @@ class SettingsDialog(QDialog):
         vbox.addWidget(self.lbl_msg)
         layout.addWidget(self.status_frame)
         
-        self.btn_buy = QPushButton("Purchase License ($35)")
+        self.btn_buy = QPushButton("Purchase License ($49)")
         self.btn_buy.setMinimumHeight(42)
         self.btn_buy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_buy.setStyleSheet("""

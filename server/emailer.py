@@ -1,4 +1,7 @@
-"""Send the ByteProof activation email after a Stripe checkout.
+"""LEGACY: send the ByteProof activation email after a Stripe checkout.
+
+Polar is the canonical payment + licensing owner, and Polar sends license-key
+emails itself. This Stripe-era emailer is kept only for the legacy dev server.
 
 Configuration (environment variables):
   BYTEPROOF_SMTP_HOST       e.g. smtp.gmail.com

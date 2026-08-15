@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 from .settings import get_app_support_dir
+from .utils import normalize_text
 
 SYSTEM = platform.system()
 CONTEXT_CHARS = 400
@@ -39,16 +40,7 @@ def _debug_log(msg: str) -> None:
 
 def normalize_selection_text(text: str) -> str:
     """Normalize text for safe before/after comparisons."""
-    text = (
-        text.replace("\r\n", "\n")
-        .replace("\r", "\n")
-        .replace("\xa0", " ")
-        .replace("\u201c", '"')
-        .replace("\u201d", '"')
-        .replace("\u2018", "'")
-        .replace("\u2019", "'")
-    )
-    return " ".join(text.split())
+    return normalize_text(text)
 
 
 def _parse_ax_range(value: Any) -> tuple[int | None, int | None]:

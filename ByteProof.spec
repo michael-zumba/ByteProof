@@ -11,6 +11,10 @@ try:
 except Exception:
     APP_VERSION = '1.0.0'
 
+# Cross-compilation target. build_macos.sh sets this to 'x86_64' for the
+# Intel build; leave unset (None) for a native build.
+TARGET_ARCH = os.environ.get('BYTEPROOF_TARGET_ARCH', '') or None
+
 datas = [
     ('prompt/phd_proofreader.txt', 'prompt'),
     ('prompt/phd_proofreader_creative.txt', 'prompt'),
@@ -59,7 +63,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    target_arch=TARGET_ARCH,
     codesign_identity=None,
     entitlements_file=None,
 )

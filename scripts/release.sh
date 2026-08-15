@@ -53,12 +53,10 @@ if ! command -v create-dmg >/dev/null 2>&1; then
     exit 1
 fi
 
-for script in "$ROOT/build_macos.sh" "$ROOT/build_macos_intel.sh"; do
-    if [[ ! -f "$script" ]]; then
-        echo "Error: missing build script: $script" >&2
-        exit 1
-    fi
-done
+if [[ ! -f "$ROOT/build_macos.sh" ]]; then
+    echo "Error: missing build script: $ROOT/build_macos.sh" >&2
+    exit 1
+fi
 
 if [[ ! -d "$WEBSITE_DIR" ]]; then
     echo "Error: website folder not found at $WEBSITE_DIR" >&2
@@ -102,10 +100,10 @@ fi
 # --- Step 3: build both DMGs locally while GitHub builds Windows --------------
 
 echo "=== Building Apple Silicon DMG ==="
-"$ROOT/build_macos.sh"
+"$ROOT/build_macos.sh" arm64
 
 echo "=== Building Intel DMG ==="
-"$ROOT/build_macos_intel.sh"
+"$ROOT/build_macos.sh" x86_64
 
 # --- Step 4: wait for the Windows build, then upload DMGs --------------------
 

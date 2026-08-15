@@ -5,7 +5,7 @@ entirely on the user's machine through llama.cpp's OpenAI-compatible server.
 The first run downloads the runtime (~30 MB) and the model (~1.2-9 GB) with
 progress, resume, and SHA-256 verification. After that, proofreading is
 private and offline. Local AI remains available in the limited free mode after
-the 7-day trial (3 proofreads/day); the $35 license unlocks unlimited use.
+the 7-day trial (3 proofreads/day); the $49 license unlocks unlimited use.
 
 The catalog is intentionally small and conservative: Qwen3 models are Apache
 2.0 and Phi-4 Mini is MIT, which are both safe to bundle and redistribute in a

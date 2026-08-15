@@ -1,5 +1,11 @@
 # ByteProof activation server
 
+> **LEGACY / DEV-ONLY.** Polar is the canonical payment + licensing owner
+> (checkout, license keys, device limits). This Stripe-era FastAPI service is
+> retained only for pre-Polar buyers and local development; the desktop app
+> cannot reach it while Polar is configured. Do not deploy it to production,
+> and retire it together with `render.yaml` once no pre-Polar buyer remains.
+
 Small FastAPI service that turns Stripe payments into signed, machine-bound
 ByteProof license keys, and enforces the 2-computer limit (same model as
 VoiceInk/Polar's activate/deactivate/validate flow).

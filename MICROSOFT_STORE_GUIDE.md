@@ -72,7 +72,7 @@ You'll need:
   generated from your app logo.
 - **Privacy policy URL** — ready:
   `https://www.bytemind.co.nz/privacy.html`
-- **Pricing** — set the app to **Free**. ByteProof's $35 NZD license and
+- **Pricing** — set the app to **Free**. ByteProof's $49 NZD license and
   trial are handled inside the app, not through Store billing.
 
 ## 5. Submit for certification

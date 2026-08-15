@@ -49,9 +49,25 @@ def test_settings_branding() -> None:
     assert "ByteMind" in settings.APP_SUPPORT_DIR
     assert "bytemind" in settings.PRODUCT_URL
     assert settings.PRODUCT_URL == "https://www.bytemind.co.nz/byteproof"
-    # Currently a temporary $1 test link; the real $20 link is restored before release.
-    assert settings.STRIPE_PAYMENT_URL.startswith("https://buy.stripe.com/")
+    # Polar is the canonical payment + license owner.
+    assert settings.POLAR_ORGANIZATION_ID
+    assert settings.POLAR_CHECKOUT_URL.startswith("https://buy.polar.sh/")
     assert "ByteProof Local (Qwen3)" in settings.PROVIDERS
+
+
+def test_shared_text_normalization() -> None:
+    """Word and generic-app comparison must use the same canonical rules."""
+    from src.generic_editing import normalize_selection_text
+    from src.logic import normalize_for_comparison
+    from src.utils import normalize_text
+
+    sample = "Hello\u00a0world \u201cquoted\u201d \u2018single\u2019\r\nnext"
+    assert normalize_text(sample) == "Hello world \"quoted\" 'single' next"
+    assert normalize_selection_text(sample) == normalize_text(sample)
+    # Word comparison keeps original whitespace so diff offsets stay valid.
+    assert normalize_for_comparison(sample) == (
+        "Hello world \"quoted\" 'single'\nnext"
+    )
 
 
 def test_open_purchase_url_uses_live_link() -> None:
@@ -2775,6 +2791,8 @@ def main() -> None:
     print("PASS updater URL selection")
     test_settings_branding()
     print("PASS settings branding")
+    test_shared_text_normalization()
+    print("PASS shared text normalization")
     test_open_purchase_url_uses_live_link()
     print("PASS open purchase URL uses live link")
     test_licensing_roundtrip()

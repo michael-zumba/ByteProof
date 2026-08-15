@@ -1,4 +1,8 @@
-"""ByteProof activation API and Stripe webhook.
+"""LEGACY ByteProof activation API and Stripe webhook (dev-only).
+
+Polar is the canonical payment + licensing owner; this Stripe-era server is
+retained only for pre-Polar buyers and local development. It is unreachable
+from the app while POLAR_ORGANIZATION_ID is configured.
 
 Endpoints:
   POST /api/byteproof/stripe-webhook  Stripe webhook for checkout.session.completed

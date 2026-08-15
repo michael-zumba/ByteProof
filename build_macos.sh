@@ -1,7 +1,17 @@
 #!/bin/bash
-
-# Build script for ByteProof - macOS Apple Silicon (arm64)
-# Usage: ./build_macos.sh
+# Build the ByteProof macOS installer for a target architecture.
+#
+# Usage:
+#   ./build_macos.sh            # native architecture
+#   ./build_macos.sh arm64      # Apple Silicon
+#   ./build_macos.sh x86_64     # Intel (cross-compiled from Apple Silicon)
+#
+# The x86_64 build requires a dedicated x86_64 Python virtual environment:
+#
+#   arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m venv .venv_x86
+#   source .venv_x86/bin/activate
+#   pip install -r requirements.txt
+#   deactivate
 
 set -e
 
@@ -11,33 +21,83 @@ if [ -d "/opt/homebrew/bin" ]; then
 fi
 
 APP_NAME="ByteProof"
-DMG_NAME="ByteProof_Installer_AppleSilicon.dmg"
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENV_PYTHON="$THIS_DIR/venv/bin/python"
-VENV_PYINSTALLER="$THIS_DIR/venv/bin/pyinstaller"
 
-echo "=== ByteProof Build (Apple Silicon) ==="
+# --- Target architecture ----------------------------------------------------
+
+TARGET_ARCH="${1:-$(uname -m)}"
+case "$TARGET_ARCH" in
+    arm64|aarch64)
+        TARGET_ARCH="arm64"
+        DMG_NAME="ByteProof_Installer_AppleSilicon.dmg"
+        DIST_DIR="$THIS_DIR/dist"
+        WORK_DIR="$THIS_DIR/build"
+        VENV_PYTHON="$THIS_DIR/venv/bin/python"
+        VENV_PYINSTALLER="$THIS_DIR/venv/bin/pyinstaller"
+        VOLNAME="$APP_NAME Installer"
+        ;;
+    x86_64|intel)
+        TARGET_ARCH="x86_64"
+        DMG_NAME="ByteProof_Installer_Intel.dmg"
+        DIST_DIR="$THIS_DIR/dist_intel"
+        WORK_DIR="$THIS_DIR/build_intel"
+        VENV_PYTHON="$THIS_DIR/.venv_x86/bin/python3"
+        VENV_PYINSTALLER="$THIS_DIR/.venv_x86/bin/pyinstaller"
+        VOLNAME="$APP_NAME Installer (Intel)"
+        ;;
+    *)
+        echo "Error: unknown architecture '$TARGET_ARCH'. Use arm64 or x86_64." >&2
+        exit 1
+        ;;
+esac
+
+echo "=== ByteProof Build ($TARGET_ARCH) ==="
 echo ""
 
-# --- Prerequisite checks ---
+# --- Prerequisite checks ----------------------------------------------------
 
-if [ -f "$VENV_PYTHON" ]; then
-    echo "Using project virtual environment (lightweight build): $VENV_PYTHON"
-    PYTHON_VERSION=$("$VENV_PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-else
+if [ ! -f "$VENV_PYTHON" ]; then
+    if [ "$TARGET_ARCH" = "x86_64" ]; then
+        echo "Error: x86_64 virtual environment not found at .venv_x86/"
+        echo ""
+        echo "One-time setup required. Run these commands:"
+        echo "  arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m venv .venv_x86"
+        echo "  source .venv_x86/bin/activate"
+        echo "  pip install -r requirements.txt"
+        echo "  deactivate"
+        echo ""
+        echo "Then re-run: ./build_macos.sh x86_64"
+        exit 1
+    fi
     if ! command -v python3 &> /dev/null; then
         echo "Error: python3 not found. Please install Python 3.11+."
         exit 1
     fi
     echo "Warning: no venv found. Building with system python3 may produce a large app."
-    PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    VENV_PYTHON="$(command -v python3)"
+    PYTHON_VERSION=$("$VENV_PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+else
+    echo "Using project virtual environment (lightweight build): $VENV_PYTHON"
+    PYTHON_VERSION=$("$VENV_PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 fi
 echo "Python version: $PYTHON_VERSION"
 
-if [ ! -f "$VENV_PYINSTALLER" ] && ! command -v pyinstaller &> /dev/null; then
-    echo ""
-    echo "PyInstaller not found. Installing dependencies from requirements.txt..."
-    pip3 install -r "$THIS_DIR/requirements.txt"
+if [ "$TARGET_ARCH" = "x86_64" ]; then
+    ARCH=$(arch -x86_64 "$VENV_PYTHON" -c "import platform; print(platform.machine())")
+    if [ "$ARCH" != "x86_64" ]; then
+        echo "Error: venv Python is not x86_64 (got $ARCH)."
+        echo "Recreate .venv_x86 with the setup commands above."
+        exit 1
+    fi
+    echo "Verified: x86_64 Python at $VENV_PYTHON"
+fi
+
+if [ ! -f "$VENV_PYINSTALLER" ]; then
+    if [ "$TARGET_ARCH" = "x86_64" ] || ! command -v pyinstaller &> /dev/null; then
+        echo ""
+        echo "PyInstaller not found. Installing dependencies from requirements.txt..."
+        pip3 install -r "$THIS_DIR/requirements.txt"
+    fi
 fi
 
 if ! command -v create-dmg &> /dev/null; then
@@ -46,35 +106,48 @@ if ! command -v create-dmg &> /dev/null; then
     exit 1
 fi
 
-# --- Build ---
+# --- Build ------------------------------------------------------------------
 
 echo ""
 echo "Cleaning previous builds..."
-rm -rf "$THIS_DIR/build" "$THIS_DIR/dist"
+rm -rf "$WORK_DIR" "$DIST_DIR"
 rm -f "$THIS_DIR/$DMG_NAME"
 
-echo "Building .app with PyInstaller..."
+echo ""
+echo "Building .app with PyInstaller ($TARGET_ARCH)..."
 cd "$THIS_DIR"
-if [ -f "$VENV_PYINSTALLER" ]; then
-    "$VENV_PYINSTALLER" "ByteProof.spec" --noconfirm
+if [ "$TARGET_ARCH" = "x86_64" ]; then
+    export BYTEPROOF_TARGET_ARCH="x86_64"
 else
-    pyinstaller "ByteProof.spec" --noconfirm
+    unset BYTEPROOF_TARGET_ARCH
+fi
+if [ "$TARGET_ARCH" = "x86_64" ]; then
+    arch -x86_64 "$VENV_PYINSTALLER" "ByteProof.spec" \
+        --noconfirm \
+        --distpath "$DIST_DIR" \
+        --workpath "$WORK_DIR"
+else
+    if [ -f "$VENV_PYINSTALLER" ]; then
+        "$VENV_PYINSTALLER" "ByteProof.spec" --noconfirm
+    else
+        pyinstaller "ByteProof.spec" --noconfirm
+    fi
 fi
 
 # Verify .app was created
-if [ ! -d "dist/$APP_NAME.app" ]; then
-    echo "Error: dist/$APP_NAME.app was not created. Build failed."
+if [ ! -d "$DIST_DIR/$APP_NAME.app" ]; then
+    echo "Error: $DIST_DIR/$APP_NAME.app was not created. Build failed."
     exit 1
 fi
 
 echo ""
 echo "Applying stable code signature (preserves Accessibility permissions)..."
-"$THIS_DIR/tools/sign_byteproof.sh" "dist/$APP_NAME.app" || echo "Warning: stable signing skipped."
+"$THIS_DIR/tools/sign_byteproof.sh" "$DIST_DIR/$APP_NAME.app" || echo "Warning: stable signing skipped."
 
 if [ -n "${BYTEPROOF_DEV_ID:-}" ]; then
     echo ""
     echo "Notarizing with Apple Developer ID..."
-    "$THIS_DIR/scripts/notarize.sh" "dist/$APP_NAME.app"
+    "$THIS_DIR/scripts/notarize.sh" "$DIST_DIR/$APP_NAME.app"
 else
     echo ""
     echo "Notarization skipped (set BYTEPROOF_DEV_ID to notarize)."
@@ -84,7 +157,7 @@ fi
 echo ""
 echo "Creating .dmg installer..."
 create-dmg \
-  --volname "$APP_NAME Installer" \
+  --volname "$VOLNAME" \
   --volicon "logo/logo.icns" \
   --window-pos 200 120 \
   --window-size 600 400 \
@@ -94,7 +167,7 @@ create-dmg \
   --app-drop-link 400 185 \
   --skip-jenkins \
   "$DMG_NAME" \
-  "dist/$APP_NAME.app"
+  "$DIST_DIR/$APP_NAME.app"
 
 if [ ! -f "$THIS_DIR/$DMG_NAME" ]; then
     echo "Error: create-dmg did not produce $DMG_NAME. Re-run the build (Finder scripting is sometimes flaky)." >&2
@@ -103,4 +176,4 @@ fi
 
 echo ""
 echo "Build complete! Installer: $DMG_NAME"
-echo "Architecture: $(uname -m)"
+echo "Architecture: $TARGET_ARCH"

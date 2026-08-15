@@ -102,7 +102,7 @@ xAI, Groq, Perplexity, or your own Ollama server.
 <p align="center">
   <b>7-day free trial</b> — every feature, no credit card.<br/>
   After the trial: limited free mode (Local AI, 3 proofreads/day) or a
-  <b>one-time $35 NZD license</b> for up to 2 computers.
+  <b>one-time $49 NZD license (GST incl.)</b> for up to 2 computers.
 </p>
 
 ### macOS
