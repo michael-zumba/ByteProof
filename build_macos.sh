@@ -144,13 +144,19 @@ echo ""
 echo "Applying stable code signature (preserves Accessibility permissions)..."
 "$THIS_DIR/tools/sign_byteproof.sh" "$DIST_DIR/$APP_NAME.app" || echo "Warning: stable signing skipped."
 
-if [ -n "${BYTEPROOF_DEV_ID:-}" ]; then
+DEV_ID="${BYTEPROOF_DEV_ID:-}"
+if [ -z "$DEV_ID" ]; then
+    DEV_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep -m1 "Developer ID Application" \
+        | sed -E 's/^[^"]*"([^"]+)".*/\1/')
+fi
+if [ -n "$DEV_ID" ]; then
     echo ""
-    echo "Notarizing with Apple Developer ID..."
-    "$THIS_DIR/scripts/notarize.sh" "$DIST_DIR/$APP_NAME.app"
+    echo "Notarizing with Apple Developer ID: $DEV_ID"
+    BYTEPROOF_DEV_ID="$DEV_ID" "$THIS_DIR/scripts/notarize.sh" "$DIST_DIR/$APP_NAME.app"
 else
     echo ""
-    echo "Notarization skipped (set BYTEPROOF_DEV_ID to notarize)."
+    echo "Notarization skipped (no Developer ID Application certificate found)."
     echo "Without notarization, macOS may show 'Apple could not verify ByteProof'."
 fi
 
@@ -172,6 +178,23 @@ create-dmg \
 if [ ! -f "$THIS_DIR/$DMG_NAME" ]; then
     echo "Error: create-dmg did not produce $DMG_NAME. Re-run the build (Finder scripting is sometimes flaky)." >&2
     exit 1
+fi
+
+if [ -n "$DEV_ID" ]; then
+    echo ""
+    echo "Signing installer with Apple Developer ID..."
+    codesign --force --options runtime --timestamp --sign "$DEV_ID" "$THIS_DIR/$DMG_NAME"
+
+    echo ""
+    echo "Notarizing installer with Apple notary service..."
+    xcrun notarytool submit "$THIS_DIR/$DMG_NAME" \
+        --keychain-profile "${BYTEPROOF_NOTARY_PROFILE:-ByteProof-Notary}" \
+        --keychain "${BYTEPROOF_NOTARY_KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}" \
+        --wait
+
+    echo ""
+    echo "Stapling notarization ticket to installer..."
+    xcrun stapler staple "$THIS_DIR/$DMG_NAME"
 fi
 
 echo ""
