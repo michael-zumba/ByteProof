@@ -234,6 +234,166 @@ def _locate_field_result_spans_by_text(
     return spans
 
 
+def _compute_field_hidden_total(
+    field_spans: list[tuple[int, int, str]],
+    result_spans: list[tuple[int, int]] | None = None,
+) -> int:
+    """Total hidden field-code characters inside the selection.
+
+    Word can enumerate nested fields (an EndNote citation is itself a field
+    that may contain inner fields). Overlapping hidden blocks must be merged
+    before summing, otherwise the hidden total is over-counted and a clean
+    selection can look like it contains tracked deletions, which would trigger
+    the expensive character-level scan for no reason.
+    """
+    intervals: list[tuple[int, int]] = []
+    for index, (doc_start, doc_end, result_text) in enumerate(field_spans):
+        if result_spans is not None and index < len(result_spans):
+            visible_len = max(
+                0, result_spans[index][1] - result_spans[index][0]
+            )
+        else:
+            visible_len = len(result_text)
+        hidden_len = max(0, doc_end - doc_start - visible_len)
+        if hidden_len > 0:
+            intervals.append((doc_end - hidden_len, doc_end))
+    return sum(
+        end - start for start, end in _merge_spans(intervals)
+    )
+
+
+def _scan_tracked_deletions(
+    word: Any,
+    start: int,
+    end: int,
+    field_spans: list[tuple[int, int, str]],
+    missing_hidden_chars: int,
+    cancel_event: threading.Event | None = None,
+) -> list[tuple[int, int]]:
+    """Scan for tracked deletions only when the selection length proves some
+    hidden characters are unaccounted for.
+
+    The per-character scan on macOS is expensive (one Word range read per
+    character), so it must never run on clean text. ``missing_hidden_chars``
+    is the number of hidden characters beyond the field codes themselves;
+    anything <= 0 means there is no evidence of tracked deletions and the
+    scan is skipped entirely. The scan is bounded to ``missing_hidden_chars``
+    found characters and is cancellable.
+    """
+    if missing_hidden_chars <= 0:
+        return []
+    get_hidden_spans = cast(
+        Callable[..., list[tuple[int, int]]] | None,
+        getattr(word, "get_selection_hidden_spans", None),
+    )
+    if get_hidden_spans is None:
+        return []
+
+    # Merge overlapping/nested field spans so the AppleScript per-character
+    # loop does not re-check every field span for every character.
+    exclude_field_spans = _merge_spans(
+        [(doc_start, doc_end) for doc_start, doc_end, _ in field_spans]
+    )
+    # You can never find more hidden characters than the selection contains;
+    # clamp the bound so a field-estimate mismatch cannot trigger a full
+    # selection walk on clean text.
+    missing_hidden_chars = min(missing_hidden_chars, max(0, end - start))
+    if missing_hidden_chars <= 0:
+        return []
+
+    def _scan() -> list[tuple[int, int]]:
+        try:
+            return get_hidden_spans(
+                start,
+                end,
+                exclude_field_spans,
+                missing_hidden_chars,
+            )
+        except TypeError:
+            try:
+                return get_hidden_spans(start, end)
+            except TypeError:
+                return get_hidden_spans()
+
+    if cancel_event is not None:
+        return _run_with_cancel(cancel_event, _scan)
+    return _scan()
+
+
+def _locate_citation_spans(
+    current_text: str,
+    start_offset: int,
+    end_offset: int,
+    cancel_event: threading.Event | None = None,
+    *,
+    word: Any | None = None,
+    has_fields: bool | None = None,
+) -> tuple[
+    list[tuple[int, int, str]],
+    list[tuple[int, int]],
+    list[tuple[int, int]],
+]:
+    """Locate Word citation fields in the current selection.
+
+    Fast path: map each field's visible result text directly in the selection
+    text, which needs no tracked-deletion scan. If any result text is
+    duplicated or unlocatable, fall back to Word's document positions plus a
+    bounded tracked-deletion scan (only when the selection length proves
+    hidden characters exist). Returns
+    ``(field_spans, field_result_spans, tracked_deletion_spans)``.
+    """
+    app = word if word is not None else word_app
+    field_spans: list[tuple[int, int, str]] = []
+    field_result_spans: list[tuple[int, int]] = []
+    tracked_deletion_spans: list[tuple[int, int]] = []
+
+    codes_shown = any(ord(ch) in (0x13, 0x14, 0x15) for ch in current_text)
+    if codes_shown:
+        return field_spans, field_result_spans, tracked_deletion_spans
+
+    if has_fields is None:
+        has_fields_check = getattr(app, "selection_has_fields", None)
+        if has_fields_check is None:
+            return field_spans, field_result_spans, tracked_deletion_spans
+        has_fields = bool(has_fields_check())
+    if not has_fields:
+        return field_spans, field_result_spans, tracked_deletion_spans
+
+    get_field_spans = getattr(app, "get_selection_field_spans", None)
+    if get_field_spans is None:
+        return field_spans, field_result_spans, tracked_deletion_spans
+    field_spans = get_field_spans()
+    if not field_spans:
+        raise ValueError("No field spans returned")
+
+    try:
+        field_result_spans = _locate_field_result_spans_by_text(
+            current_text, field_spans
+        )
+        tracked_deletion_spans = []
+    except ValueError:
+        missing_hidden_chars = (
+            (end_offset - start_offset)
+            - _compute_field_hidden_total(field_spans)
+            - len(current_text)
+        )
+        tracked_deletion_spans = _scan_tracked_deletions(
+            app,
+            start_offset,
+            end_offset,
+            field_spans,
+            missing_hidden_chars,
+            cancel_event,
+        )
+        field_result_spans = _locate_field_result_spans(
+            current_text,
+            field_spans,
+            start_offset,
+            tracked_deletion_spans,
+        )
+    return field_spans, field_result_spans, tracked_deletion_spans
+
+
 def _build_hidden_items(
     start_offset: int,
     field_spans: list[tuple[int, int, str]],
@@ -455,6 +615,7 @@ def apply_corrections_with_diff(
     if cancel_event is not None and cancel_event.is_set():
         raise TaskCancelledError()
 
+    restore_start = start_offset
     try:
         current_visible, current_start, current_end, _, _ = word_app.get_selection_info()
         normalized_current = (
@@ -471,6 +632,7 @@ def apply_corrections_with_diff(
             if normalized_current != original_text:
                 print("Aborting: Selection text changed since proofreading.")
                 return False
+        selection_moved = current_start != start_offset
         start_offset = current_start
     except Exception as e:
         print(f"Error verifying selection: {e}")
@@ -481,57 +643,77 @@ def apply_corrections_with_diff(
 
     field_spans: list[tuple[int, int, str]] = []
     result_spans: list[tuple[int, int]] = []
+    tracked_deletion_spans = list(hidden_spans or [])
     if field_info is not None:
         field_spans, result_spans = field_info
+        if selection_moved:
+            # The absolute field positions captured at proofread time are stale
+            # after Word's selection moved. Re-locate citations against the
+            # CURRENT selection so the mapping anchor and the field positions
+            # stay consistent; never mix a new anchor with old absolute spans.
+            try:
+                fresh = _locate_citation_spans(
+                    current_visible,
+                    current_start,
+                    current_end,
+                    cancel_event,
+                    has_fields=True,
+                )
+                if not fresh[0]:
+                    raise ValueError(
+                        "No field spans returned after selection moved"
+                    )
+                field_spans, result_spans, tracked_deletion_spans = fresh
+            except Exception as e:
+                print(
+                    "Aborting: citation fields changed after selection moved: "
+                    f"{e}"
+                )
+                return False
+    else:
+        # No field info supplied (e.g. manual Apply after review): locate any
+        # citation fields in the current selection so edits never land inside
+        # hidden field code and offsets are compensated correctly.
+        restore_start = current_start
+        try:
+            located = _locate_citation_spans(
+                current_visible,
+                current_start,
+                current_end,
+                cancel_event,
+            )
+            field_spans, result_spans, tracked_deletion_spans = located
+        except Exception as e:
+            print(f"Could not map citation fields in selection: {e}")
+            return False
+        if field_spans:
+            # Protect citation result spans exactly like the proofread step so
+            # manual Apply never edits inside a citation.
+            protected_spans = _find_protected_spans(
+                original_text, extra_spans=result_spans
+            )
 
     # Tracked deletions are normally discovered by the proofread step before
-    # this point; when absent, compute them here (the same one-pass scan).
-    hidden_spans = list(hidden_spans or [])
-    if not hidden_spans:
-        get_hidden_spans = cast(
-            Callable[..., list[tuple[int, int]]] | None,
-            getattr(word_app, "get_selection_hidden_spans", None),
+    # this point; when absent, compute them here with the same bounded scan.
+    # The scan only runs when the selection length proves hidden characters
+    # remain after accounting for fields (never on clean text).
+    if not tracked_deletion_spans:
+        missing_hidden_chars = (
+            (current_end - current_start)
+            - _compute_field_hidden_total(field_spans, result_spans)
+            - len(original_text)
         )
-        field_hidden_total = 0
-        for (doc_start, doc_end, _), (vis_start, vis_end) in zip(
-            field_spans, result_spans
-        ):
-            field_hidden_total += max(
-                0, doc_end - doc_start - (vis_end - vis_start)
-            )
-        expected_visible_length = (current_end - current_start) - field_hidden_total
-        missing_hidden_chars = expected_visible_length - len(original_text)
-
-        # The common case is a clean paragraph selected inside a heavily
-        # revised manuscript. Word's visible text length already tells us
-        # whether any hidden characters remain after accounting for fields, so
-        # skip the selection scan entirely when there are none.
-        if get_hidden_spans is not None and missing_hidden_chars != 0:
-            def _scan_hidden_spans() -> list[tuple[int, int]]:
-                exclude_field_spans = [
-                    (doc_start, doc_end)
-                    for doc_start, doc_end, _ in field_spans
-                ]
-                try:
-                    return get_hidden_spans(
-                        current_start,
-                        current_end,
-                        exclude_field_spans,
-                        max(0, missing_hidden_chars),
-                    )
-                except TypeError:
-                    try:
-                        return get_hidden_spans(current_start, current_end)
-                    except TypeError:
-                        return get_hidden_spans()
-
-            if cancel_event is not None:
-                hidden_spans = _run_with_cancel(cancel_event, _scan_hidden_spans)
-            else:
-                hidden_spans = _scan_hidden_spans()
+        tracked_deletion_spans = _scan_tracked_deletions(
+            word_app,
+            current_start,
+            current_end,
+            field_spans,
+            missing_hidden_chars,
+            cancel_event,
+        )
 
     hidden_items = _build_hidden_items(
-        start_offset, field_spans, result_spans, hidden_spans
+        start_offset, field_spans, result_spans, tracked_deletion_spans
     )
     boundaries = sorted(boundary for boundary, _ in hidden_items)
 
@@ -600,15 +782,23 @@ def apply_corrections_with_diff(
     except Exception as e:
         print(f"Error applying corrections: {e}")
         return False
+
+    # Restore the user's selection so Word does not strand the cursor
+    # elsewhere after scripted edits. Best-effort: a failure here must never
+    # turn a successful apply into a reported failure.
+    try:
+        set_selection = getattr(word_app, "set_selection_range", None)
+        if set_selection is not None:
+            restore_end = restore_start + (current_end - current_start)
+            set_selection(restore_start, restore_end)
+    except Exception as e:
+        print(f"Could not restore selection position: {e}")
     return True
-
-
-
 
 def _run_with_cancel(
     cancel_event: threading.Event,
-    func: Callable[[], str],
-) -> str:
+    func: Callable[[], Any],
+) -> Any:
     """Run func in a daemon thread and return when done or cancelled.
 
     A network request can block for up to its socket timeout, so the request
@@ -633,8 +823,8 @@ def _run_with_cancel(
         raise RuntimeError("Request thread did not return a result.")
     kind, value = box[0]
     if kind == "err":
-        raise value  # type: ignore[misc]
-    return value  # type: ignore[return-value]
+        raise value
+    return value
 
 
 def _api_call_with_retry(
@@ -1356,63 +1546,17 @@ def proofread_selection_once(
         codes_shown = any(ord(ch) in (0x13, 0x14, 0x15) for ch in current_text)
         if not codes_shown and word_app.selection_has_fields():
             try:
-                field_spans = word_app.get_selection_field_spans()
+                field_spans, field_result_spans, tracked_deletion_spans = (
+                    _locate_citation_spans(
+                        current_text,
+                        start_offset,
+                        end_offset,
+                        cancel_event,
+                        has_fields=True,
+                    )
+                )
                 if not field_spans:
                     raise ValueError("No field spans returned")
-                # Fast path: treat the visible text as the source of truth and
-                # locate citations by their exact result text. This avoids the
-                # tracked-deletion scan entirely for the common re-polish
-                # case where each citation text is unique in the selection.
-                try:
-                    field_result_spans = _locate_field_result_spans_by_text(
-                        current_text, field_spans
-                    )
-                    tracked_deletion_spans = []
-                except ValueError:
-                    # Duplicate or unlocatable citation text needs Word's
-                    # document positions plus tracked-deletion ranges.
-                    field_hidden_total = sum(
-                        max(0, doc_end - doc_start - len(result_text))
-                        for doc_start, doc_end, result_text in field_spans
-                    )
-                    expected_visible_length = (
-                        (end_offset - start_offset) - field_hidden_total
-                    )
-                    missing_hidden_chars = expected_visible_length - len(current_text)
-                    get_hidden_spans = getattr(
-                        word_app, "get_selection_hidden_spans", None
-                    )
-                    if get_hidden_spans is not None and missing_hidden_chars != 0:
-                        def _scan_tracked_deletions() -> list[tuple[int, int]]:
-                            exclude_field_spans = [
-                                (doc_start, doc_end)
-                                for doc_start, doc_end, _ in field_spans
-                            ]
-                            try:
-                                return get_hidden_spans(
-                                    start_offset,
-                                    end_offset,
-                                    exclude_field_spans,
-                                    max(0, missing_hidden_chars),
-                                )
-                            except TypeError:
-                                try:
-                                    return get_hidden_spans(start_offset, end_offset)
-                                except TypeError:
-                                    return get_hidden_spans()
-
-                        if cancel_event is not None:
-                            tracked_deletion_spans = _run_with_cancel(
-                                cancel_event, _scan_tracked_deletions
-                            )
-                        else:
-                            tracked_deletion_spans = _scan_tracked_deletions()
-                    field_result_spans = _locate_field_result_spans(
-                        current_text,
-                        field_spans,
-                        start_offset,
-                        tracked_deletion_spans,
-                    )
             except Exception as e:
                 print(f"Could not map citation fields in selection: {e}")
                 _log_citation_mapping_failure(

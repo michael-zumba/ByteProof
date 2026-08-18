@@ -30,6 +30,32 @@ class FieldSpan(NamedTuple):
     result_text: str
 
 
+def _drop_nested_fields(
+    fields: list[tuple[int, int, int, int, str]],
+) -> list[tuple[int, int, int, int, str]]:
+    """Keep only the outermost Word fields.
+
+    Word reports nested fields (an EndNote citation can contain an inner
+    field whose code lies inside the outer field's code). The outer field's
+    range already accounts for the inner field's hidden characters, so
+    keeping both would double-count hidden offsets and shift every edit that
+    follows the citation.
+    """
+    outermost: list[tuple[int, int, int, int, str]] = []
+    for candidate in fields:
+        cs, ce, *_ = candidate
+        if cs <= 0 or ce <= 0:
+            continue
+        nested = any(
+            other_cs < cs and ce <= other_ce
+            for other_cs, other_ce, *_ in fields
+            if (other_cs, other_ce) != (cs, ce)
+        )
+        if not nested:
+            outermost.append(candidate)
+    return outermost
+
+
 class WordIntegration:
     """Abstract base class for Microsoft Word interaction."""
 
@@ -59,6 +85,10 @@ class WordIntegration:
         raise NotImplementedError
 
     def replace_selection_content(self, new_text: str) -> None:
+        raise NotImplementedError
+
+    def set_selection_range(self, start: int, end: int) -> None:
+        """Restore the Word selection to ``[start, end)`` (best effort)."""
         raise NotImplementedError
 
     def selection_has_fields(self) -> bool:
@@ -145,6 +175,13 @@ class WindowsWordIntegration(WordIntegration):
         except Exception as e:
             print(f"Error replacing selection content (Windows): {e}")
 
+    def set_selection_range(self, start: int, end: int) -> None:
+        try:
+            word = self._get_word()
+            word.Selection.SetRange(start, end)
+        except Exception as e:
+            print(f"Error restoring selection range (Windows): {e}")
+
     def get_selection_info(self) -> tuple[str, int, int, str, str]:
         try:
             word = self._get_word()
@@ -218,18 +255,23 @@ class WindowsWordIntegration(WordIntegration):
         try:
             word = self._get_word()
             sel = word.Selection
-            spans: list[FieldSpan] = []
+            parsed: list[tuple[int, int, int, int, str]] = []
             for field in sel.Fields:
                 try:
-                    spans.append(
-                        FieldSpan(
-                            int(field.Range.Start),
-                            int(field.Range.End),
-                            str(field.Result.Text or ""),
-                        )
+                    start = int(field.Range.Start)
+                    end = int(field.Range.End)
+                    text = str(field.Result.Text or "")
+                    parsed.append(
+                        (start, end, -1, end, text)
                     )
                 except Exception:
                     continue
+            spans = [
+                FieldSpan(start, end, text)
+                for start, end, _result_start, _result_end, text in _drop_nested_fields(
+                    parsed
+                )
+            ]
             return spans
         except Exception as e:
             print(f"Error getting field spans (Windows): {e}")
@@ -546,6 +588,27 @@ class MacOSWordIntegration(WordIntegration):
             except Exception:
                 pass
 
+    def set_selection_range(self, start: int, end: int) -> None:
+        script = """
+        on run argv
+            set selStart to (item 1 of argv) as integer
+            set selEnd to (item 2 of argv) as integer
+            try
+                tell application "Microsoft Word"
+                    if not (exists active document) then return ""
+                    set myRange to create range active document start selStart end selEnd
+                    select myRange
+                end tell
+            on error
+                return ""
+            end try
+        end run
+        """
+        try:
+            self._run_applescript(script, str(start), str(end))
+        except Exception as e:
+            print(f"Error restoring selection range (macOS): {e}")
+
     def selection_has_fields(self) -> bool:
         script = """
         on run
@@ -617,7 +680,7 @@ class MacOSWordIntegration(WordIntegration):
             print(f"Error listing Word fields (macOS): {e}")
             return []
 
-        spans: list[FieldSpan] = []
+        parsed: list[tuple[int, int, int, int, str]] = []
         for chunk in raw.split("###FIELD_END###"):
             if "###FIELD_SPAN###" not in chunk:
                 continue
@@ -632,6 +695,16 @@ class MacOSWordIntegration(WordIntegration):
             except ValueError:
                 continue
             result_text = parts[4]
+            if code_start <= 0 or code_end <= 0:
+                continue
+            parsed.append(
+                (code_start, code_end, result_start, result_end, result_text)
+            )
+
+        spans: list[FieldSpan] = []
+        for code_start, code_end, result_start, result_end, result_text in (
+            _drop_nested_fields(parsed)
+        ):
             if code_start <= 0 or result_start <= 0 or result_end <= result_start:
                 # Unusual field Word couldn't fully describe. Fall back to the
                 # bounded scan so the rest of the selection still maps.

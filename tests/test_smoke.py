@@ -1123,6 +1123,25 @@ def test_macos_field_spans_use_word_result_range() -> None:
     assert spans == [FieldSpan(57, 115, "United Nations (2020)")]
 
 
+def test_macos_field_spans_drop_nested_fields() -> None:
+    from src.word_integration import FieldSpan, MacOSWordIntegration
+
+    integration = MacOSWordIntegration()
+    # EndNote can enumerate an outer citation field plus a nested inner field
+    # whose code lies inside the outer field's code. Counting both would
+    # double-count hidden characters and shift edits after the citation.
+    raw = (
+        "240984###FIELD_SPAN###241023###FIELD_SPAN###241024###FIELD_SPAN###241093"
+        "###FIELD_SPAN###Outer citation text###FIELD_END###"
+        "241000###FIELD_SPAN###241021###FIELD_SPAN###-1###FIELD_SPAN###241022"
+        "###FIELD_SPAN######FIELD_END###"
+    )
+    integration._run_applescript = lambda script, *args: raw
+
+    spans = integration.get_selection_field_spans()
+    assert spans == [FieldSpan(240983, 241094, "Outer citation text")]
+
+
 def test_citation_text_mapping_fast_path() -> None:
     from src.logic import _locate_field_result_spans_by_text
 
@@ -1589,6 +1608,255 @@ def test_apply_corrections_maps_offsets_around_fields() -> None:
         assert logic.word_app.calls == []
     finally:
         logic.word_app = original
+
+
+def test_apply_corrections_relocates_fields_when_selection_moves() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.text = ""
+            self.field_spans: list[tuple[int, int, str]] = []
+            self.field_reads = 0
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return self.text, 55, 195, "", ""
+
+        def get_selection_field_spans(self) -> list[tuple[int, int, str]]:
+            self.field_reads += 1
+            return self.field_spans
+
+        def get_selection_hidden_spans(
+            self,
+            start: int = 0,
+            end: int = 0,
+            exclude: list[tuple[int, int]] | None = None,
+            max_hidden: int = 0,
+        ) -> list[tuple[int, int]]:
+            return []
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        citation = "(Al-Qahtani & Elgharbawy, 2020)"
+        current_text = "abc " + citation + " def"
+        logic.word_app.text = current_text
+        corrected = "abc " + citation + " DEF"
+
+        # Proofread-time mapping was anchored at 50.
+        old_field_spans = [(54, 185, citation)]
+        old_result_spans = logic._locate_field_result_spans(
+            current_text, old_field_spans, 50
+        )
+        protected_spans = logic._find_protected_spans(
+            current_text, extra_spans=old_result_spans
+        )
+        # Word's selection moved by +5 during AI work; the field moved with it.
+        logic.word_app.field_spans = [(59, 190, citation)]
+
+        ok = logic.apply_corrections_with_diff(
+            current_text,
+            corrected,
+            start_offset=50,
+            protected_spans=protected_spans,
+            field_info=(old_field_spans, old_result_spans),
+        )
+        assert ok is True
+        # The apply step must re-read the field from Word instead of reusing
+        # the stale absolute positions captured at proofread time.
+        assert logic.word_app.field_reads == 1
+        assert logic.word_app.calls == [("replace", 191, 194, "DEF")]
+    finally:
+        logic.word_app = original
+
+
+def test_apply_corrections_skips_hidden_scan_without_evidence() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.scan_calls = 0
+            self.text = ""
+            self.end = 0
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return self.text, 50, self.end, "", ""
+
+        def get_selection_hidden_spans(
+            self,
+            start: int = 0,
+            end: int = 0,
+            exclude: list[tuple[int, int]] | None = None,
+            max_hidden: int = 0,
+        ) -> list[tuple[int, int]]:
+            self.scan_calls += 1
+            return []
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        citation = "(Al-Qahtani & Elgharbawy, 2020)"
+        current_text = "abc " + citation + " def"
+        corrected = "abc " + citation + " DEF"
+        field_spans = [(54, 185, citation)]
+        result_spans = logic._locate_field_result_spans(
+            current_text, field_spans, 50
+        )
+        protected_spans = logic._find_protected_spans(
+            current_text, extra_spans=result_spans
+        )
+        logic.word_app.text = current_text
+
+        # Negative mismatch (selection shorter than fields + text account
+        # for) must never trigger the expensive per-character scan.
+        logic.word_app.end = 188
+        ok = logic.apply_corrections_with_diff(
+            current_text,
+            corrected,
+            start_offset=50,
+            protected_spans=protected_spans,
+            field_info=(field_spans, result_spans),
+        )
+        assert ok is True
+        assert logic.word_app.scan_calls == 0
+
+        # A clean selection with exact lengths also skips the scan.
+        logic.word_app.calls = []
+        logic.word_app.end = 189
+        ok = logic.apply_corrections_with_diff(
+            current_text,
+            corrected,
+            start_offset=50,
+            protected_spans=protected_spans,
+            field_info=(field_spans, result_spans),
+        )
+        assert ok is True
+        assert logic.word_app.scan_calls == 0
+        assert logic.word_app.calls == [("replace", 186, 189, "DEF")]
+    finally:
+        logic.word_app = original
+
+
+def test_apply_corrections_self_locates_fields_for_manual_apply() -> None:
+    from src import logic
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self.text = ""
+            self.field_spans: list[tuple[int, int, str]] = []
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return self.text, 50, 189, "", ""
+
+        def selection_has_fields(self) -> bool:
+            return bool(self.field_spans)
+
+        def get_selection_field_spans(self) -> list[tuple[int, int, str]]:
+            return self.field_spans
+
+        def get_selection_hidden_spans(
+            self,
+            start: int = 0,
+            end: int = 0,
+            exclude: list[tuple[int, int]] | None = None,
+            max_hidden: int = 0,
+        ) -> list[tuple[int, int]]:
+            return []
+
+        def replace_range(self, start: int, end: int, text: str) -> None:
+            self.calls.append(("replace", start, end, text))
+
+    original = logic.word_app
+    logic.word_app = FakeWord()
+    try:
+        citation = "(Al-Qahtani & Elgharbawy, 2020)"
+        current_text = "abc " + citation + " def"
+        logic.word_app.text = current_text
+        logic.word_app.field_spans = [(54, 185, citation)]
+
+        # Manual Apply supplies no field_info; the apply step must locate the
+        # citation itself, protect it, and compensate its hidden code when
+        # mapping edits back to Word.
+        ok = logic.apply_corrections_with_diff(
+            current_text,
+            "abc " + citation + " DEF",
+            start_offset=50,
+        )
+        assert ok is True
+        assert logic.word_app.calls == [("replace", 186, 189, "DEF")]
+
+        # An edit that would touch the citation must be skipped.
+        logic.word_app.calls = []
+        ok = logic.apply_corrections_with_diff(
+            current_text,
+            "abc (X, 2020) def",
+            start_offset=50,
+        )
+        assert ok is True
+        assert logic.word_app.calls == []
+    finally:
+        logic.word_app = original
+
+
+def test_compute_field_hidden_total_merges_overlapping_fields() -> None:
+    from src.logic import _compute_field_hidden_total
+
+    # Overlapping/nested fields (an EndNote citation can contain inner
+    # fields): summing per-field hidden lengths would double count the shared
+    # region. The merged union is what Word's selection length implies.
+    assert _compute_field_hidden_total(
+        [(100, 200, "same"), (150, 250, "same")],
+        [(10, 14), (20, 24)],
+    ) == 146
+    # Without result spans the visible length comes from the result text.
+    assert _compute_field_hidden_total([(100, 200, "same")]) == 96
+
+
+def test_scan_tracked_deletions_bounds_and_merges() -> None:
+    from src.logic import _scan_tracked_deletions
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def get_selection_hidden_spans(
+            self,
+            start: int,
+            end: int,
+            exclude: list[tuple[int, int]],
+            max_hidden: int,
+        ) -> list[tuple[int, int]]:
+            self.calls.append((start, end, exclude, max_hidden))
+            return []
+
+    fake = FakeWord()
+    # Overlapping fields (nested EndNote): exclusion spans are merged so the
+    # per-character loop does not re-check every field span per character, and
+    # max_hidden is clamped to the selection length.
+    result = _scan_tracked_deletions(
+        fake,
+        100,
+        300,
+        [(100, 200, "x"), (150, 250, "y")],
+        missing_hidden_chars=1000,
+    )
+    assert result == []
+    assert fake.calls == [(100, 300, [(100, 250)], 200)]
+
+    # No evidence (zero or negative missing) must never reach the scan.
+    fake.calls = []
+    assert _scan_tracked_deletions(fake, 100, 300, [], 0) == []
+    assert _scan_tracked_deletions(fake, 100, 300, [], -5) == []
+    assert fake.calls == []
 
 
 def test_revision_mapper_compensates_tracked_deletions() -> None:
@@ -3164,6 +3432,8 @@ def main() -> None:
     print("PASS field result mapping accounts for tracked deletions")
     test_macos_field_spans_use_word_result_range()
     print("PASS macOS field spans use Word result range")
+    test_macos_field_spans_drop_nested_fields()
+    print("PASS macOS field spans drop nested fields")
     test_citation_text_mapping_fast_path()
     print("PASS citation text mapping fast path")
     test_plain_text_citations_are_detected_and_masked()
@@ -3178,6 +3448,16 @@ def main() -> None:
     print("PASS apply uses current selection position")
     test_apply_corrections_maps_offsets_around_fields()
     print("PASS apply corrections maps offsets around citation fields")
+    test_apply_corrections_relocates_fields_when_selection_moves()
+    print("PASS apply relocates citation fields when the selection moves")
+    test_apply_corrections_skips_hidden_scan_without_evidence()
+    print("PASS apply skips hidden scan without evidence of tracked deletions")
+    test_apply_corrections_self_locates_fields_for_manual_apply()
+    print("PASS manual apply self-locates and protects citation fields")
+    test_compute_field_hidden_total_merges_overlapping_fields()
+    print("PASS field hidden totals merge overlapping/nested fields")
+    test_scan_tracked_deletions_bounds_and_merges()
+    print("PASS tracked-deletion scan is bounded and merges field exclusions")
     test_revision_mapper_compensates_tracked_deletions()
     print("PASS revision mapper compensates tracked deletions")
     test_apply_corrections_maps_offsets_around_tracked_deletions()
