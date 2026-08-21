@@ -26,6 +26,7 @@ APP_PATH="${1:-$ROOT_DIR/dist/ByteProof.app}"
 IDENTITY="${BYTEPROOF_DEV_ID:-}"
 KEYCHAIN_PROFILE="${BYTEPROOF_NOTARY_PROFILE:-ByteProof-Notary}"
 KEYCHAIN="${BYTEPROOF_NOTARY_KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
+ENTITLEMENTS="$ROOT_DIR/packaging/macos/entitlements.plist"
 
 if [ -z "$IDENTITY" ]; then
     IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
@@ -44,7 +45,9 @@ if [ ! -d "$APP_PATH" ]; then
 fi
 
 echo "Re-signing with Apple Developer ID: $IDENTITY"
-codesign --deep --force --options runtime --timestamp --sign "$IDENTITY" "$APP_PATH"
+codesign --deep --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
+    --sign "$IDENTITY" "$APP_PATH"
 codesign --verify --deep --strict "$APP_PATH"
 
 echo "Packaging for notarization..."

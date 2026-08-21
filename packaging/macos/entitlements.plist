@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Required for the Intel (x86_64) build. PyObjC allocates libffi
+		closures by mapping executable memory; under the hardened runtime
+		this anonymous RWX mapping is denied and Apple's libffi falls into
+		an infinite retry loop, so the app never finishes launching on
+		Intel Macs. This entitlement restores the default macOS behaviour
+		for executable memory allocation (the same entitlement used by
+		Firefox and other hardened-runtime apps).
+	-->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>
