@@ -1,7 +1,7 @@
 {
-  "version": "1.6.12",
-  "release_date": "2026-08-18",
-  "release_notes": "Fixed proofreading text that contains EndNote citations so tracked changes apply in the correct place. Nested citation fields are no longer double-counted, citation mapping is re-computed if Word's selection moves, and Word's selection is restored after applying edits.",
+  "version": "1.6.13",
+  "release_date": "2026-08-21",
+  "release_notes": "Fixed the Intel (x86_64) startup hang: ByteProof now opens quickly and reliably instead of hanging before the window appears. Apple Silicon builds are unaffected.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
