@@ -1514,6 +1514,110 @@ def test_reviewer_guidance_always_runs_comment_optional() -> None:
         logic.generate_comment = original["generate_comment"]
 
 
+def test_track_changes_toggle_controls_word_revisions() -> None:
+    from src import logic
+
+    calls: dict[str, list] = {"enabled": [], "disabled": []}
+
+    class FakeWord:
+        def ensure_ready(self) -> None:
+            pass
+
+        def is_selection_in_table(self) -> bool:
+            return False
+
+        def ensure_track_changes_enabled(self) -> None:
+            calls["enabled"].append(True)
+
+        def ensure_track_changes_disabled(self) -> None:
+            calls["disabled"].append(True)
+
+        def get_selection_info(self) -> tuple[str, int, int, str, str]:
+            return "abc def", 50, 56, "", ""
+
+        def selection_has_fields(self) -> bool:
+            return False
+
+    def fake_provider(
+        source_text: str,
+        api_key: str,
+        max_tokens: int,
+        base_url: str,
+        model: str,
+        **_kwargs: Any,
+    ) -> str:
+        return source_text
+
+    original = {
+        "word_app": logic.word_app,
+        "access": logic.get_access_status,
+        "resolve": logic.resolve_provider_connection,
+        "requires": logic.provider_requires_api_key,
+        "provider": logic.proofread_with_provider,
+        "generate_comment": logic.generate_comment,
+    }
+    logic.word_app = FakeWord()
+    logic.get_access_status = lambda: {"tier": "paid", "free_mode_allowed": True}
+    logic.resolve_provider_connection = lambda settings: (
+        "Fake",
+        "",
+        "http://fake",
+        "fake-model",
+    )
+    logic.provider_requires_api_key = lambda name: False
+    logic.proofread_with_provider = fake_provider
+    logic.generate_comment = lambda *_args, **_kwargs: ""
+    try:
+        # Default (track changes on): Word's TrackRevisions is force-enabled.
+        logic.proofread_selection_once(
+            max_tokens=100,
+            settings={
+                "general": {
+                    "comment_type": "None",
+                    "auto_apply": False,
+                    "temperature": 0.3,
+                    "spelling": "UK/AU/NZ",
+                    "style": "Precise (Minimal Changes)",
+                    "context": "General Editing",
+                },
+                "active_provider": "Fake",
+                "providers": {},
+            },
+        )
+        assert calls["enabled"] == [True]
+        assert calls["disabled"] == []
+
+        # Track changes off: edits must be applied directly, so Word's
+        # TrackRevisions is disabled and never force-enabled.
+        calls["enabled"] = []
+        calls["disabled"] = []
+        logic.proofread_selection_once(
+            max_tokens=100,
+            settings={
+                "general": {
+                    "comment_type": "None",
+                    "auto_apply": False,
+                    "temperature": 0.3,
+                    "spelling": "UK/AU/NZ",
+                    "style": "Precise (Minimal Changes)",
+                    "context": "General Editing",
+                    "track_changes": False,
+                },
+                "active_provider": "Fake",
+                "providers": {},
+            },
+        )
+        assert calls["enabled"] == []
+        assert calls["disabled"] == [True]
+    finally:
+        logic.word_app = original["word_app"]
+        logic.get_access_status = original["access"]
+        logic.resolve_provider_connection = original["resolve"]
+        logic.provider_requires_api_key = original["requires"]
+        logic.proofread_with_provider = original["provider"]
+        logic.generate_comment = original["generate_comment"]
+
+
 def test_apply_corrections_uses_current_selection_position() -> None:
     from src import logic
 
@@ -2356,6 +2460,45 @@ def test_polish_prompt_and_flow() -> None:
         logic.proofread_with_provider = original_provider
 
 
+def test_embedded_prompts_match_source_files() -> None:
+    """Prompt assets must be embedded in the binary, not shipped as loose files."""
+    import pathlib
+
+    from src import logic
+    from src.prompt_data import PROMPT_FILES
+
+    prompt_dir = pathlib.Path(__file__).resolve().parents[1] / "prompt"
+    used = {
+        "phd_proofreader.txt",
+        "phd_proofreader_creative.txt",
+        "polish_general.txt",
+        "polish_general_creative.txt",
+        "comment_language.txt",
+        "comment_technical.txt",
+        "context_general.txt",
+        "context_journal.txt",
+        "context_phd_thesis.txt",
+    }
+    assert used <= set(PROMPT_FILES), sorted(used - set(PROMPT_FILES))
+    for name in used:
+        assert PROMPT_FILES[name] == (
+            prompt_dir / name
+        ).read_text(encoding="utf-8").strip(), name
+
+    # Simulate the packaged app: the prompt folder is not on disk, so every
+    # loader must fall back to the embedded copy baked into the binary.
+    original_resource_path = logic.resource_path
+    logic.resource_path = lambda relative_path: "/nonexistent/" + relative_path
+    try:
+        assert "Never use em dashes" in logic.load_polish_prompt("Precise (Minimal Changes)")
+        assert "Never use em dashes" in logic.load_polish_prompt("Creative (Rewrite)")
+        assert "ADDITIONAL CONTEXT" in logic.load_context_overlay("General Editing")
+        assert "ABSOLUTE BAN ON EM DASHES" in logic.load_proofreading_prompt("Precise (Minimal Changes)")
+        assert "copy-editor" in logic.load_comment_prompt("Language", "General Editing").lower()
+    finally:
+        logic.resource_path = original_resource_path
+
+
 def test_generic_gui_flow() -> None:
     from PyQt6.QtWidgets import QApplication
 
@@ -2721,6 +2864,32 @@ def test_settings_dialog_fits_screen() -> None:
     app.processEvents()
     assert dialog.button_box.isVisible()
     assert dialog.button_box.geometry().bottom() <= dialog.height()
+    dialog.close()
+
+
+def test_settings_track_changes_checkbox() -> None:
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    from src import settings
+    from src.gui import SettingsDialog
+
+    # The checkbox must reflect the stored value (the developer's own saved
+    # settings may already have the toggle off, so never depend on that file).
+    loaded = settings.load_runtime_settings()
+    loaded["general"]["track_changes"] = False
+    dialog = SettingsDialog(loaded)
+    assert dialog.chk_track_changes.isChecked() is False
+    dialog.chk_track_changes.setChecked(True)
+    saved = dialog.get_settings()
+    assert saved["general"]["track_changes"] is True
+    dialog.close()
+
+    # Missing key (settings saved by an older version) must default to ON.
+    loaded = settings.load_runtime_settings()
+    loaded["general"].pop("track_changes", None)
+    dialog = SettingsDialog(loaded)
+    assert dialog.chk_track_changes.isChecked() is True
     dialog.close()
 
 
@@ -3444,6 +3613,8 @@ def main() -> None:
     print("PASS repolish with citation + tracked deletions")
     test_reviewer_guidance_always_runs_comment_optional()
     print("PASS reviewer guidance is independent of comment setting")
+    test_track_changes_toggle_controls_word_revisions()
+    print("PASS track changes toggle controls Word revisions")
     test_apply_corrections_uses_current_selection_position()
     print("PASS apply uses current selection position")
     test_apply_corrections_maps_offsets_around_fields()
@@ -3486,6 +3657,8 @@ def main() -> None:
     print("PASS local model output cleaning")
     test_polish_prompt_and_flow()
     print("PASS polish prompt + flow")
+    test_embedded_prompts_match_source_files()
+    print("PASS embedded prompts match source files")
     test_generic_gui_flow()
     print("PASS generic GUI flow")
     test_generic_editor_classification()
@@ -3518,6 +3691,8 @@ def main() -> None:
     print("PASS dock activation restores window")
     test_settings_dialog_fits_screen()
     print("PASS settings dialog fits screen")
+    test_settings_track_changes_checkbox()
+    print("PASS settings track changes checkbox")
     test_update_dismissal()
     print("PASS update dismissal")
     test_download_update_progress()

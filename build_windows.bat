@@ -29,6 +29,20 @@ if not exist "logo\logo.ico" (
     echo Please convert logo\logo.png to logo\logo.ico for a branded executable.
 )
 
+REM Embed prompt assets into the binary so no loose prompt files ship in the install
+echo.
+echo Embedding prompt assets...
+if exist "scripts\embed_prompts.py" (
+    python "scripts\embed_prompts.py"
+    if %errorlevel% neq 0 (
+        echo Failed to embed prompt assets.
+        pause
+        exit /b 1
+    )
+) else (
+    echo scripts\embed_prompts.py not found; using committed src\prompt_data.py.
+)
+
 REM Build with PyInstaller
 echo.
 echo Building executable...

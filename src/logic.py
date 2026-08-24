@@ -17,6 +17,7 @@ import certifi
 
 from .licensing import get_access_status
 from .local_model import resolve_model_id, start_local_server
+from .prompt_data import PROMPT_FILES
 from .settings import (
     LOCAL_MODEL_PROVIDER,
     PROVIDERS,
@@ -874,34 +875,30 @@ def load_context_overlay(context: str) -> str:
         "Academic Journal (Top-Tier)": "context_journal.txt",
     }
     filename = context_map.get(context, "context_general.txt")
+    return _load_prompt_text(filename) or ""
+
+
+def _load_prompt_text(filename: str) -> str | None:
+    """Return a prompt file's text.
+
+    In development the canonical prompt/*.txt files on disk are used so edits
+    take effect immediately. In the packaged app those files do not exist, so
+    the embedded copy baked into the binary at build time is used instead.
+    """
     prompt_path = resource_path(os.path.join("prompt", filename))
     try:
         with open(prompt_path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except FileNotFoundError:
-        return ""
+        return PROMPT_FILES.get(filename)
 
 def load_proofreading_prompt(style: str = "Precise (Minimal Changes)", context: str = "General Editing") -> str:
     prompt_filename = "phd_proofreader.txt"
     if style == "Creative (Rewrite)":
         prompt_filename = "phd_proofreader_creative.txt"
 
-    prompt_path = resource_path(os.path.join("prompt", prompt_filename))
-
-    try:
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-
-        overlay = load_context_overlay(context)
-        if overlay and "{{CONTEXT_OVERLAY}}" in content:
-            content = content.replace("{{CONTEXT_OVERLAY}}", overlay)
-        elif overlay:
-            content = content + "\n\n" + overlay
-        else:
-            content = content.replace("{{CONTEXT_OVERLAY}}", "")
-
-        return content
-    except FileNotFoundError:
+    content = _load_prompt_text(prompt_filename)
+    if content is None:
         return (
             "You are a meticulous academic English proofreader. "
             "Correct grammar, spelling, punctuation, and clarity while preserving meaning, citations, "
@@ -910,6 +907,16 @@ def load_proofreading_prompt(style: str = "Precise (Minimal Changes)", context: 
             "Return only the corrected text."
         )
 
+    overlay = load_context_overlay(context)
+    if overlay and "{{CONTEXT_OVERLAY}}" in content:
+        content = content.replace("{{CONTEXT_OVERLAY}}", overlay)
+    elif overlay:
+        content = content + "\n\n" + overlay
+    else:
+        content = content.replace("{{CONTEXT_OVERLAY}}", "")
+
+    return content
+
 
 def load_polish_prompt(style: str = "Precise (Minimal Changes)") -> str:
     """Load the prompt used for polishing text in non-Word apps."""
@@ -917,23 +924,21 @@ def load_polish_prompt(style: str = "Precise (Minimal Changes)") -> str:
     if style == "Creative (Rewrite)":
         prompt_filename = "polish_general_creative.txt"
 
-    prompt_path = resource_path(os.path.join("prompt", prompt_filename))
-    try:
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        if style == "Creative (Rewrite)":
-            return (
-                "You are a professional writing editor. Rewrite the text for "
-                "clarity, flow, and impact while preserving the author's voice and "
-                "meaning. Do not add new information. Return only the polished "
-                "text with no markdown or explanations."
-            )
+    content = _load_prompt_text(prompt_filename)
+    if content is not None:
+        return content
+    if style == "Creative (Rewrite)":
         return (
-            "You are a professional writing editor. Polish the text for clarity, "
-            "grammar, spelling, and flow while preserving the author's voice and "
-            "meaning. Return only the polished text with no markdown or explanations."
+            "You are a professional writing editor. Rewrite the text for "
+            "clarity, flow, and impact while preserving the author's voice and "
+            "meaning. Do not add new information. Return only the polished "
+            "text with no markdown or explanations."
         )
+    return (
+        "You are a professional writing editor. Polish the text for clarity, "
+        "grammar, spelling, and flow while preserving the author's voice and "
+        "meaning. Return only the polished text with no markdown or explanations."
+    )
 
 
 STRICT_EDITING_RULES = (
@@ -1198,23 +1203,19 @@ def load_comment_prompt(comment_type: str, context: str = "General Editing") -> 
     if comment_type == "Technical (Reviewer)":
         prompt_filename = "comment_technical.txt"
 
-    prompt_path = resource_path(os.path.join("prompt", prompt_filename))
-
-    try:
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-
-        overlay = load_context_overlay(context)
-        if overlay:
-            content = content + "\n\n" + overlay
-
-        return content
-    except FileNotFoundError:
+    content = _load_prompt_text(prompt_filename)
+    if content is None:
         return (
             "You are an academic editor. Provide one concise, constructive comment "
             "on the text. Focus on clarity, argumentation, and academic quality. "
             "Return only the comment as a short paragraph."
         )
+
+    overlay = load_context_overlay(context)
+    if overlay:
+        content = content + "\n\n" + overlay
+
+    return content
 
 def generate_comment(
     source_text: str,
@@ -1514,7 +1515,14 @@ def proofread_selection_once(
         if word_app.is_selection_in_table():
             return TABLE_SKIPPED_STATUS, None, None, None, 0
             
-        word_app.ensure_track_changes_enabled()
+        runtime_settings = settings or load_runtime_settings()
+        use_track_changes = runtime_settings.get("general", {}).get(
+            "track_changes", True
+        )
+        if use_track_changes:
+            word_app.ensure_track_changes_enabled()
+        else:
+            word_app.ensure_track_changes_disabled()
         
         current_text, start_offset, end_offset, context_before, context_after = word_app.get_selection_info()
         
@@ -1596,7 +1604,6 @@ def proofread_selection_once(
             current_text, extra_spans=mask_spans
         )
         
-        runtime_settings = settings or load_runtime_settings()
         active_provider, api_key, base_url, model = resolve_provider_connection(runtime_settings)
         
         temperature = runtime_settings.get("general", {}).get("temperature", 0.3)

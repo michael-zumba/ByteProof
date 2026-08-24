@@ -16,15 +16,6 @@ except Exception:
 TARGET_ARCH = os.environ.get('BYTEPROOF_TARGET_ARCH', '') or None
 
 datas = [
-    ('prompt/phd_proofreader.txt', 'prompt'),
-    ('prompt/phd_proofreader_creative.txt', 'prompt'),
-    ('prompt/polish_general.txt', 'prompt'),
-    ('prompt/polish_general_creative.txt', 'prompt'),
-    ('prompt/comment_language.txt', 'prompt'),
-    ('prompt/comment_technical.txt', 'prompt'),
-    ('prompt/context_general.txt', 'prompt'),
-    ('prompt/context_journal.txt', 'prompt'),
-    ('prompt/context_phd_thesis.txt', 'prompt'),
     ('logo/logo.png', 'logo'),
     ('logo/logo.svg', 'logo'),
     ('assets/chevron-down.svg', 'assets'),

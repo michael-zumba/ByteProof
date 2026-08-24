@@ -176,6 +176,7 @@ def load_runtime_settings() -> dict[str, Any]:
             "launch_at_login": False,
             "keep_on_top": True,
             "auto_apply": True,
+            "track_changes": True,
             "play_sound_on_proofread": True,
             "temperature": 0.3,
             "spelling": "UK/AU/NZ",

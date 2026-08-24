@@ -1152,6 +1152,15 @@ class SettingsDialog(QDialog):
         self.chk_auto_apply.setToolTip("When enabled, proofreading changes are applied directly to the Word document. When disabled, suggestions appear as comments instead.")
         prefs_layout.addWidget(self.chk_auto_apply)
 
+        self.chk_track_changes = QCheckBox("Enable Track Changes in Word")
+        self.chk_track_changes.setChecked(self.settings.get("general", {}).get("track_changes", True))
+        self.chk_track_changes.setToolTip(
+            "When enabled, ByteProof turns on Track Changes in Word so edits appear as "
+            "tracked revisions you can accept or reject. When disabled, ByteProof turns "
+            "Track Changes off during proofreading and applies edits directly."
+        )
+        prefs_layout.addWidget(self.chk_track_changes)
+
         self.chk_sound = QCheckBox("Play sound when proofreading starts")
         self.chk_sound.setChecked(self.settings.get("general", {}).get("play_sound_on_proofread", True))
         self.chk_sound.setToolTip("Play a short chime when a proofreading task starts.")
@@ -2598,6 +2607,7 @@ class SettingsDialog(QDialog):
         self.settings["general"]["launch_at_login"] = self.chk_launch_login.isChecked()
         self.settings["general"]["keep_on_top"] = self.chk_keep_top.isChecked()
         self.settings["general"]["auto_apply"] = self.chk_auto_apply.isChecked()
+        self.settings["general"]["track_changes"] = self.chk_track_changes.isChecked()
         self.settings["general"]["play_sound_on_proofread"] = self.chk_sound.isChecked()
         self.settings["general"]["temperature"] = self.temp_slider.value() / 10.0
         self.settings["general"]["spelling"] = self.combo_spelling.currentText()

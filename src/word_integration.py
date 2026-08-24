@@ -65,6 +65,9 @@ class WordIntegration:
     def ensure_track_changes_enabled(self) -> None:
         raise NotImplementedError
 
+    def ensure_track_changes_disabled(self) -> None:
+        raise NotImplementedError
+
     def get_selection_info(self) -> tuple[str, int, int, str, str]:
         """Returns (text, start_index, end_index, context_before, context_after)"""
         raise NotImplementedError
@@ -166,6 +169,14 @@ class WindowsWordIntegration(WordIntegration):
                 word.ActiveDocument.TrackRevisions = True
         except Exception as e:
             raise RuntimeError(f"Unable to enable Track Changes in Microsoft Word: {e}")
+
+    def ensure_track_changes_disabled(self) -> None:
+        try:
+            word = self._get_word()
+            if word.Documents.Count > 0:
+                word.ActiveDocument.TrackRevisions = False
+        except Exception as e:
+            raise RuntimeError(f"Unable to disable Track Changes in Microsoft Word: {e}")
 
     def replace_selection_content(self, new_text: str) -> None:
         try:
@@ -388,6 +399,29 @@ class MacOSWordIntegration(WordIntegration):
                 last_error = exc
         if last_error:
             raise RuntimeError("Unable to enable Track Changes in Microsoft Word.") from last_error
+
+    def ensure_track_changes_disabled(self) -> None:
+        scripts = [
+            """
+            tell application "Microsoft Word"
+                set track revisions of active document to false
+            end tell
+            """,
+            """
+            tell application "Microsoft Word"
+                set track changes of active document to false
+            end tell
+            """
+        ]
+        last_error = None
+        for script in scripts:
+            try:
+                self._run_applescript(script)
+                return
+            except Exception as exc:
+                last_error = exc
+        if last_error:
+            raise RuntimeError("Unable to disable Track Changes in Microsoft Word.") from last_error
 
     def get_selection_info(self) -> tuple[str, int, int, str, str]:
         script = """

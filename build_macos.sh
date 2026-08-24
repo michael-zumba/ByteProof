@@ -116,6 +116,13 @@ rm -f "$THIS_DIR/$DMG_NAME"
 echo ""
 echo "Building .app with PyInstaller ($TARGET_ARCH)..."
 cd "$THIS_DIR"
+echo ""
+echo "Embedding prompt assets into the binary..."
+if [ -f "$THIS_DIR/scripts/embed_prompts.py" ]; then
+    "$VENV_PYTHON" "$THIS_DIR/scripts/embed_prompts.py"
+else
+    echo "scripts/embed_prompts.py not found; using committed src/prompt_data.py."
+fi
 if [ "$TARGET_ARCH" = "x86_64" ]; then
     export BYTEPROOF_TARGET_ARCH="x86_64"
 else
