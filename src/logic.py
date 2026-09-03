@@ -1911,19 +1911,9 @@ def polish_selection_once(
             return f"No text selected in {app_name}.", None, None, None, 0
         if len(current_text.strip()) < 5:
             return "Selection too short.", current_text, None, None, 0
-        if status_callback is not None:
-            status_callback(f"Polishing {len(current_text)} characters from {app_name}…")
-        if cancel_event is not None and cancel_event.is_set():
-            raise TaskCancelledError()
 
         runtime_settings = settings or load_runtime_settings()
-        active_provider, api_key, base_url, model = resolve_provider_connection(runtime_settings)
-
-        temperature = runtime_settings.get("general", {}).get("temperature", 0.3)
-        spelling = runtime_settings.get("general", {}).get("spelling", "UK/AU/NZ")
-        style = runtime_settings.get("general", {}).get("style", "Precise (Minimal Changes)")
         context = runtime_settings.get("general", {}).get("context", "General Editing")
-
         try:
             from .automation import resolve_automation_context
 
@@ -1941,6 +1931,21 @@ def polish_selection_once(
                     pass
         except Exception:
             pass
+
+        if status_callback is not None:
+            if context == "Email Editing":
+                status_message = f"Polishing email draft from {app_name}…"
+            else:
+                status_message = f"Polishing {len(current_text)} characters from {app_name}…"
+            status_callback(status_message)
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelledError()
+
+        active_provider, api_key, base_url, model = resolve_provider_connection(runtime_settings)
+
+        temperature = runtime_settings.get("general", {}).get("temperature", 0.3)
+        spelling = runtime_settings.get("general", {}).get("spelling", "UK/AU/NZ")
+        style = runtime_settings.get("general", {}).get("style", "Precise (Minimal Changes)")
 
         if style == "Creative (Rewrite)" and temperature < 0.5:
             temperature = 0.5
