@@ -959,6 +959,8 @@ class SettingsDialog(QDialog):
     provider_status_labels: dict[str, QLabel]
     connect_page: QWidget | None
     local_page: QWidget | None
+    general_page: QWidget | None
+    automation_page: QWidget | None
     license_page: QWidget | None
     updates_page: QWidget | None
     local_model_cards: dict[str, dict[str, Any]]
@@ -1175,7 +1177,20 @@ class SettingsDialog(QDialog):
         self.sidebar.setCurrentRow(0)
 
     def change_page(self, index: int) -> None:
-        self.pages.setCurrentIndex(index)
+        item = self.sidebar.item(index)
+        if item is None:
+            return
+        page_attr = {
+            "General": "general_page",
+            "Automation": "automation_page",
+            "Connect": "connect_page",
+            "Local AI": "local_page",
+            "License": "license_page",
+            "Updates": "updates_page",
+        }.get(item.text())
+        page = getattr(self, page_attr, None) if page_attr else None
+        if page is not None:
+            self.pages.setCurrentWidget(page)
 
     def _open_updates_icon(self) -> None:
         if self.updates_page is not None:
@@ -1213,6 +1228,7 @@ class SettingsDialog(QDialog):
 
     def init_general_tab(self) -> None:
         page = QWidget()
+        self.general_page = page
         outer_layout = QVBoxLayout(page)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -1480,6 +1496,7 @@ class SettingsDialog(QDialog):
         from .automation import source_display_label, source_type_label
 
         page = QWidget()
+        self.automation_page = page
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setSpacing(14)
