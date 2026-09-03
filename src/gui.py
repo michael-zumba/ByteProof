@@ -3,6 +3,7 @@ import copy
 import difflib
 import os
 import platform
+import shutil
 import subprocess
 import threading
 import time
@@ -5520,8 +5521,94 @@ class ProofreaderApp(QMainWindow):
         else:
             self.status_label.setText("Downloading update…")
 
+    def _install_macos_update(self, dmg_path: str) -> bool:
+        """Install a downloaded macOS DMG and relaunch ByteProof unattended."""
+        attach = subprocess.run(
+            [
+                "hdiutil",
+                "attach",
+                dmg_path,
+                "-nobrowse",
+                "-noverify",
+                "-noautoopen",
+                "-quiet",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if attach.returncode != 0:
+            return False
+
+        volume = ""
+        for line in attach.stdout.splitlines():
+            parts = [part.strip() for part in line.split("\t")]
+            if len(parts) >= 3 and parts[2].startswith("/Volumes/"):
+                volume = parts[2]
+                break
+        if not volume:
+            fallback = os.path.join("/Volumes", APP_NAME)
+            if os.path.isdir(fallback):
+                volume = fallback
+        if not volume:
+            subprocess.run(
+                ["hdiutil", "detach", dmg_path, "-quiet"], check=False
+            )
+            return False
+
+        app_path = os.path.join(volume, f"{APP_NAME}.app")
+        dest_path = os.path.join("/Applications", f"{APP_NAME}.app")
+        if not os.path.exists(app_path) or not os.path.isdir("/Applications"):
+            subprocess.run(["hdiutil", "detach", volume, "-quiet"], check=False)
+            return False
+
+        backup_path = dest_path + ".backup"
+        moved_old = False
+        try:
+            if os.path.exists(dest_path):
+                if os.path.exists(backup_path):
+                    shutil.rmtree(backup_path, ignore_errors=True)
+                shutil.move(dest_path, backup_path)
+                moved_old = True
+
+            copy_result = subprocess.run(
+                ["/usr/bin/ditto", app_path, dest_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if copy_result.returncode != 0:
+                if moved_old and os.path.exists(backup_path):
+                    if os.path.exists(dest_path):
+                        shutil.rmtree(dest_path, ignore_errors=True)
+                    shutil.move(backup_path, dest_path)
+                return False
+
+            subprocess.run(["hdiutil", "detach", volume, "-quiet"], check=False)
+            if moved_old and os.path.exists(backup_path):
+                shutil.rmtree(backup_path, ignore_errors=True)
+
+            # Launch the new app before the current one exits so the user is
+            # never left without a running instance.
+            subprocess.Popen(["open", "-n", dest_path])
+            return True
+        except OSError:
+            if moved_old and os.path.exists(backup_path) and not os.path.exists(dest_path):
+                shutil.move(backup_path, dest_path)
+            subprocess.run(["hdiutil", "detach", volume, "-quiet"], check=False)
+            return False
+
     def _handle_download_finished(self, download_path: str) -> None:
         if download_path and os.path.exists(download_path):
+            if platform.system() == "Darwin" and download_path.lower().endswith(
+                ".dmg"
+            ):
+                self.status_label.setText("Installing update…")
+                if self._install_macos_update(download_path):
+                    self.status_label.setText("Update installed. Restarting…")
+                    QTimer.singleShot(700, QApplication.quit)
+                    return
+
             webbrowser.open("file://" + download_path)
             self.status_label.setText("Update downloaded. Opening installer...")
             done_msg = QMessageBox(self)
