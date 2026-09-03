@@ -45,7 +45,6 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -59,9 +58,8 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSlider,
     QStackedWidget,
+    QStyle,
     QSystemTrayIcon,
-    QTableWidget,
-    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -166,6 +164,68 @@ class AppNameLineEdit(QLineEdit):
                 self.setText(base)
                 return
         super().dropEvent(event)
+
+
+class AutomationRuleCard(QWidget):
+    """A compact trigger card used in the Automation settings page."""
+
+    def __init__(
+        self,
+        source: str,
+        context: str,
+        icon: QIcon,
+        value_label: str,
+        type_label: str,
+    ) -> None:
+        super().__init__()
+        self.source = source
+        self.setObjectName("AutomationRuleCard")
+        self.setStyleSheet(
+            "#AutomationRuleCard { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
+            "border-radius: 14px; }"
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(12)
+
+        icon_label = QLabel()
+        icon_label.setFixedSize(32, 32)
+        if not icon.isNull():
+            icon_label.setPixmap(icon.pixmap(QSize(30, 30)))
+        layout.addWidget(icon_label)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        value_lbl = QLabel(value_label)
+        value_lbl.setStyleSheet(
+            "font-size: 13px; font-weight: 640; color: #292524; "
+            "background: transparent; border: none;"
+        )
+        type_lbl = QLabel(type_label)
+        type_lbl.setStyleSheet(
+            "font-size: 11px; color: #A89F9A; background: transparent; border: none;"
+        )
+        text_col.addWidget(value_lbl)
+        text_col.addWidget(type_lbl)
+        layout.addLayout(text_col, 1)
+
+        self.context_combo = QComboBox()
+        contexts = [
+            "Email Editing",
+            "General Editing",
+            "PhD Thesis Chapter",
+            "Academic Journal (Top-Tier)",
+        ]
+        self.context_combo.addItems(contexts)
+        index = self.context_combo.findText(context)
+        if index < 0:
+            self.context_combo.addItem(context)
+            index = self.context_combo.count() - 1
+        self.context_combo.setCurrentIndex(index)
+        self.context_combo.setMinimumWidth(190)
+        self.context_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.context_combo)
 
 
 def model_size_label(model: dict[str, Any]) -> str:
@@ -951,7 +1011,7 @@ class SettingsDialog(QDialog):
     combo_comment: QComboBox
     combo_context: QComboBox
     automation_enabled_check: QCheckBox
-    automation_table: QTableWidget
+    automation_list: QListWidget
     automation_add_btn: QPushButton
     automation_remove_btn: QPushButton
     automation_reset_btn: QPushButton
@@ -1493,8 +1553,6 @@ class SettingsDialog(QDialog):
         self.temp_label.setText(f"{temp:.1f}")
 
     def init_automation_tab(self) -> None:
-        from .automation import source_display_label, source_type_label
-
         page = QWidget()
         self.automation_page = page
         layout = QVBoxLayout(page)
@@ -1530,38 +1588,17 @@ class SettingsDialog(QDialog):
         )
         group_layout.addWidget(self.automation_enabled_check)
 
-        self.automation_table = QTableWidget(0, 3)
-        self.automation_table.setHorizontalHeaderLabels(
-            ["App or website", "Type", "Context"]
+        self.automation_list = QListWidget()
+        self.automation_list.setSelectionMode(
+            QListWidget.SelectionMode.SingleSelection
         )
-        self.automation_table.verticalHeader().setVisible(False)
-        self.automation_table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
+        self.automation_list.setSpacing(8)
+        self.automation_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; }"
+            "QListWidget::item { background: transparent; }"
+            "QListWidget::item:selected { background: transparent; }"
         )
-        self.automation_table.setEditTriggers(
-            QTableWidget.EditTrigger.NoEditTriggers
-        )
-        self.automation_table.setAlternatingRowColors(True)
-        self.automation_table.setStyleSheet(
-            "QTableWidget { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
-            "border-radius: 12px; gridline-color: #EFE9E3; }"
-            "QHeaderView::section { background-color: #F7F4F0; color: #57534E; "
-            "border: none; border-bottom: 1px solid #E8E1D9; padding: 8px; "
-            "font-weight: 700; }"
-            "QTableWidget::item { padding: 8px; }"
-            "QTableWidget::item:selected { background-color: #D6E4DB; color: #143024; }"
-            "QComboBox { border: 1px solid #DDD6CF; border-radius: 8px; padding: 4px 8px; }"
-        )
-        self.automation_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        self.automation_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents
-        )
-        self.automation_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents
-        )
-        group_layout.addWidget(self.automation_table)
+        group_layout.addWidget(self.automation_list)
 
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
@@ -1589,10 +1626,8 @@ class SettingsDialog(QDialog):
         group_layout.addWidget(hint)
         layout.addWidget(group)
 
-        self._populate_automation_table(
+        self._populate_automation_rules(
             self._automation_rules_from_settings(),
-            source_display_label,
-            source_type_label,
         )
         self.pages.addWidget(page)
 
@@ -1610,64 +1645,52 @@ class SettingsDialog(QDialog):
                 cleaned.append({"source": source, "context": context})
         return cleaned or default_automation_rules()
 
-    def _populate_automation_table(
-        self,
-        rules: list[dict[str, str]],
-        source_display_label: Any,
-        source_type_label: Any,
-    ) -> None:
-        contexts = [
-            "Email Editing",
-            "General Editing",
-            "PhD Thesis Chapter",
-            "Academic Journal (Top-Tier)",
-        ]
-        self.automation_table.setRowCount(0)
+    def _populate_automation_rules(self, rules: list[dict[str, str]]) -> None:
+        from .automation import source_display_label, source_type_label
+
+        self.automation_list.clear()
         for rule in rules:
-            row = self.automation_table.rowCount()
-            self.automation_table.insertRow(row)
             source = rule.get("source", "")
             context = rule.get("context", "Email Editing")
-
-            item = QTableWidgetItem(source_display_label(source))
-            item.setData(Qt.ItemDataRole.UserRole, source)
-            item.setToolTip(source)
-            self.automation_table.setItem(row, 0, item)
-
-            type_item = QTableWidgetItem(source_type_label(source))
-            type_item.setFlags(type_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.automation_table.setItem(row, 1, type_item)
-
-            combo = QComboBox()
-            combo.addItems(contexts)
-            index = combo.findText(context)
-            if index < 0:
-                combo.addItem(context)
-                index = combo.count() - 1
-            combo.setCurrentIndex(index)
-            self.automation_table.setCellWidget(row, 2, combo)
-            self.automation_table.setRowHeight(row, 40)
-
-    def _read_automation_rules_from_table(self) -> list[dict[str, str]]:
-        rules: list[dict[str, str]] = []
-        for row in range(self.automation_table.rowCount()):
-            item = self.automation_table.item(row, 0)
-            if item is None:
-                continue
-            source = str(
-                item.data(Qt.ItemDataRole.UserRole)
-                or item.text()
-            ).strip()
-            if not source:
-                continue
-            combo = self.automation_table.cellWidget(row, 2)
-            context = (
-                combo.currentText().strip()
-                if isinstance(combo, QComboBox)
-                else "Email Editing"
+            card = AutomationRuleCard(
+                source,
+                context,
+                self._icon_for_trigger_source(source),
+                source_display_label(source),
+                source_type_label(source),
             )
-            rules.append({"source": source, "context": context})
+            item = QListWidgetItem()
+            item.setSizeHint(card.sizeHint())
+            self.automation_list.addItem(item)
+            self.automation_list.setItemWidget(item, card)
+
+    def _read_automation_rules_from_list(self) -> list[dict[str, str]]:
+        rules: list[dict[str, str]] = []
+        for index in range(self.automation_list.count()):
+            item = self.automation_list.item(index)
+            widget = self.automation_list.itemWidget(item) if item else None
+            if isinstance(widget, AutomationRuleCard):
+                rules.append(
+                    {
+                        "source": widget.source,
+                        "context": widget.context_combo.currentText().strip(),
+                    }
+                )
         return rules
+
+    def _icon_for_trigger_source(self, source: str) -> QIcon:
+        if source.startswith("bundle:"):
+            return self._app_icon({"bundle_id": source.split(":", 1)[1]})
+        if source.startswith("name:"):
+            return self._app_icon({"name": source.split(":", 1)[1]})
+        if source.startswith("exe:"):
+            return self._app_icon({"exe": source.split(":", 1)[1]})
+        try:
+            return self.style().standardIcon(
+                QStyle.StandardPixmap.SP_DriveNetIcon
+            )
+        except Exception:
+            return QIcon()
 
     def _add_automation_rule(self) -> None:
         from .automation import source_display_label, source_type_label
@@ -1774,31 +1797,18 @@ class SettingsDialog(QDialog):
         }
         source = prefixes[type_combo.currentText()] + raw_value
         context = context_combo.currentText().strip()
-        row = self.automation_table.rowCount()
-        self.automation_table.insertRow(row)
-        item = QTableWidgetItem(source_display_label(source))
-        item.setData(Qt.ItemDataRole.UserRole, source)
-        item.setToolTip(source)
-        self.automation_table.setItem(row, 0, item)
-        type_item = QTableWidgetItem(source_type_label(source))
-        type_item.setFlags(type_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        self.automation_table.setItem(row, 1, type_item)
-        combo = QComboBox()
-        combo.addItems(
-            [
-                "Email Editing",
-                "General Editing",
-                "PhD Thesis Chapter",
-                "Academic Journal (Top-Tier)",
-            ]
+        card = AutomationRuleCard(
+            source,
+            context,
+            self._icon_for_trigger_source(source),
+            source_display_label(source),
+            source_type_label(source),
         )
-        index = combo.findText(context)
-        if index < 0:
-            combo.addItem(context)
-            index = combo.count() - 1
-        combo.setCurrentIndex(index)
-        self.automation_table.setCellWidget(row, 2, combo)
-        self.automation_table.setRowHeight(row, 40)
+        item = QListWidgetItem()
+        item.setSizeHint(card.sizeHint())
+        self.automation_list.addItem(item)
+        self.automation_list.setItemWidget(item, card)
+        self.automation_list.setCurrentItem(item)
 
     def _running_apps_for_trigger(self) -> list[dict[str, Any]]:
         try:
@@ -1895,24 +1905,16 @@ class SettingsDialog(QDialog):
         return app if isinstance(app, dict) else None
 
     def _reset_automation_rules(self) -> None:
-        from .automation import (
-            default_automation_rules,
-            source_display_label,
-            source_type_label,
-        )
+        from .automation import default_automation_rules
 
         self.settings.setdefault("automation", {})
         self.settings["automation"]["rules"] = default_automation_rules()
-        self._populate_automation_table(
-            self.settings["automation"]["rules"],
-            source_display_label,
-            source_type_label,
-        )
+        self._populate_automation_rules(self.settings["automation"]["rules"])
 
     def _remove_automation_rule(self) -> None:
-        row = self.automation_table.currentRow()
+        row = self.automation_list.currentRow()
         if row >= 0:
-            self.automation_table.removeRow(row)
+            self.automation_list.takeItem(row)
 
     def pynput_to_qt(self, pynput_str: str) -> str:
         if not pynput_str:
@@ -3153,7 +3155,7 @@ class SettingsDialog(QDialog):
 
         self.settings.setdefault("automation", {})
         self.settings["automation"]["enabled"] = self.automation_enabled_check.isChecked()
-        self.settings["automation"]["rules"] = self._read_automation_rules_from_table()
+        self.settings["automation"]["rules"] = self._read_automation_rules_from_list()
         
         open_seq = self.open_hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         self.settings["general"]["open_hotkey"] = self.qt_to_pynput(open_seq)

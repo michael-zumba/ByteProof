@@ -3021,7 +3021,7 @@ def test_settings_automation_page_saves_rules() -> None:
     dialog.show()
     app.processEvents()
 
-    assert dialog.automation_table.rowCount() >= 1
+    assert dialog.automation_list.count() >= 1
     assert dialog.automation_enabled_check.isChecked() is True
 
     dialog.automation_enabled_check.setChecked(False)
