@@ -11,9 +11,11 @@ from typing import Any
 
 from PyQt6.QtCore import (
     QEvent,
+    QFileInfo,
     QObject,
     QPropertyAnimation,
     QRectF,
+    QSize,
     Qt,
     QThread,
     QTimer,
@@ -37,6 +39,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileIconProvider,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -47,6 +50,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -136,6 +140,32 @@ def _mono_font(size: int = 12) -> QFont:
     font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
     font.setPointSize(size)
     return font
+
+
+class AppNameLineEdit(QLineEdit):
+    """A line edit that accepts an application dropped from Finder/Dock."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event: Any) -> None:  # pyright: ignore[reportAny]
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event: Any) -> None:  # pyright: ignore[reportAny]
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if not path:
+                continue
+            base = os.path.basename(path)
+            base = base.removesuffix(".app")
+            if base:
+                self.setText(base)
+                return
+        super().dropEvent(event)
 
 
 def model_size_label(model: dict[str, Any]) -> str:
@@ -929,6 +959,8 @@ class SettingsDialog(QDialog):
     provider_status_labels: dict[str, QLabel]
     connect_page: QWidget | None
     local_page: QWidget | None
+    license_page: QWidget | None
+    updates_page: QWidget | None
     local_model_cards: dict[str, dict[str, Any]]
     local_progress: QProgressBar
     local_status_label: QLabel
@@ -938,6 +970,8 @@ class SettingsDialog(QDialog):
     lbl_msg: QLabel
     btn_buy: QPushButton
     btn_auto_activate: QPushButton
+    update_icon_btn: QPushButton
+    license_icon_btn: QPushButton
 
     def __init__(self, settings: dict[str, Any], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -970,14 +1004,57 @@ class SettingsDialog(QDialog):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
+        side_container = QWidget()
+        side_container.setFixedWidth(190)
+        side_container.setObjectName("SettingsSidebarContainer")
+        side_layout = QVBoxLayout(side_container)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.setSpacing(0)
+
         self.sidebar = QListWidget()
-        self.sidebar.setFixedWidth(190)
         self.sidebar.setObjectName("SettingsSidebar")
         self.sidebar.addItems(
-            ["General", "Connect", "Local AI", "License", "Updates", "Automation"]
+            ["General", "Automation", "Connect", "Local AI"]
         )
         self.sidebar.currentRowChanged.connect(self.change_page)
-        main_layout.addWidget(self.sidebar)
+        side_layout.addWidget(self.sidebar, 1)
+
+        icon_bar = QHBoxLayout()
+        icon_bar.setContentsMargins(10, 8, 10, 12)
+        icon_bar.setSpacing(8)
+
+        def make_icon_button(icon_path: str, tooltip: str, callback: Any) -> QPushButton:
+            btn = QPushButton()
+            btn.setFixedSize(40, 40)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setIcon(QIcon(icon_path))
+            btn.setIconSize(btn.size() * 0.62)
+            btn.setStyleSheet(
+                "QPushButton { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
+                "border-radius: 10px; }"
+                "QPushButton:hover { background-color: #E7DFD6; }"
+                "QPushButton:pressed { background-color: #D6E4DB; }"
+            )
+            btn.clicked.connect(callback)
+            return btn
+
+        self.update_icon_btn = make_icon_button(
+            resource_path(os.path.join("assets", "update.svg")),
+            "Check for Updates",
+            self._open_updates_icon,
+        )
+        self.license_icon_btn = make_icon_button(
+            resource_path(os.path.join("assets", "license.svg")),
+            "License Status",
+            self._open_license_icon,
+        )
+        icon_bar.addWidget(self.update_icon_btn)
+        icon_bar.addWidget(self.license_icon_btn)
+        icon_bar.addStretch()
+        side_layout.addLayout(icon_bar)
+
+        main_layout.addWidget(side_container)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.VLine)
@@ -1099,6 +1176,15 @@ class SettingsDialog(QDialog):
 
     def change_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
+
+    def _open_updates_icon(self) -> None:
+        if self.updates_page is not None:
+            self.pages.setCurrentWidget(self.updates_page)
+        self._start_update_check()
+
+    def _open_license_icon(self) -> None:
+        if self.license_page is not None:
+            self.pages.setCurrentWidget(self.license_page)
 
     def _start_update_check(self) -> None:
         parent = self.parent()
@@ -1594,8 +1680,16 @@ class SettingsDialog(QDialog):
                 "Windows app",
             ]
         )
-        source_edit = QLineEdit()
+        source_edit = AppNameLineEdit()
         source_edit.setPlaceholderText("Microsoft Outlook")
+
+        value_row = QHBoxLayout()
+        value_row.setContentsMargins(0, 0, 0, 0)
+        value_row.setSpacing(8)
+        value_row.addWidget(source_edit, 1)
+        choose_app_btn = QPushButton("Choose App…")
+        choose_app_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        value_row.addWidget(choose_app_btn)
 
         type_hint = QLabel("Examples: Mail, Microsoft Outlook, com.apple.mail, mail.google.com")
         type_hint.setWordWrap(True)
@@ -1610,9 +1704,21 @@ class SettingsDialog(QDialog):
                 "Windows app": "OUTLOOK.EXE or Microsoft Outlook",
             }
             source_edit.setPlaceholderText(placeholders[kind])
+            choose_app_btn.setVisible(kind in ("App name", "macOS bundle ID"))
 
         type_combo.currentTextChanged.connect(lambda _text: update_placeholder())
         update_placeholder()
+
+        def choose_app() -> None:
+            app = self._choose_app_for_trigger()
+            if not app:
+                return
+            if type_combo.currentText() == "macOS bundle ID":
+                source_edit.setText(app.get("bundle_id") or "")
+            else:
+                source_edit.setText(app.get("name") or "")
+
+        choose_app_btn.clicked.connect(choose_app)
 
         context_combo = QComboBox()
         context_combo.addItems(
@@ -1624,7 +1730,7 @@ class SettingsDialog(QDialog):
             ]
         )
         form.addRow("Match type:", type_combo)
-        form.addRow("Value:", source_edit)
+        form.addRow("Value:", value_row)
         form.addRow("Context:", context_combo)
         form.addRow("", type_hint)
 
@@ -1676,6 +1782,100 @@ class SettingsDialog(QDialog):
         combo.setCurrentIndex(index)
         self.automation_table.setCellWidget(row, 2, combo)
         self.automation_table.setRowHeight(row, 40)
+
+    def _running_apps_for_trigger(self) -> list[dict[str, Any]]:
+        try:
+            editor = get_generic_editor()
+            apps = editor.running_apps()
+        except Exception:
+            apps = []
+        return apps or []
+
+    @staticmethod
+    def _app_icon(app: dict[str, Any]) -> QIcon:
+        path = ""
+        try:
+            if platform.system() == "Darwin":
+                bundle_id = app.get("bundle_id") or ""
+                if bundle_id:
+                    from AppKit import NSWorkspace
+
+                    path = NSWorkspace.sharedWorkspace().absolutePathForAppBundleWithIdentifier_(
+                        bundle_id
+                    )
+                if not path and app.get("name"):
+                    from AppKit import NSWorkspace
+
+                    path = NSWorkspace.sharedWorkspace().fullPathForApplication_(
+                        app.get("name")
+                    )
+            else:
+                path = app.get("exe") or ""
+            if path and os.path.exists(path):
+                return QFileIconProvider().icon(QFileInfo(path))
+        except Exception:
+            pass
+        return QIcon()
+
+    def _choose_app_for_trigger(self) -> dict[str, Any] | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Choose App")
+        dialog.setModal(True)
+        dialog.setMinimumSize(420, 460)
+        dialog.setStyleSheet(
+            "QDialog { background-color: #FAF8F5; }"
+            "QListWidget { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
+            "border-radius: 12px; padding: 6px; }"
+            "QListWidget::item { padding: 10px; border-radius: 8px; }"
+            "QListWidget::item:selected { background-color: #D6E4DB; color: #143024; }"
+        )
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Select an installed application")
+        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #292524;")
+        layout.addWidget(title)
+
+        app_list = QListWidget()
+        app_list.setIconSize(QSize(28, 28))
+        layout.addWidget(app_list, 1)
+
+        apps = self._running_apps_for_trigger()
+        if not apps:
+            layout.addWidget(QLabel("No running applications found."))
+        for app in apps:
+            name = app.get("name") or "Unknown"
+            bundle = app.get("bundle_id") or ""
+            label = f"{name}" + (f"  ·  {bundle}" if bundle else "")
+            item = QListWidgetItem(label)
+            icon = self._app_icon(app)
+            if not icon.isNull():
+                item.setIcon(icon)
+            item.setData(Qt.ItemDataRole.UserRole, app)
+            app_list.addItem(item)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def on_double_clicked(_item: Any) -> None:
+            dialog.accept()
+
+        app_list.itemDoubleClicked.connect(on_double_clicked)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        item = app_list.currentItem()
+        if item is None:
+            return None
+        app = item.data(Qt.ItemDataRole.UserRole)
+        return app if isinstance(app, dict) else None
 
     def _reset_automation_rules(self) -> None:
         from .automation import (
@@ -2438,6 +2638,7 @@ class SettingsDialog(QDialog):
 
     def init_license_tab(self) -> None:
         page = QWidget()
+        self.license_page = page
         outer_layout = QVBoxLayout(page)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -2640,6 +2841,7 @@ class SettingsDialog(QDialog):
 
     def init_updates_tab(self) -> None:
         page = QWidget()
+        self.updates_page = page
         outer_layout = QVBoxLayout(page)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -2713,8 +2915,8 @@ class SettingsDialog(QDialog):
     def open_provider_settings(self, provider_name: str) -> None:
         provider_info = PROVIDERS.get(provider_name, {})
         if provider_info.get("is_local"):
-            self.sidebar.setCurrentRow(2)
-            self.change_page(2)
+            self.sidebar.setCurrentRow(3)
+            self.change_page(3)
             return
 
         dialog = QDialog(self)
@@ -4687,8 +4889,8 @@ class ProofreaderApp(QMainWindow):
             dialog.finished.connect(
                 lambda _result: setattr(self, "_active_settings_dialog", None)
             )
-            dialog.sidebar.setCurrentRow(3)
-            dialog.change_page(3)
+            if dialog.license_page is not None:
+                dialog.pages.setCurrentWidget(dialog.license_page)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.settings = dialog.get_settings()
                 save_runtime_settings(self.settings)
@@ -4710,8 +4912,8 @@ class ProofreaderApp(QMainWindow):
             dialog.finished.connect(
                 lambda _result: setattr(self, "_active_settings_dialog", None)
             )
-            dialog.sidebar.setCurrentRow(2)
-            dialog.change_page(2)
+            dialog.sidebar.setCurrentRow(3)
+            dialog.change_page(3)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.settings = dialog.get_settings()
                 save_runtime_settings(self.settings)
