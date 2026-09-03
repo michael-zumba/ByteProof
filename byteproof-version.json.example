@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0",
-  "release_date": "2026-08-24",
-  "release_notes": "Adds an option to turn off Track Changes when proofreading in Word, improves general-writing polish for emails and casual text, and embeds prompt assets in the app.",
+  "version": "1.8.0",
+  "release_date": "2026-09-03",
+  "release_notes": "Adds automatic email editing for Mail, Outlook, and Gmail; improves Automation settings and app icons; fixes trigger selection visibility.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
