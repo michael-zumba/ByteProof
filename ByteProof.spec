@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
+import glob
 import os
 import re
 
@@ -18,9 +19,10 @@ TARGET_ARCH = os.environ.get('BYTEPROOF_TARGET_ARCH', '') or None
 datas = [
     ('logo/logo.png', 'logo'),
     ('logo/logo.svg', 'logo'),
-    ('assets/chevron-down.svg', 'assets'),
     ('sounds/proofread_start.wav', 'sounds'),
 ]
+datas += [(asset, 'assets') for asset in glob.glob('assets/*.svg')]
+datas += [(asset, 'assets') for asset in glob.glob('assets/*.png')]
 datas += collect_data_files('certifi')
 
 binaries = []

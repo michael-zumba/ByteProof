@@ -1,14 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all, collect_data_files
+import glob
 import sys
 import os
 
 datas = [
     ('logo/logo.png', 'logo'),
     ('logo/logo.svg', 'logo'),
-    ('assets/chevron-down.svg', 'assets'),
     ('sounds/proofread_start.wav', 'sounds'),
 ]
+datas += [(asset, 'assets') for asset in glob.glob('assets/*.svg')]
+datas += [(asset, 'assets') for asset in glob.glob('assets/*.png')]
 datas += collect_data_files('certifi')
 
 # Use standard PyInstaller hooks for PyQt6 instead of manual collect_all
