@@ -1087,16 +1087,15 @@ class SettingsDialog(QDialog):
 
         def make_icon_button(icon_path: str, tooltip: str, callback: Any) -> QPushButton:
             btn = QPushButton()
-            btn.setFixedSize(40, 40)
+            btn.setFixedSize(34, 34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setIcon(QIcon(icon_path))
-            btn.setIconSize(btn.size() * 0.62)
+            btn.setIconSize(btn.size() * 0.86)
             btn.setStyleSheet(
-                "QPushButton { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
-                "border-radius: 10px; }"
-                "QPushButton:hover { background-color: #E7DFD6; }"
-                "QPushButton:pressed { background-color: #D6E4DB; }"
+                "QPushButton { background-color: transparent; border: none; }"
+                "QPushButton:hover { background-color: transparent; }"
+                "QPushButton:pressed { background-color: transparent; }"
             )
             btn.clicked.connect(callback)
             return btn
