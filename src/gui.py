@@ -1950,6 +1950,7 @@ class SettingsDialog(QDialog):
         roots = [
             os.path.expanduser("~/Applications"),
             "/Applications",
+            "/System/Applications",
         ]
         for root in roots:
             if not os.path.isdir(root):
@@ -2057,12 +2058,33 @@ class SettingsDialog(QDialog):
         if not apps:
             layout.addWidget(QLabel("No running applications found."))
 
+        existing_rules = self._read_automation_rules_from_list()
+        existing_names: set[str] = set()
+        existing_bundles: set[str] = set()
+        for rule in existing_rules:
+            source = str(rule.get("source", "")).strip()
+            if ":" not in source:
+                continue
+            kind, _, value = source.partition(":")
+            value = value.strip().lower()
+            if not value:
+                continue
+            if kind == "name":
+                existing_names.add(value)
+            elif kind == "bundle":
+                existing_bundles.add(value)
+
         def repopulate(filter_text: str) -> None:
             app_list.clear()
             needle = filter_text.strip().lower()
             for app in apps:
                 name = app.get("name") or "Unknown"
                 bundle = app.get("bundle_id") or ""
+                if (
+                    (bundle.lower() and bundle.lower() in existing_bundles)
+                    or name.lower() in existing_names
+                ):
+                    continue
                 haystack = f"{name} {bundle}".lower()
                 if needle and needle not in haystack:
                     continue
@@ -4942,6 +4964,60 @@ class ProofreaderApp(QMainWindow):
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical {
                 height: 0;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 8px;
+                margin: 2px 4px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #D6D0CA;
+                border-radius: 4px;
+                min-width: 32px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #A89F9A;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {
+                width: 0;
+            }
+            QToolTip {
+                background-color: #292524;
+                color: #FAFAF9;
+                border: 1px solid #44403C;
+                border-radius: 8px;
+                padding: 6px 8px;
+                font-size: 12px;
+            }
+            QMenu {
+                background-color: #FFFFFF;
+                border: 1px solid #E8E4E0;
+                border-radius: 12px;
+                padding: 6px;
+            }
+            QMenu::item {
+                padding: 7px 14px;
+                border-radius: 8px;
+                color: #44403C;
+            }
+            QMenu::item:selected {
+                background-color: #E7F0EA;
+                color: #143024;
+            }
+            QMessageBox {
+                background-color: #F9F7F4;
+            }
+            QProgressBar {
+                background-color: #EFE9E3;
+                border: none;
+                border-radius: 6px;
+                text-align: center;
+                color: transparent;
+            }
+            QProgressBar::chunk {
+                background-color: #1A3A2A;
+                border-radius: 6px;
             }
         """
         self.setStyleSheet(stylesheet.replace("__CHEVRON_URL__", chevron_path))
