@@ -1746,6 +1746,27 @@ class SettingsDialog(QDialog):
                 )
         return rules
 
+    @staticmethod
+    def _triggered_app_identifiers(
+        rules: list[dict[str, str]],
+    ) -> tuple[set[str], set[str]]:
+        """Return app names and bundle IDs already covered by trigger rules."""
+        names: set[str] = set()
+        bundles: set[str] = set()
+        for rule in rules:
+            source = str(rule.get("source", "")).strip()
+            if ":" not in source:
+                continue
+            kind, _, value = source.partition(":")
+            value = value.strip().lower()
+            if not value:
+                continue
+            if kind == "name":
+                names.add(value)
+            elif kind == "bundle":
+                bundles.add(value)
+        return names, bundles
+
     def _icon_for_trigger_source(self, source: str) -> QIcon:
         lower = source.lower()
 
@@ -2058,21 +2079,9 @@ class SettingsDialog(QDialog):
         if not apps:
             layout.addWidget(QLabel("No running applications found."))
 
-        existing_rules = self._read_automation_rules_from_list()
-        existing_names: set[str] = set()
-        existing_bundles: set[str] = set()
-        for rule in existing_rules:
-            source = str(rule.get("source", "")).strip()
-            if ":" not in source:
-                continue
-            kind, _, value = source.partition(":")
-            value = value.strip().lower()
-            if not value:
-                continue
-            if kind == "name":
-                existing_names.add(value)
-            elif kind == "bundle":
-                existing_bundles.add(value)
+        existing_names, existing_bundles = self._triggered_app_identifiers(
+            self._read_automation_rules_from_list(),
+        )
 
         def repopulate(filter_text: str) -> None:
             app_list.clear()

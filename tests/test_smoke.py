@@ -86,6 +86,19 @@ def test_open_purchase_url_uses_live_link() -> None:
     assert opened == [settings.POLAR_CHECKOUT_URL]
 
 
+def test_triggered_app_identifiers_ignore_unrelated_rules() -> None:
+    from src.gui import SettingsDialog
+
+    rules = [
+        {"source": "name:Microsoft Outlook", "context": "Email Editing"},
+        {"source": "bundle:com.apple.mail", "context": "Email Editing"},
+        {"source": "url:mail.google.com", "context": "Email Editing"},
+    ]
+    names, bundles = SettingsDialog._triggered_app_identifiers(rules)
+    assert names == {"microsoft outlook"}
+    assert bundles == {"com.apple.mail"}
+
+
 def test_licensing_roundtrip() -> None:
     from src import licensing
 
