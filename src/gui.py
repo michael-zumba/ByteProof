@@ -924,6 +924,7 @@ class SettingsDialog(QDialog):
     automation_table: QTableWidget
     automation_add_btn: QPushButton
     automation_remove_btn: QPushButton
+    automation_reset_btn: QPushButton
     provider_buttons: dict[str, QPushButton]
     provider_status_labels: dict[str, QLabel]
     connect_page: QWidget | None
@@ -1390,7 +1391,7 @@ class SettingsDialog(QDialog):
         self.temp_label.setText(f"{temp:.1f}")
 
     def init_automation_tab(self) -> None:
-        from .automation import source_display_label
+        from .automation import source_display_label, source_type_label
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1402,30 +1403,34 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "When ByteProof reads selected text from one of these apps or "
-            "websites, it can automatically switch to the matching editing "
-            "context. Add Mail, Outlook, or a webmail address such as "
-            "mail.google.com."
+            "ByteProof can automatically use Email Editing when your selected "
+            "text comes from Mail, Outlook, or webmail such as Gmail. You can "
+            "add, remove, or change these rules below."
         )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
         layout.addWidget(subtitle)
 
-        group = QGroupBox("Context Triggers")
+        group = QGroupBox("Automatic Context Triggers")
         group_layout = QVBoxLayout(group)
         group_layout.setSpacing(12)
         group_layout.setContentsMargins(14, 18, 14, 16)
 
         self.automation_enabled_check = QCheckBox(
-            "Detect email apps and webmail automatically"
+            "Enable automatic context detection"
         )
         self.automation_enabled_check.setChecked(
             self.settings.get("automation", {}).get("enabled", True)
         )
+        self.automation_enabled_check.setStyleSheet(
+            "font-size: 13px; font-weight: 620; color: #292524;"
+        )
         group_layout.addWidget(self.automation_enabled_check)
 
-        self.automation_table = QTableWidget(0, 2)
-        self.automation_table.setHorizontalHeaderLabels(["App or URL", "Context"])
+        self.automation_table = QTableWidget(0, 3)
+        self.automation_table.setHorizontalHeaderLabels(
+            ["App or website", "Type", "Context"]
+        )
         self.automation_table.verticalHeader().setVisible(False)
         self.automation_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
@@ -1433,30 +1438,48 @@ class SettingsDialog(QDialog):
         self.automation_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
         )
+        self.automation_table.setAlternatingRowColors(True)
+        self.automation_table.setStyleSheet(
+            "QTableWidget { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
+            "border-radius: 12px; gridline-color: #EFE9E3; }"
+            "QHeaderView::section { background-color: #F7F4F0; color: #57534E; "
+            "border: none; border-bottom: 1px solid #E8E1D9; padding: 8px; "
+            "font-weight: 700; }"
+            "QTableWidget::item { padding: 8px; }"
+            "QTableWidget::item:selected { background-color: #D6E4DB; color: #143024; }"
+            "QComboBox { border: 1px solid #DDD6CF; border-radius: 8px; padding: 4px 8px; }"
+        )
         self.automation_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
         self.automation_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents
         )
+        self.automation_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
         group_layout.addWidget(self.automation_table)
 
         button_row = QHBoxLayout()
-        button_row.setSpacing(10)
-        self.automation_add_btn = QPushButton("Add Rule")
+        button_row.setSpacing(8)
+        self.automation_add_btn = QPushButton("Add Trigger")
         self.automation_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.automation_add_btn.clicked.connect(self._add_automation_rule)
         self.automation_remove_btn = QPushButton("Remove Selected")
         self.automation_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.automation_remove_btn.clicked.connect(self._remove_automation_rule)
+        self.automation_reset_btn = QPushButton("Reset Defaults")
+        self.automation_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.automation_reset_btn.clicked.connect(self._reset_automation_rules)
         button_row.addWidget(self.automation_add_btn)
         button_row.addWidget(self.automation_remove_btn)
+        button_row.addWidget(self.automation_reset_btn)
         button_row.addStretch()
         group_layout.addLayout(button_row)
 
         hint = QLabel(
-            "Examples: Mail, Microsoft Outlook, com.apple.mail, mail.google.com, "
-            "outlook.office.com. Contexts apply to the next proofread."
+            "A trigger matches an app name, macOS app, Windows app, or website. "
+            "The matching context is used automatically on your next proofread."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #A89F9A; font-size: 11px;")
@@ -1466,6 +1489,7 @@ class SettingsDialog(QDialog):
         self._populate_automation_table(
             self._automation_rules_from_settings(),
             source_display_label,
+            source_type_label,
         )
         self.pages.addWidget(page)
 
@@ -1487,6 +1511,7 @@ class SettingsDialog(QDialog):
         self,
         rules: list[dict[str, str]],
         source_display_label: Any,
+        source_type_label: Any,
     ) -> None:
         contexts = [
             "Email Editing",
@@ -1506,6 +1531,10 @@ class SettingsDialog(QDialog):
             item.setToolTip(source)
             self.automation_table.setItem(row, 0, item)
 
+            type_item = QTableWidgetItem(source_type_label(source))
+            type_item.setFlags(type_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.automation_table.setItem(row, 1, type_item)
+
             combo = QComboBox()
             combo.addItems(contexts)
             index = combo.findText(context)
@@ -1513,7 +1542,7 @@ class SettingsDialog(QDialog):
                 combo.addItem(context)
                 index = combo.count() - 1
             combo.setCurrentIndex(index)
-            self.automation_table.setCellWidget(row, 1, combo)
+            self.automation_table.setCellWidget(row, 2, combo)
             self.automation_table.setRowHeight(row, 40)
 
     def _read_automation_rules_from_table(self) -> list[dict[str, str]]:
@@ -1528,7 +1557,7 @@ class SettingsDialog(QDialog):
             ).strip()
             if not source:
                 continue
-            combo = self.automation_table.cellWidget(row, 1)
+            combo = self.automation_table.cellWidget(row, 2)
             context = (
                 combo.currentText().strip()
                 if isinstance(combo, QComboBox)
@@ -1538,18 +1567,53 @@ class SettingsDialog(QDialog):
         return rules
 
     def _add_automation_rule(self) -> None:
-        from .automation import source_display_label
+        from .automation import source_display_label, source_type_label
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Add Context Trigger")
+        dialog.setWindowTitle("Add Automatic Context Trigger")
         dialog.setModal(True)
-        dialog.setMinimumWidth(420)
+        dialog.setMinimumWidth(500)
+        dialog.setStyleSheet(
+            "QDialog { background-color: #FAF8F5; }"
+            "QLabel { color: #292524; }"
+            "QLineEdit, QComboBox { background-color: #FFFFFF; border: 1px solid #DDD6CF; "
+            "border-radius: 10px; padding: 8px 10px; }"
+            "QLineEdit:focus, QComboBox:focus { border-color: #1A3A2A; }"
+        )
 
         form = QFormLayout(dialog)
-        source_edit = QLineEdit()
-        source_edit.setPlaceholderText(
-            "e.g. Mail, Microsoft Outlook, com.apple.mail, mail.google.com"
+        form.setContentsMargins(24, 22, 24, 22)
+        form.setSpacing(14)
+
+        type_combo = QComboBox()
+        type_combo.addItems(
+            [
+                "App name",
+                "Website / URL",
+                "macOS bundle ID",
+                "Windows app",
+            ]
         )
+        source_edit = QLineEdit()
+        source_edit.setPlaceholderText("Microsoft Outlook")
+
+        type_hint = QLabel("Examples: Mail, Microsoft Outlook, com.apple.mail, mail.google.com")
+        type_hint.setWordWrap(True)
+        type_hint.setStyleSheet("color: #A89F9A; font-size: 11px;")
+
+        def update_placeholder() -> None:
+            kind = type_combo.currentText()
+            placeholders = {
+                "App name": "Microsoft Outlook or Mail",
+                "Website / URL": "mail.google.com or outlook.office.com",
+                "macOS bundle ID": "com.apple.mail or com.microsoft.Outlook",
+                "Windows app": "OUTLOOK.EXE or Microsoft Outlook",
+            }
+            source_edit.setPlaceholderText(placeholders[kind])
+
+        type_combo.currentTextChanged.connect(lambda _text: update_placeholder())
+        update_placeholder()
+
         context_combo = QComboBox()
         context_combo.addItems(
             [
@@ -1559,8 +1623,10 @@ class SettingsDialog(QDialog):
                 "Academic Journal (Top-Tier)",
             ]
         )
-        form.addRow("App or URL:", source_edit)
+        form.addRow("Match type:", type_combo)
+        form.addRow("Value:", source_edit)
         form.addRow("Context:", context_combo)
+        form.addRow("", type_hint)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -1573,9 +1639,17 @@ class SettingsDialog(QDialog):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        source = source_edit.text().strip()
-        if not source:
+        raw_value = source_edit.text().strip()
+        if not raw_value:
             return
+
+        prefixes = {
+            "App name": "name:",
+            "Website / URL": "url:",
+            "macOS bundle ID": "bundle:",
+            "Windows app": "exe:",
+        }
+        source = prefixes[type_combo.currentText()] + raw_value
         context = context_combo.currentText().strip()
         row = self.automation_table.rowCount()
         self.automation_table.insertRow(row)
@@ -1583,6 +1657,9 @@ class SettingsDialog(QDialog):
         item.setData(Qt.ItemDataRole.UserRole, source)
         item.setToolTip(source)
         self.automation_table.setItem(row, 0, item)
+        type_item = QTableWidgetItem(source_type_label(source))
+        type_item.setFlags(type_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.automation_table.setItem(row, 1, type_item)
         combo = QComboBox()
         combo.addItems(
             [
@@ -1597,8 +1674,23 @@ class SettingsDialog(QDialog):
             combo.addItem(context)
             index = combo.count() - 1
         combo.setCurrentIndex(index)
-        self.automation_table.setCellWidget(row, 1, combo)
+        self.automation_table.setCellWidget(row, 2, combo)
         self.automation_table.setRowHeight(row, 40)
+
+    def _reset_automation_rules(self) -> None:
+        from .automation import (
+            default_automation_rules,
+            source_display_label,
+            source_type_label,
+        )
+
+        self.settings.setdefault("automation", {})
+        self.settings["automation"]["rules"] = default_automation_rules()
+        self._populate_automation_table(
+            self.settings["automation"]["rules"],
+            source_display_label,
+            source_type_label,
+        )
 
     def _remove_automation_rule(self) -> None:
         row = self.automation_table.currentRow()

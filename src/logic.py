@@ -1930,6 +1930,15 @@ def polish_selection_once(
             automatic_context = resolve_automation_context(target, runtime_settings)
             if automatic_context:
                 context = automatic_context
+                try:
+                    from .generic_editing import _debug_log
+
+                    _debug_log(
+                        f"AUTOMATION CONTEXT: app={target.get('name')!r} "
+                        f"bundle={target.get('bundle_id')!r} context={context!r}"
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
 

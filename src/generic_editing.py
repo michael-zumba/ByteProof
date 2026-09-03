@@ -759,6 +759,8 @@ def capture_diagnostics() -> dict[str, Any]:
         "context_before_len": 0,
         "context_after_len": 0,
         "clipboard_fallback_used": False,
+        "browser_url": "",
+        "automation_context": None,
         "errors": [],
     }
     try:
@@ -788,6 +790,17 @@ def capture_diagnostics() -> dict[str, Any]:
         result["clipboard_fallback_used"] = (
             SYSTEM == "Darwin" and not result["ax_text"]
         )
+        try:
+            result["browser_url"] = editor.browser_url(app_info)
+            from .automation import resolve_automation_context
+            from .settings import load_runtime_settings
+
+            result["automation_context"] = resolve_automation_context(
+                app_info,
+                load_runtime_settings(),
+            )
+        except Exception as exc:
+            result["errors"].append(f"Automation context: {exc}")
         return result
     except Exception as e:
         result["errors"].append(str(e))

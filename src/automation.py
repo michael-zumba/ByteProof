@@ -47,21 +47,39 @@ def _browser_url(target: dict[str, Any]) -> str:
 
 
 def source_display_label(source: str) -> str:
-    """Return a human-friendly label for a rule source."""
+    """Return the human-readable value for a rule source, without its type."""
     value = source.strip()
     if not value:
         return ""
     if ":" in value:
         kind, _, rest = value.partition(":")
-        if kind == "bundle":
-            return f"App: {rest}"
-        if kind == "url":
-            return f"Website: {rest}"
-        if kind == "name":
-            return f"App name: {rest}"
-        if kind == "exe":
-            return f"App: {rest}"
+        if kind in ("bundle", "url", "name", "exe"):
+            return rest
     return value
+
+
+def source_type_label(source: str) -> str:
+    """Return a short category label for a rule source."""
+    value = source.strip()
+    if ":" in value:
+        kind = value.partition(":")[0]
+        return {
+            "bundle": "macOS app",
+            "url": "Website",
+            "name": "App name",
+            "exe": "Windows app",
+        }.get(kind, "Other")
+    lower = value.lower()
+    if (
+        "://" in lower
+        or lower.startswith("www.")
+        or (lower.startswith("mail.") and " " not in lower)
+        or (lower.count(".") >= 2 and " " not in lower and "/" not in lower)
+    ):
+        return "Website"
+    if lower.startswith("com.") or lower.endswith(".app"):
+        return "macOS app"
+    return "App name"
 
 
 def source_matches(
