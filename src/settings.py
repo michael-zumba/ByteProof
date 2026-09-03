@@ -10,6 +10,8 @@ from config.deepseek_config import (
     get_deepseek_api_keys,
 )
 
+from .automation import default_automation_rules
+
 APP_NAME = "ByteProof"
 APP_VERSION = "1.7.0"
 COMPANY_NAME = "ByteMind Ltd"
@@ -198,6 +200,10 @@ def load_runtime_settings() -> dict[str, Any]:
             "email": "",
             "activated_at": 0,
             "expiry": 0,
+        },
+        "automation": {
+            "enabled": True,
+            "rules": default_automation_rules(),
         }
     }
     
@@ -268,6 +274,9 @@ def load_runtime_settings() -> dict[str, Any]:
 
     if "local_model" in loaded:
         settings["local_model"].update(loaded["local_model"])
+
+    if "automation" in loaded:
+        settings["automation"].update(loaded["automation"])
 
     _migrate_mac_hotkeys(settings)
     settings["general"]["temperature"] = max(0.0, min(2.0, settings["general"]["temperature"]))

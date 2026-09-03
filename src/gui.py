@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -55,6 +56,8 @@ from PyQt6.QtWidgets import (
     QSlider,
     QStackedWidget,
     QSystemTrayIcon,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -917,6 +920,10 @@ class SettingsDialog(QDialog):
     combo_style: QComboBox
     combo_comment: QComboBox
     combo_context: QComboBox
+    automation_enabled_check: QCheckBox
+    automation_table: QTableWidget
+    automation_add_btn: QPushButton
+    automation_remove_btn: QPushButton
     provider_buttons: dict[str, QPushButton]
     provider_status_labels: dict[str, QLabel]
     connect_page: QWidget | None
@@ -966,7 +973,7 @@ class SettingsDialog(QDialog):
         self.sidebar.setFixedWidth(190)
         self.sidebar.setObjectName("SettingsSidebar")
         self.sidebar.addItems(
-            ["General", "Connect", "Local AI", "License", "Updates"]
+            ["General", "Connect", "Local AI", "License", "Updates", "Automation"]
         )
         self.sidebar.currentRowChanged.connect(self.change_page)
         main_layout.addWidget(self.sidebar)
@@ -998,6 +1005,7 @@ class SettingsDialog(QDialog):
         self.init_local_tab()
         self.init_license_tab()
         self.init_updates_tab()
+        self.init_automation_tab()
         
         self.setStyleSheet("""
             QDialog {
@@ -1345,6 +1353,7 @@ class SettingsDialog(QDialog):
         self.combo_context.addItems(
             [
                 "General Editing",
+                "Email Editing",
                 "PhD Thesis Chapter",
                 "Academic Journal (Top-Tier)",
             ]
@@ -1379,6 +1388,222 @@ class SettingsDialog(QDialog):
     def update_temp_label(self, value: int) -> None:
         temp = value / 10.0
         self.temp_label.setText(f"{temp:.1f}")
+
+    def init_automation_tab(self) -> None:
+        from .automation import source_display_label
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setSpacing(14)
+
+        title = QLabel("Automation")
+        title.setObjectName("SettingsTitle")
+        layout.addWidget(title)
+
+        subtitle = QLabel(
+            "When ByteProof reads selected text from one of these apps or "
+            "websites, it can automatically switch to the matching editing "
+            "context. Add Mail, Outlook, or a webmail address such as "
+            "mail.google.com."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
+        layout.addWidget(subtitle)
+
+        group = QGroupBox("Context Triggers")
+        group_layout = QVBoxLayout(group)
+        group_layout.setSpacing(12)
+        group_layout.setContentsMargins(14, 18, 14, 16)
+
+        self.automation_enabled_check = QCheckBox(
+            "Detect email apps and webmail automatically"
+        )
+        self.automation_enabled_check.setChecked(
+            self.settings.get("automation", {}).get("enabled", True)
+        )
+        group_layout.addWidget(self.automation_enabled_check)
+
+        self.automation_table = QTableWidget(0, 2)
+        self.automation_table.setHorizontalHeaderLabels(["App or URL", "Context"])
+        self.automation_table.verticalHeader().setVisible(False)
+        self.automation_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.automation_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.automation_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.automation_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        group_layout.addWidget(self.automation_table)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        self.automation_add_btn = QPushButton("Add Rule")
+        self.automation_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.automation_add_btn.clicked.connect(self._add_automation_rule)
+        self.automation_remove_btn = QPushButton("Remove Selected")
+        self.automation_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.automation_remove_btn.clicked.connect(self._remove_automation_rule)
+        button_row.addWidget(self.automation_add_btn)
+        button_row.addWidget(self.automation_remove_btn)
+        button_row.addStretch()
+        group_layout.addLayout(button_row)
+
+        hint = QLabel(
+            "Examples: Mail, Microsoft Outlook, com.apple.mail, mail.google.com, "
+            "outlook.office.com. Contexts apply to the next proofread."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #A89F9A; font-size: 11px;")
+        group_layout.addWidget(hint)
+        layout.addWidget(group)
+
+        self._populate_automation_table(
+            self._automation_rules_from_settings(),
+            source_display_label,
+        )
+        self.pages.addWidget(page)
+
+    def _automation_rules_from_settings(self) -> list[dict[str, str]]:
+        from .automation import default_automation_rules
+
+        rules = self.settings.get("automation", {}).get("rules")
+        if not isinstance(rules, list) or not rules:
+            return default_automation_rules()
+        cleaned: list[dict[str, str]] = []
+        for rule in rules:
+            source = str(rule.get("source") or rule.get("app") or "").strip()
+            context = str(rule.get("context") or "Email Editing").strip()
+            if source and context:
+                cleaned.append({"source": source, "context": context})
+        return cleaned or default_automation_rules()
+
+    def _populate_automation_table(
+        self,
+        rules: list[dict[str, str]],
+        source_display_label: Any,
+    ) -> None:
+        contexts = [
+            "Email Editing",
+            "General Editing",
+            "PhD Thesis Chapter",
+            "Academic Journal (Top-Tier)",
+        ]
+        self.automation_table.setRowCount(0)
+        for rule in rules:
+            row = self.automation_table.rowCount()
+            self.automation_table.insertRow(row)
+            source = rule.get("source", "")
+            context = rule.get("context", "Email Editing")
+
+            item = QTableWidgetItem(source_display_label(source))
+            item.setData(Qt.ItemDataRole.UserRole, source)
+            item.setToolTip(source)
+            self.automation_table.setItem(row, 0, item)
+
+            combo = QComboBox()
+            combo.addItems(contexts)
+            index = combo.findText(context)
+            if index < 0:
+                combo.addItem(context)
+                index = combo.count() - 1
+            combo.setCurrentIndex(index)
+            self.automation_table.setCellWidget(row, 1, combo)
+            self.automation_table.setRowHeight(row, 40)
+
+    def _read_automation_rules_from_table(self) -> list[dict[str, str]]:
+        rules: list[dict[str, str]] = []
+        for row in range(self.automation_table.rowCount()):
+            item = self.automation_table.item(row, 0)
+            if item is None:
+                continue
+            source = str(
+                item.data(Qt.ItemDataRole.UserRole)
+                or item.text()
+            ).strip()
+            if not source:
+                continue
+            combo = self.automation_table.cellWidget(row, 1)
+            context = (
+                combo.currentText().strip()
+                if isinstance(combo, QComboBox)
+                else "Email Editing"
+            )
+            rules.append({"source": source, "context": context})
+        return rules
+
+    def _add_automation_rule(self) -> None:
+        from .automation import source_display_label
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Context Trigger")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(420)
+
+        form = QFormLayout(dialog)
+        source_edit = QLineEdit()
+        source_edit.setPlaceholderText(
+            "e.g. Mail, Microsoft Outlook, com.apple.mail, mail.google.com"
+        )
+        context_combo = QComboBox()
+        context_combo.addItems(
+            [
+                "Email Editing",
+                "General Editing",
+                "PhD Thesis Chapter",
+                "Academic Journal (Top-Tier)",
+            ]
+        )
+        form.addRow("App or URL:", source_edit)
+        form.addRow("Context:", context_combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        source = source_edit.text().strip()
+        if not source:
+            return
+        context = context_combo.currentText().strip()
+        row = self.automation_table.rowCount()
+        self.automation_table.insertRow(row)
+        item = QTableWidgetItem(source_display_label(source))
+        item.setData(Qt.ItemDataRole.UserRole, source)
+        item.setToolTip(source)
+        self.automation_table.setItem(row, 0, item)
+        combo = QComboBox()
+        combo.addItems(
+            [
+                "Email Editing",
+                "General Editing",
+                "PhD Thesis Chapter",
+                "Academic Journal (Top-Tier)",
+            ]
+        )
+        index = combo.findText(context)
+        if index < 0:
+            combo.addItem(context)
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+        self.automation_table.setCellWidget(row, 1, combo)
+        self.automation_table.setRowHeight(row, 40)
+
+    def _remove_automation_rule(self) -> None:
+        row = self.automation_table.currentRow()
+        if row >= 0:
+            self.automation_table.removeRow(row)
 
     def pynput_to_qt(self, pynput_str: str) -> str:
         if not pynput_str:
@@ -2614,6 +2839,10 @@ class SettingsDialog(QDialog):
         self.settings["general"]["style"] = self.combo_style.currentText()
         self.settings["general"]["comment_type"] = self.combo_comment.currentText()
         self.settings["general"]["context"] = self.combo_context.currentText()
+
+        self.settings.setdefault("automation", {})
+        self.settings["automation"]["enabled"] = self.automation_enabled_check.isChecked()
+        self.settings["automation"]["rules"] = self._read_automation_rules_from_table()
         
         open_seq = self.open_hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         self.settings["general"]["open_hotkey"] = self.qt_to_pynput(open_seq)

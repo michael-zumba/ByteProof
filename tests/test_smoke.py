@@ -669,6 +669,12 @@ def test_proofread_prompt_uses_markers_and_retries_conversational_reply() -> Non
         def read(self) -> bytes:
             return json_module.dumps(self._payload).encode("utf-8")
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
     def fake_urlopen(request, timeout=0, context=None):
         body = json_module.loads(request.data)
         captured.append(body)
@@ -2473,11 +2479,14 @@ def test_embedded_prompts_match_source_files() -> None:
         "phd_proofreader_creative.txt",
         "polish_general.txt",
         "polish_general_creative.txt",
+        "polish_email.txt",
+        "polish_email_creative.txt",
         "comment_language.txt",
         "comment_technical.txt",
         "context_general.txt",
         "context_journal.txt",
         "context_phd_thesis.txt",
+        "context_email.txt",
     }
     assert used <= set(PROMPT_FILES), sorted(used - set(PROMPT_FILES))
     for name in used:
@@ -2871,6 +2880,7 @@ def test_settings_track_changes_checkbox() -> None:
     from PyQt6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
+    assert app is not None
     from src import settings
     from src.gui import SettingsDialog
 
@@ -2890,6 +2900,134 @@ def test_settings_track_changes_checkbox() -> None:
     loaded["general"].pop("track_changes", None)
     dialog = SettingsDialog(loaded)
     assert dialog.chk_track_changes.isChecked() is True
+    dialog.close()
+
+
+def test_email_automation_resolver() -> None:
+    from src import automation
+
+    mail = {"pid": 1, "name": "Mail", "bundle_id": "com.apple.mail"}
+    settings = {"automation": {"enabled": True, "rules": automation.default_automation_rules()}}
+    assert automation.resolve_automation_context(mail, settings) == "Email Editing"
+
+    windows_outlook = {"pid": 2, "name": "Inbox - Outlook", "exe": r"C:\Program Files\Microsoft Office\root\Office16\OUTLOOK.EXE"}
+    assert automation.resolve_automation_context(windows_outlook, settings) == "Email Editing"
+
+    chrome_gmail = {"pid": 3, "name": "Google Chrome", "bundle_id": "com.google.Chrome"}
+    original = automation._browser_url
+    automation._browser_url = lambda target: "https://mail.google.com/mail/u/0/#inbox"
+    try:
+        assert automation.resolve_automation_context(chrome_gmail, settings) == "Email Editing"
+    finally:
+        automation._browser_url = original
+
+    assert automation.resolve_automation_context(
+        {"pid": 4, "name": "PyCharm", "bundle_id": "com.jetbrains.pycharm"},
+        settings,
+    ) is None
+
+    disabled = {"automation": {"enabled": False, "rules": automation.default_automation_rules()}}
+    assert automation.resolve_automation_context(mail, disabled) is None
+
+    assert automation.source_matches({"name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap"}, "name:Slack")
+    assert automation.source_matches({"name": "Google Chrome", "bundle_id": "com.google.Chrome"}, "mail.google.com", "https://mail.google.com/")
+    assert not automation.source_matches({"name": "Google Chrome", "bundle_id": "com.google.Chrome"}, "mail.google.com", "")
+
+
+def test_email_prompt_selection() -> None:
+    from src import logic
+
+    precise = logic.load_polish_prompt("Precise (Minimal Changes)", "Email Editing")
+    creative = logic.load_polish_prompt("Creative (Rewrite)", "Email Editing")
+    assert "email" in precise.lower()
+    assert "email" in creative.lower()
+    assert "professional" in precise.lower()
+    assert "STRICT LANGUAGE-EDITING MODE" in precise
+    assert "STRICT LANGUAGE-EDITING MODE" in creative
+
+    general = logic.load_polish_prompt("Precise (Minimal Changes)", "General Editing")
+    assert "professional writing editor" in general.lower()
+
+
+def test_email_context_auto_trigger_in_polish_flow() -> None:
+    from src import generic_editing, logic
+
+    class FakeEditor:
+        def permission_status(self):
+            return True, ""
+
+        def frontmost_app(self):
+            return {"pid": 1, "name": "Mail", "bundle_id": "com.apple.mail"}
+
+        def activate(self, target):
+            return True
+
+        def get_selection_info(self, target):
+            return ("Please send me report by Friday.", "Hi team,", " Thanks, Alex")
+
+        def is_word(self, target):
+            return False
+
+    captured: dict[str, str] = {}
+
+    def fake_provider(
+        source_text, api_key, max_tokens, base_url, model,
+        provider_name, temperature=0.7, context_before="", context_after="",
+        spelling="UK/AU/NZ", style="Precise (Minimal Changes)",
+        context="General Editing", system_prompt_override=None,
+        text_section_label="Text to proofread", reviewer_comment="",
+        cancel_event=None,
+    ):
+        captured["context"] = context
+        captured["prompt"] = str(system_prompt_override or "")
+        return "Please send me the report by Friday."
+
+    original_get_editor = generic_editing.get_generic_editor
+    original_provider = logic.proofread_with_provider
+    try:
+        generic_editing.get_generic_editor = lambda: FakeEditor()
+        logic.proofread_with_provider = fake_provider
+        settings = {
+            "active_provider": "DeepSeek",
+            "providers": {"DeepSeek": {"api_keys": ["sk-test"], "base_url": "http://x", "model": "m"}},
+            "general": {"temperature": 0.7, "spelling": "UK/AU/NZ", "style": "Precise (Minimal Changes)", "context": "General Editing"},
+            "automation": {"enabled": True, "rules": [
+                {"source": "bundle:com.apple.mail", "context": "Email Editing"},
+            ]},
+        }
+        status, _original, corrected, _comment, _start = logic.polish_selection_once(
+            1024,
+            settings,
+            None,
+        )
+        assert status == "Polished.", status
+        assert corrected is not None
+        assert captured["context"] == "Email Editing", captured
+        assert "email" in captured["prompt"].lower(), captured["prompt"]
+    finally:
+        generic_editing.get_generic_editor = original_get_editor
+        logic.proofread_with_provider = original_provider
+
+
+def test_settings_automation_page_saves_rules() -> None:
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    from src import settings
+    from src.gui import SettingsDialog
+
+    loaded = settings.load_runtime_settings()
+    dialog = SettingsDialog(loaded)
+    dialog.show()
+    app.processEvents()
+
+    assert dialog.automation_table.rowCount() >= 1
+    assert dialog.automation_enabled_check.isChecked() is True
+
+    dialog.automation_enabled_check.setChecked(False)
+    saved = dialog.get_settings()
+    assert saved["automation"]["enabled"] is False
+    assert isinstance(saved["automation"]["rules"], list)
     dialog.close()
 
 
@@ -3152,13 +3290,15 @@ def test_settings_new_pages() -> None:
     dialog.show()
     app.processEvents()
 
-    assert dialog.sidebar.count() == 5
+    assert dialog.sidebar.count() == 6
     local_item = dialog.sidebar.item(2)
     assert local_item is not None and local_item.text() == "Local AI"
     license_item = dialog.sidebar.item(3)
     assert license_item is not None and license_item.text() == "License"
     updates_item = dialog.sidebar.item(4)
     assert updates_item is not None and updates_item.text() == "Updates"
+    automation_item = dialog.sidebar.item(5)
+    assert automation_item is not None and automation_item.text() == "Automation"
 
     dialog.sidebar.setCurrentRow(2)
     dialog.change_page(2)
