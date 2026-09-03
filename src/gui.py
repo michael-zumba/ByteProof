@@ -182,6 +182,7 @@ class AutomationRuleCard(QWidget):
         super().__init__()
         self.source = source
         self._select_callback = select_callback
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setObjectName("AutomationRuleCard")
         self._apply_selected_style(False)
 
