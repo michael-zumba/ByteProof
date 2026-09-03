@@ -183,16 +183,25 @@ class AutomationRuleCard(QWidget):
         self.setStyleSheet(
             "#AutomationRuleCard { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
             "border-radius: 14px; }"
+            "#AutomationRuleCard:hover { border-color: #CBBFB5; }"
         )
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(15, 12, 15, 12)
+        layout.setSpacing(13)
 
         icon_label = QLabel()
-        icon_label.setFixedSize(32, 32)
+        icon_label.setFixedSize(34, 34)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if not icon.isNull():
-            icon_label.setPixmap(icon.pixmap(QSize(30, 30)))
+            icon_label.setPixmap(
+                icon.pixmap(QSize(32, 32), QIcon.Mode.Normal, QIcon.State.On)
+            )
+        else:
+            icon_label.setText("·")
+            icon_label.setStyleSheet(
+                "color: #A89F9A; font-size: 20px; background: transparent; border: none;"
+            )
         layout.addWidget(icon_label)
 
         text_col = QVBoxLayout()
@@ -1625,12 +1634,32 @@ class SettingsDialog(QDialog):
         button_row.setSpacing(8)
         self.automation_add_btn = QPushButton("Add Trigger")
         self.automation_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.automation_add_btn.setStyleSheet(
+            "QPushButton { background-color: #1A3A2A; color: #FFFFFF; "
+            "border: 1px solid #143024; border-radius: 10px; padding: 9px 16px; "
+            "font-weight: 620; }"
+            "QPushButton:hover { background-color: #143024; }"
+            "QPushButton:pressed { background-color: #0E2419; }"
+        )
         self.automation_add_btn.clicked.connect(self._add_automation_rule)
         self.automation_remove_btn = QPushButton("Remove Selected")
         self.automation_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.automation_remove_btn.setStyleSheet(
+            "QPushButton { background-color: #FFFFFF; color: #57534E; "
+            "border: 1px solid #E8E1D9; border-radius: 10px; padding: 9px 16px; "
+            "font-weight: 520; }"
+            "QPushButton:hover { background-color: #FEF2F2; color: #B91C1C; "
+            "border-color: #FECACA; }"
+        )
         self.automation_remove_btn.clicked.connect(self._remove_automation_rule)
         self.automation_reset_btn = QPushButton("Reset Defaults")
         self.automation_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.automation_reset_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #78716C; "
+            "border: 1px solid #E8E1D9; border-radius: 10px; padding: 9px 16px; "
+            "font-weight: 520; }"
+            "QPushButton:hover { background-color: #F5F0EB; color: #292524; }"
+        )
         self.automation_reset_btn.clicked.connect(self._reset_automation_rules)
         button_row.addWidget(self.automation_add_btn)
         button_row.addWidget(self.automation_remove_btn)
@@ -1718,18 +1747,51 @@ class SettingsDialog(QDialog):
         return rules
 
     def _icon_for_trigger_source(self, source: str) -> QIcon:
+        lower = source.lower()
+
+        def load_asset(name: str) -> QIcon:
+            path = resource_path(os.path.join("assets", name))
+            if os.path.exists(path):
+                return QIcon(path)
+            return QIcon()
+
+        # Prefer the real macOS application icon when the rule points at an
+        # installed app. This keeps Mail and Outlook looking like themselves.
         if source.startswith("bundle:"):
-            return self._app_icon({"bundle_id": source.split(":", 1)[1]})
+            icon = self._app_icon({"bundle_id": source.split(":", 1)[1]})
+            if not icon.isNull():
+                return icon
         if source.startswith("name:"):
-            return self._app_icon({"name": source.split(":", 1)[1]})
+            icon = self._app_icon({"name": source.split(":", 1)[1]})
+            if not icon.isNull():
+                return icon
         if source.startswith("exe:"):
-            return self._app_icon({"exe": source.split(":", 1)[1]})
+            icon = self._app_icon({"exe": source.split(":", 1)[1]})
+            if not icon.isNull():
+                return icon
+
+        # Website and app-name rules need stable brand icons. These also act
+        # as fallbacks for Outlook and Gmail when no matching app is installed.
+        if "gmail" in lower or "mail.google.com" in lower:
+            return load_asset("gmail.svg")
+        if (
+            "outlook" in lower
+            or "outlook.exe" in lower
+            or "outlook.live.com" in lower
+            or "outlook.office.com" in lower
+        ):
+            return load_asset("outlook.svg")
+        if "yahoo" in lower or "mail.yahoo.com" in lower:
+            return load_asset("yahoo.svg")
+
+        if source.startswith(("bundle:", "name:", "exe:")):
+            return load_asset("mail.svg")
         try:
             return self.style().standardIcon(
                 QStyle.StandardPixmap.SP_DriveNetIcon
             )
         except Exception:
-            return QIcon()
+            return load_asset("mail.svg")
 
     def _add_automation_rule(self) -> None:
         from .automation import source_display_label, source_type_label
@@ -1740,15 +1802,38 @@ class SettingsDialog(QDialog):
         dialog.setMinimumWidth(500)
         dialog.setStyleSheet(
             "QDialog { background-color: #FAF8F5; }"
-            "QLabel { color: #292524; }"
+            "QLabel { color: #292524; background: transparent; }"
             "QLineEdit, QComboBox { background-color: #FFFFFF; border: 1px solid #DDD6CF; "
             "border-radius: 10px; padding: 8px 10px; }"
             "QLineEdit:focus, QComboBox:focus { border-color: #1A3A2A; }"
+            "QComboBox::drop-down { border: none; width: 28px; }"
+            "QDialogButtonBox QPushButton { min-width: 86px; padding: 9px 16px; "
+            "border-radius: 10px; font-weight: 600; }"
+            "QDialogButtonBox QPushButton:default { background-color: #1A3A2A; "
+            "color: #FFFFFF; border: 1px solid #143024; }"
+            "QDialogButtonBox QPushButton:default:hover { background-color: #143024; }"
         )
 
-        form = QFormLayout(dialog)
-        form.setContentsMargins(24, 22, 24, 22)
+        shell = QVBoxLayout(dialog)
+        shell.setContentsMargins(24, 22, 24, 22)
+        shell.setSpacing(16)
+
+        header = QLabel("Add Automatic Context Trigger")
+        header.setStyleSheet("font-size: 17px; font-weight: 700; color: #1A3A2A;")
+        shell.addWidget(header)
+
+        subtitle = QLabel(
+            "Choose what ByteProof should match, then choose the editing context "
+            "that should be used automatically."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
+        shell.addWidget(subtitle)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(14)
+        shell.addLayout(form)
 
         type_combo = QComboBox()
         type_combo.addItems(
@@ -1942,6 +2027,9 @@ class SettingsDialog(QDialog):
         dialog.setMinimumSize(420, 460)
         dialog.setStyleSheet(
             "QDialog { background-color: #FAF8F5; }"
+            "QLineEdit { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
+            "border-radius: 10px; padding: 8px 10px; }"
+            "QLineEdit:focus { border-color: #1A3A2A; }"
             "QListWidget { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
             "border-radius: 12px; padding: 6px; }"
             "QListWidget::item { padding: 10px; border-radius: 8px; }"
@@ -1956,6 +2044,11 @@ class SettingsDialog(QDialog):
         title.setStyleSheet("font-size: 14px; font-weight: 700; color: #292524;")
         layout.addWidget(title)
 
+        search_edit = QLineEdit()
+        search_edit.setPlaceholderText("Search apps")
+        search_edit.setClearButtonEnabled(True)
+        layout.addWidget(search_edit)
+
         app_list = QListWidget()
         app_list.setIconSize(QSize(28, 28))
         layout.addWidget(app_list, 1)
@@ -1963,16 +2056,26 @@ class SettingsDialog(QDialog):
         apps = self._installed_apps_for_trigger()
         if not apps:
             layout.addWidget(QLabel("No running applications found."))
-        for app in apps:
-            name = app.get("name") or "Unknown"
-            bundle = app.get("bundle_id") or ""
-            label = f"{name}" + (f"  ·  {bundle}" if bundle else "")
-            item = QListWidgetItem(label)
-            icon = self._app_icon(app)
-            if not icon.isNull():
-                item.setIcon(icon)
-            item.setData(Qt.ItemDataRole.UserRole, app)
-            app_list.addItem(item)
+
+        def repopulate(filter_text: str) -> None:
+            app_list.clear()
+            needle = filter_text.strip().lower()
+            for app in apps:
+                name = app.get("name") or "Unknown"
+                bundle = app.get("bundle_id") or ""
+                haystack = f"{name} {bundle}".lower()
+                if needle and needle not in haystack:
+                    continue
+                label = f"{name}" + (f"  ·  {bundle}" if bundle else "")
+                item = QListWidgetItem(label)
+                icon = self._app_icon(app)
+                if not icon.isNull():
+                    item.setIcon(icon)
+                item.setData(Qt.ItemDataRole.UserRole, app)
+                app_list.addItem(item)
+
+        search_edit.textChanged.connect(repopulate)
+        repopulate("")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
