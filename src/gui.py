@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import webbrowser
+from collections.abc import Callable
 from typing import Any
 
 from PyQt6.QtCore import (
@@ -176,15 +177,13 @@ class AutomationRuleCard(QWidget):
         icon: QIcon,
         value_label: str,
         type_label: str,
+        select_callback: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.source = source
+        self._select_callback = select_callback
         self.setObjectName("AutomationRuleCard")
-        self.setStyleSheet(
-            "#AutomationRuleCard { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
-            "border-radius: 14px; }"
-            "#AutomationRuleCard:hover { border-color: #CBBFB5; }"
-        )
+        self._apply_selected_style(False)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(15, 12, 15, 12)
@@ -235,6 +234,33 @@ class AutomationRuleCard(QWidget):
         self.context_combo.setMinimumWidth(190)
         self.context_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.context_combo)
+
+        self.installEventFilter(self)
+        for child in self.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def _apply_selected_style(self, selected: bool) -> None:
+        if selected:
+            self.setStyleSheet(
+                "#AutomationRuleCard { background-color: #E7F0EA; "
+                "border: 1px solid #1A3A2A; border-radius: 14px; }"
+                "#AutomationRuleCard:hover { background-color: #D6E4DB; "
+                "border-color: #143024; }"
+            )
+        else:
+            self.setStyleSheet(
+                "#AutomationRuleCard { background-color: #FFFFFF; "
+                "border: 1px solid #E8E1D9; border-radius: 14px; }"
+                "#AutomationRuleCard:hover { border-color: #CBBFB5; }"
+            )
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:  # pyright: ignore[reportAny]
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and self._select_callback is not None
+        ):
+            self._select_callback()
+        return super().eventFilter(obj, event)
 
 
 def model_size_label(model: dict[str, Any]) -> str:
@@ -1626,6 +1652,9 @@ class SettingsDialog(QDialog):
             "QListWidget::item { background: transparent; }"
             "QListWidget::item:selected { background: transparent; }"
         )
+        self.automation_list.itemSelectionChanged.connect(
+            self._update_automation_card_selection
+        )
         group_layout.addWidget(self.automation_list)
 
         self.automation_actions_widget = QWidget()
@@ -1704,18 +1733,22 @@ class SettingsDialog(QDialog):
         for rule in rules:
             source = rule.get("source", "")
             context = rule.get("context", "Email Editing")
+            item = QListWidgetItem()
             card = AutomationRuleCard(
                 source,
                 context,
                 self._icon_for_trigger_source(source),
                 source_display_label(source),
                 source_type_label(source),
+                select_callback=lambda item=item: self.automation_list.setCurrentItem(
+                    item
+                ),
             )
-            item = QListWidgetItem()
             item.setSizeHint(card.sizeHint())
             self.automation_list.addItem(item)
             self.automation_list.setItemWidget(item, card)
         self._update_automation_summary()
+        self._update_automation_card_selection()
 
     def _update_automation_summary(self) -> None:
         count = self.automation_list.count()
@@ -1723,6 +1756,18 @@ class SettingsDialog(QDialog):
             self.automation_summary_label.setText("1 trigger configured")
         else:
             self.automation_summary_label.setText(f"{count} triggers configured")
+
+    def _update_automation_card_selection(self) -> None:
+        selected_items = [
+            self.automation_list.item(index)
+            for index in range(self.automation_list.count())
+            if self.automation_list.item(index).isSelected()
+        ]
+        for index in range(self.automation_list.count()):
+            item = self.automation_list.item(index)
+            widget = self.automation_list.itemWidget(item)
+            if isinstance(widget, AutomationRuleCard):
+                widget._apply_selected_style(item in selected_items)
 
     def _toggle_automation_rules(self) -> None:
         visible = not self.automation_list.isVisible()
@@ -1942,14 +1987,17 @@ class SettingsDialog(QDialog):
         }
         source = prefixes[type_combo.currentText()] + raw_value
         context = context_combo.currentText().strip()
+        item = QListWidgetItem()
         card = AutomationRuleCard(
             source,
             context,
             self._icon_for_trigger_source(source),
             source_display_label(source),
             source_type_label(source),
+            select_callback=lambda item=item: self.automation_list.setCurrentItem(
+                item
+            ),
         )
-        item = QListWidgetItem()
         item.setSizeHint(card.sizeHint())
         self.automation_list.addItem(item)
         self.automation_list.setItemWidget(item, card)
