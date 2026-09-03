@@ -206,6 +206,12 @@ class GenericTextEditor:
             return GenericTextEditor._win_running_apps()
         return []
 
+    def browser_url(self, target: dict[str, Any]) -> str:
+        """Return the active browser tab URL, when the target is a browser."""
+        if SYSTEM == "Darwin":
+            return self._mac_browser_url(target.get("bundle_id") or "")
+        return ""
+
     @staticmethod
     def is_word(target: dict[str, Any]) -> bool:
         bundle = str(target.get("bundle_id", "")).lower()
@@ -314,6 +320,63 @@ class GenericTextEditor:
             }
         except Exception:
             return {}
+
+    @staticmethod
+    def _mac_browser_url(bundle_id: str) -> str:
+        """Return the active tab URL for supported macOS browsers.
+
+        This is intentionally best-effort: a browser can be running without a
+        tab, without AppleScript automation permission, or with a different
+        AppleScript dictionary. Returning an empty string means the resolver
+        falls back to app-name/exe matching.
+        """
+        bundle = bundle_id.lower()
+        scripts: dict[str, str] = {
+            "com.google.chrome": (
+                'tell application id "com.google.Chrome" to tell active tab '
+                "of front window to return URL"
+            ),
+            "com.apple.safari": (
+                'tell application id "com.apple.Safari" to tell front window '
+                "to tell current tab to return URL"
+            ),
+            "com.brave.browser": (
+                'tell application id "com.brave.Browser" to tell active tab '
+                "of front window to return URL"
+            ),
+            "com.microsoft.edgemac": (
+                'tell application id "com.microsoft.edgemac" to tell active tab '
+                "of front window to return URL"
+            ),
+            "company.thebrowser.browser": (
+                'tell application id "company.thebrowser.Browser" to tell '
+                "front window to tell active tab to return URL"
+            ),
+            "com.operasoftware.opera": (
+                'tell application id "com.operasoftware.Opera" to tell active tab '
+                "of front window to return URL"
+            ),
+            "com.vivaldi.vivaldi": (
+                'tell application id "com.vivaldi.Vivaldi" to tell active tab '
+                "of front window to return URL"
+            ),
+        }
+        script = scripts.get(bundle)
+        if not script:
+            return ""
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=0.8,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        if proc.returncode != 0:
+            return ""
+        return (proc.stdout or "").strip()
 
     @staticmethod
     def _mac_selection(target: dict[str, Any]) -> str:
