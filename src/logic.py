@@ -873,6 +873,7 @@ def load_context_overlay(context: str) -> str:
     context_map = {
         "PhD Thesis Chapter": "context_phd_thesis.txt",
         "Academic Journal (Top-Tier)": "context_journal.txt",
+        "Email Editing": "context_email.txt",
     }
     filename = context_map.get(context, "context_general.txt")
     return _load_prompt_text(filename) or ""
@@ -918,8 +919,19 @@ def load_proofreading_prompt(style: str = "Precise (Minimal Changes)", context: 
     return content
 
 
-def load_polish_prompt(style: str = "Precise (Minimal Changes)") -> str:
+def load_polish_prompt(
+    style: str = "Precise (Minimal Changes)",
+    context: str = "General Editing",
+) -> str:
     """Load the prompt used for polishing text in non-Word apps."""
+    if context == "Email Editing":
+        prompt_filename = "polish_email.txt"
+        if style == "Creative (Rewrite)":
+            prompt_filename = "polish_email_creative.txt"
+        content = _load_prompt_text(prompt_filename)
+        if content is not None:
+            return content
+
     prompt_filename = "polish_general.txt"
     if style == "Creative (Rewrite)":
         prompt_filename = "polish_general_creative.txt"
@@ -1912,6 +1924,15 @@ def polish_selection_once(
         style = runtime_settings.get("general", {}).get("style", "Precise (Minimal Changes)")
         context = runtime_settings.get("general", {}).get("context", "General Editing")
 
+        try:
+            from .automation import resolve_automation_context
+
+            automatic_context = resolve_automation_context(target, runtime_settings)
+            if automatic_context:
+                context = automatic_context
+        except Exception:
+            pass
+
         if style == "Creative (Rewrite)" and temperature < 0.5:
             temperature = 0.5
 
@@ -1942,7 +1963,7 @@ def polish_selection_once(
         if provider_requires_api_key(active_provider) and not api_key:
             return f"No API keys configured for {active_provider}.", None, None, None, 0
 
-        system_prompt = load_polish_prompt(style)
+        system_prompt = load_polish_prompt(style, context)
         corrected = proofread_with_provider(
             current_text,
             api_key,

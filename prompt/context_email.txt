@@ -1,0 +1,8 @@
+ADDITIONAL CONTEXT: The text is from an email draft. Treat it as professional correspondence unless the author's wording and the surrounding context clearly show a different, warmer register. Keep the intended message accurate, complete, and easy to act on.
+
+When editing:
+- Correct grammar, spelling, punctuation, and clarity.
+- Respect the recipient, subject matter, and relationship shown by the surrounding text.
+- Preserve the author's intended meaning. Do not add facts, requests, commitments, or calls to action that were not already present.
+- Preserve greetings, sign-offs, names, URLs, bullet lists, line breaks, and placeholders such as {{OBJ_0}}.
+- Use the surrounding email thread only to resolve references, tone, and subject-verb agreement. Do not include that surrounding text in the output.
