@@ -19,7 +19,6 @@ EMAIL_CONTEXT = "Email Editing"
 
 DEFAULT_AUTOMATION_RULES: list[dict[str, str]] = [
     {"source": "bundle:com.apple.mail", "context": EMAIL_CONTEXT},
-    {"source": "bundle:com.microsoft.outlook", "context": EMAIL_CONTEXT},
     {"source": "bundle:com.microsoft.Outlook", "context": EMAIL_CONTEXT},
     {"source": "exe:OUTLOOK.EXE", "context": EMAIL_CONTEXT},
     {"source": "name:Microsoft Outlook", "context": EMAIL_CONTEXT},

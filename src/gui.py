@@ -1083,7 +1083,7 @@ class SettingsDialog(QDialog):
 
         icon_bar = QHBoxLayout()
         icon_bar.setContentsMargins(10, 8, 10, 12)
-        icon_bar.setSpacing(8)
+        icon_bar.setSpacing(14)
 
         def make_icon_button(icon_path: str, tooltip: str, callback: Any) -> QPushButton:
             btn = QPushButton()
@@ -1588,6 +1588,26 @@ class SettingsDialog(QDialog):
         )
         group_layout.addWidget(self.automation_enabled_check)
 
+        self.automation_summary_label = QLabel()
+        self.automation_summary_label.setStyleSheet(
+            "font-size: 12px; color: #57534E; background: transparent; border: none;"
+        )
+        group_layout.addWidget(self.automation_summary_label)
+
+        self.automation_toggle_btn = QPushButton("Show Triggers")
+        self.automation_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.automation_toggle_btn.setStyleSheet(
+            "QPushButton { background-color: #EDF3EF; color: #143024; "
+            "border: 1px solid #A9C7B3; border-radius: 10px; padding: 8px 14px; "
+            "font-weight: 620; }"
+            "QPushButton:hover { background-color: #D6E4DB; }"
+        )
+        self.automation_toggle_btn.clicked.connect(self._toggle_automation_rules)
+        group_layout.addWidget(
+            self.automation_toggle_btn,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+
         self.automation_list = QListWidget()
         self.automation_list.setSelectionMode(
             QListWidget.SelectionMode.SingleSelection
@@ -1600,7 +1620,9 @@ class SettingsDialog(QDialog):
         )
         group_layout.addWidget(self.automation_list)
 
-        button_row = QHBoxLayout()
+        self.automation_actions_widget = QWidget()
+        button_row = QHBoxLayout(self.automation_actions_widget)
+        button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(8)
         self.automation_add_btn = QPushButton("Add Trigger")
         self.automation_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1615,7 +1637,7 @@ class SettingsDialog(QDialog):
         button_row.addWidget(self.automation_remove_btn)
         button_row.addWidget(self.automation_reset_btn)
         button_row.addStretch()
-        group_layout.addLayout(button_row)
+        group_layout.addWidget(self.automation_actions_widget)
 
         hint = QLabel(
             "A trigger matches an app name, macOS app, Windows app, or website. "
@@ -1629,6 +1651,8 @@ class SettingsDialog(QDialog):
         self._populate_automation_rules(
             self._automation_rules_from_settings(),
         )
+        self.automation_list.setVisible(False)
+        self.automation_actions_widget.setVisible(False)
         self.pages.addWidget(page)
 
     def _automation_rules_from_settings(self) -> list[dict[str, str]]:
@@ -1663,6 +1687,22 @@ class SettingsDialog(QDialog):
             item.setSizeHint(card.sizeHint())
             self.automation_list.addItem(item)
             self.automation_list.setItemWidget(item, card)
+        self._update_automation_summary()
+
+    def _update_automation_summary(self) -> None:
+        count = self.automation_list.count()
+        if count == 1:
+            self.automation_summary_label.setText("1 trigger configured")
+        else:
+            self.automation_summary_label.setText(f"{count} triggers configured")
+
+    def _toggle_automation_rules(self) -> None:
+        visible = not self.automation_list.isVisible()
+        self.automation_list.setVisible(visible)
+        self.automation_actions_widget.setVisible(visible)
+        self.automation_toggle_btn.setText(
+            "Hide Triggers" if visible else "Show Triggers"
+        )
 
     def _read_automation_rules_from_list(self) -> list[dict[str, str]]:
         rules: list[dict[str, str]] = []
@@ -1810,7 +1850,9 @@ class SettingsDialog(QDialog):
         self.automation_list.setItemWidget(item, card)
         self.automation_list.setCurrentItem(item)
 
-    def _running_apps_for_trigger(self) -> list[dict[str, Any]]:
+    def _installed_apps_for_trigger(self) -> list[dict[str, Any]]:
+        if platform.system() == "Darwin":
+            return self._mac_installed_apps()
         try:
             editor = get_generic_editor()
             apps = editor.running_apps()
@@ -1819,9 +1861,59 @@ class SettingsDialog(QDialog):
         return apps or []
 
     @staticmethod
+    def _mac_installed_apps() -> list[dict[str, Any]]:
+        apps: dict[str, dict[str, Any]] = {}
+        roots = [
+            os.path.expanduser("~/Applications"),
+            "/Applications",
+        ]
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            try:
+                entries = os.listdir(root)
+            except OSError:
+                continue
+            for entry in sorted(entries):
+                if not entry.endswith(".app"):
+                    continue
+                path = os.path.join(root, entry)
+                name = entry.removesuffix(".app")
+                info_path = os.path.join(path, "Contents", "Info.plist")
+                bundle_id = ""
+                try:
+                    import plistlib
+
+                    with open(info_path, "rb") as f:
+                        info = plistlib.load(f)
+                    bundle_id = str(info.get("CFBundleIdentifier") or "")
+                    display_name = str(
+                        info.get("CFBundleDisplayName")
+                        or info.get("CFBundleName")
+                        or name
+                    )
+                    name = display_name
+                except Exception:
+                    pass
+                if "bytemind" in bundle_id.lower() or "byteproof" in name.lower():
+                    continue
+                key = bundle_id.lower() or name.lower()
+                apps.setdefault(
+                    key,
+                    {
+                        "name": name,
+                        "bundle_id": bundle_id,
+                        "path": path,
+                    },
+                )
+        return sorted(apps.values(), key=lambda app: app["name"].lower())
+
+    @staticmethod
     def _app_icon(app: dict[str, Any]) -> QIcon:
         path = ""
         try:
+            if app.get("path") and os.path.exists(app["path"]):
+                return QFileIconProvider().icon(QFileInfo(app["path"]))
             if platform.system() == "Darwin":
                 bundle_id = app.get("bundle_id") or ""
                 if bundle_id:
@@ -1869,7 +1961,7 @@ class SettingsDialog(QDialog):
         app_list.setIconSize(QSize(28, 28))
         layout.addWidget(app_list, 1)
 
-        apps = self._running_apps_for_trigger()
+        apps = self._installed_apps_for_trigger()
         if not apps:
             layout.addWidget(QLabel("No running applications found."))
         for app in apps:
@@ -1915,6 +2007,7 @@ class SettingsDialog(QDialog):
         row = self.automation_list.currentRow()
         if row >= 0:
             self.automation_list.takeItem(row)
+            self._update_automation_summary()
 
     def pynput_to_qt(self, pynput_str: str) -> str:
         if not pynput_str:
