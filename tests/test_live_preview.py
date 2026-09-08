@@ -157,6 +157,27 @@ def test_evaluate_trigger_runs():
     assert decision == "run"
 
 
+def test_evaluate_trigger_supports_target_bundle_ids():
+    for bundle_id in (
+        "com.microsoft.Word",
+        "com.apple.iWork.Pages",
+        "com.apple.mail",
+        "com.microsoft.Outlook",
+        "com.apple.TextEdit",
+        "com.apple.Notes",
+    ):
+        decision, _ = evaluate_trigger(
+            _settings(),
+            {"bundle_id": bundle_id},
+            "this sentence has a problem",
+            True,
+            True,
+            False,
+            False,
+        )
+        assert decision == "run", bundle_id
+
+
 def test_cache_hit_and_lru():
     cache = PreviewCache()
     spans = [EditSpan("a", "b", "x", 0, 1)]
@@ -675,3 +696,28 @@ def test_preview_cache_prevents_duplicate_provider_calls(monkeypatch):
     service._previewed_text = ""
     service._sample(now=5.0)
     assert len(calls) == 1
+
+
+def test_service_renders_card_when_bounds_unavailable(monkeypatch):
+    from src import live_preview as lp
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _FakeEditor("com.apple.TextEdit", "teh cat sat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    result = {
+        "status": "ok",
+        "edits": [lp.Edit("teh", "the", "Spelling")],
+        "meta": {"provider": "fake"},
+    }
+
+    def fake_spawn(target, text, details, key):
+        service._on_done(result, key, text)
+
+    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    assert service._word_card is not None
+    assert len(service._word_card._span_rows) == 1

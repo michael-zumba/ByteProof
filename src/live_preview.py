@@ -17,6 +17,7 @@ SUPPORTED_BUNDLE_IDS = frozenset(
     {
         "com.microsoft.word",
         "com.apple.pages",
+        "com.apple.iwork.pages",
         "com.apple.mail",
         "com.microsoft.outlook",
         "com.apple.textedit",

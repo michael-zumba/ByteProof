@@ -258,6 +258,11 @@ class LivePreviewService(QObject):
                     OverlaySpan(span.before, span.after, span.reason, rect)
                 )
                 overlay_indices.append(index)
+        if not overlay_spans:
+            # The app does not expose character bounds: fall back to the
+            # floating suggestions card instead of showing nothing.
+            self._show_card(spans)
+            return
         _debug_log(
             f"LIVE RENDER: spans={len(spans)} rects={len(overlay_spans)}"
             f" start={self._selection_start} target={self._selected_target}"
@@ -283,6 +288,10 @@ class LivePreviewService(QObject):
                 )
         except Exception:
             pass
+        self._show_card(spans)
+
+    def _show_card(self, spans: list[EditSpan]) -> None:
+        """Show the floating suggestions card for the given spans."""
         if self._word_card is None:
             self._word_card = WordSuggestionCard()
             self._word_card.apply_requested.connect(self._apply_index)
