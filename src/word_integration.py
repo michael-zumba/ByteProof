@@ -405,36 +405,93 @@ class MacOSWordIntegration(WordIntegration):
     def set_live_underline(
         self, selection_start: int, rel_start: int, rel_end: int, enable: bool
     ) -> tuple[bool, str]:
-        """Apply (or clear) the pink dot-dot-dash underline on a sub-range."""
+        """Apply or restore the pink dot-dot-dash underline on a sub-range.
+
+        The mark is ephemeral: it is applied with Track Changes temporarily
+        disabled so Word never records it as a revision, and the original
+        underline and colour are captured and restored exactly when cleared.
+        """
         start = selection_start + rel_start
         end = selection_start + rel_end
-        style = "underline dot dot dash" if enable else "underline none"
-        lines = [
-            'tell application "Microsoft Word"',
-            f"set r to create range active document start {start} end {end}",
-            f"set underline of font object of r to {style}",
-        ]
         if enable:
-            lines.append("set color of font object of r to {228, 58, 91}")
-        lines.append("end tell")
+            script = f"""
+            tell application "Microsoft Word"
+                set oldTrack to track revisions of active document
+                set track revisions of active document to false
+                set r to create range active document start {start} end {end}
+                set origUnderline to underline of font object of r
+                set origColor to color of font object of r
+                set underline of font object of r to underline dot dot dash
+                set color of font object of r to {{58082, 14906, 23387}}
+                set track revisions of active document to oldTrack
+                return (origUnderline as text) & "||" & ((item 1 of origColor) as text) & "," & ((item 2 of origColor) as text) & "," & ((item 3 of origColor) as text)
+            end tell
+            """
+        else:
+            original = None
+            for entry in getattr(self, "_live_underline_ranges", []):
+                if entry.get("start") == start and entry.get("end") == end:
+                    original = entry
+                    break
+            self._restore_underline(start, end, original)
+            self._live_underline_ranges = [
+                entry
+                for entry in getattr(self, "_live_underline_ranges", [])
+                if not (entry.get("start") == start and entry.get("end") == end)
+            ]
+            return True, "Applied."
         try:
-            self._run_applescript("\n".join(lines))
+            output = self._run_applescript(script)
             if enable:
                 if not hasattr(self, "_live_underline_ranges"):
-                    self._live_underline_ranges: list[tuple[int, int]] = []
-                self._live_selection_start = selection_start
-                self._live_underline_ranges.append((rel_start, rel_end))
+                    self._live_underline_ranges: list[dict[str, Any]] = []
+                underline = "underline none"
+                color: tuple[int, int, int] | None = None
+                try:
+                    parts = (output or "").split("||", 1)
+                    if len(parts) == 2 and parts[0].strip():
+                        underline = parts[0].strip()
+                    if len(parts) == 2:
+                        channels = [int(x) for x in parts[1].split(",")[:3]]
+                        if len(channels) == 3:
+                            color = (channels[0], channels[1], channels[2])
+                except (ValueError, IndexError):
+                    pass
+                self._live_underline_ranges.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "underline": underline,
+                        "color": color,
+                    }
+                )
             return True, "Applied."
         except Exception as exc:
             return False, str(exc)
 
+    def _restore_underline(
+        self, start: int, end: int, original: dict[str, Any] | None
+    ) -> None:
+        underline = (original or {}).get("underline") or "underline none"
+        color = (original or {}).get("color") or (0, 0, 0)
+        script = f"""
+        tell application "Microsoft Word"
+            set oldTrack to track revisions of active document
+            set track revisions of active document to false
+            set r to create range active document start {start} end {end}
+            set underline of font object of r to {underline}
+            set color of font object of r to {{{color[0]}, {color[1]}, {color[2]}}}
+            set track revisions of active document to oldTrack
+        end tell
+        """
+        self._run_applescript(script)
+
     def clear_live_underlines(self) -> None:
         """Revert every underline this integration applied."""
         ranges = list(getattr(self, "_live_underline_ranges", []))
-        start = getattr(self, "_live_selection_start", 0)
         self._live_underline_ranges = []
-        for rel_start, rel_end in ranges:
-            self.set_live_underline(start, rel_start, rel_end, False)
+        for entry in ranges:
+            self._restore_underline(entry["start"], entry["end"], entry)
 
     def ensure_ready(self) -> None:
         script = """

@@ -1,5 +1,8 @@
 """Transparent overlay that draws dashed underlines and a hover popup."""
 
+import difflib
+import html
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -19,31 +22,24 @@ from PyQt6.QtWidgets import (
 
 from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
 
-# Google-inspired surface and typography.
+# Bright, Google-inspired surfaces and typography.
 SURFACE_SHEET = (
-    "QFrame { background: #FFFFFF; border: 1px solid #DADCE0;"
-    " border-radius: 14px; }"
+    "QFrame { background: #FFFFFF; border: 1px solid #E8EAED;"
+    " border-radius: 16px; }"
 )
-TITLE_SHEET = "color: #202124; font-size: 13px; font-weight: 600;"
-OLD_SHEET = (
-    "color: #C5221F; background: #FCE8E6; border-radius: 8px;"
-    " padding: 3px 8px; font-size: 13px;"
-)
-NEW_SHEET = (
-    "color: #137333; background: #E6F4EA; border-radius: 8px;"
-    " padding: 3px 8px; font-size: 13px; font-weight: 500;"
-)
-REASON_SHEET = "color: #5F6368; font-size: 11px;"
+TITLE_SHEET = "color: #202124; font-size: 14px; font-weight: 600;"
+DIFF_SHEET = "color: #202124; font-size: 14px;"
+REASON_SHEET = "color: #5F6368; font-size: 12px;"
 PRIMARY_BUTTON = (
     "QPushButton { background: #1A73E8; color: #FFFFFF; border: none;"
-    " border-radius: 18px; padding: 6px 18px; font-size: 13px;"
+    " border-radius: 20px; padding: 7px 20px; font-size: 14px;"
     " font-weight: 500; }"
     "QPushButton:hover { background: #1765CC; }"
 )
 SECONDARY_BUTTON = (
-    "QPushButton { background: transparent; color: #1A73E8;"
-    " border: 1px solid #DADCE0; border-radius: 18px; padding: 6px 18px;"
-    " font-size: 13px; font-weight: 500; }"
+    "QPushButton { background: #FFFFFF; color: #1A73E8;"
+    " border: 1px solid #DADCE0; border-radius: 20px; padding: 7px 20px;"
+    " font-size: 14px; font-weight: 500; }"
     "QPushButton:hover { background: #F8F9FA; }"
 )
 CLOSE_BUTTON = (
@@ -51,6 +47,9 @@ CLOSE_BUTTON = (
     " background: transparent; border-radius: 12px; }"
     "QPushButton:hover { background: #F1F3F4; color: #202124; }"
 )
+
+OLD_STYLE = "color:#C5221F; background:#FCE8E6;"
+NEW_STYLE = "color:#137333; background:#E6F4EA; font-weight:500;"
 
 
 @dataclass(frozen=True)
@@ -64,7 +63,7 @@ class OverlaySpan:
 def span_at_point(spans: Sequence[OverlaySpan], pos: QPoint) -> int | None:
     """Return the index of the span whose padded rect contains pos."""
     for index, span in enumerate(spans):
-        if span.rect.adjusted(-3, -4, 3, 4).contains(pos):
+        if span.rect.adjusted(-4, -8, 4, 8).contains(pos):
             return index
     return None
 
@@ -79,6 +78,37 @@ def popup_rows(span: OverlaySpan) -> list[tuple[str, str]]:
     if span.reason:
         rows.append(("reason", span.reason))
     return rows
+
+
+def diff_html(before: str, after: str, context: int = 24) -> str:
+    """Render a pinpoint word/character diff, unchanged text left normal."""
+
+    def escape(text: str) -> str:
+        return html.escape(text).replace("\n", " ")
+
+    before_tokens = re.findall(r"\S+|\s+", before)
+    after_tokens = re.findall(r"\S+|\s+", after)
+    matcher = difflib.SequenceMatcher(None, before_tokens, after_tokens)
+    parts: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old = "".join(before_tokens[i1:i2])
+        new = "".join(after_tokens[j1:j2])
+        if tag == "equal":
+            segment = escape(old)
+            if len(segment) > context * 2:
+                segment = segment[:context] + "…" + segment[-context:]
+            if segment:
+                parts.append(
+                    f"<span style='color:#202124'>{segment}</span>"
+                )
+        elif tag == "delete":
+            parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
+        elif tag == "insert":
+            parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
+        elif tag == "replace":
+            parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
+            parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
+    return "".join(parts) or escape(after)
 
 
 def clear_layout(layout: QLayout) -> None:
@@ -108,7 +138,7 @@ def _clamp_rect(rect: QRect) -> QRect:
 
 
 class _SuggestionPopup(QFrame):
-    """A compact, Google-styled single-edit card."""
+    """A compact, pinpoint single-edit card that never steals focus."""
 
     apply_requested = pyqtSignal(int)
     apply_all_requested = pyqtSignal()
@@ -118,18 +148,20 @@ class _SuggestionPopup(QFrame):
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint,
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(SURFACE_SHEET)
+        self.setMinimumWidth(280)
         self.setMaximumWidth(420)
 
     def set_span(self, index: int, span: OverlaySpan) -> None:
         layout = self.layout()
         if layout is None:
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(16, 14, 16, 14)
-            layout.setSpacing(8)
+            layout.setContentsMargins(18, 16, 18, 16)
+            layout.setSpacing(10)
         else:
             clear_layout(layout)
 
@@ -138,7 +170,7 @@ class _SuggestionPopup(QFrame):
         title = QLabel("Suggested changes")
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(24, 24)
+        close_btn.setFixedSize(26, 26)
         close_btn.setStyleSheet(CLOSE_BUTTON)
         close_btn.clicked.connect(self.dismissed.emit)
         header.addWidget(title)
@@ -146,20 +178,20 @@ class _SuggestionPopup(QFrame):
         header.addWidget(close_btn)
         layout.addLayout(header)
 
-        for style, text in popup_rows(span):
-            label = QLabel()
-            label.setWordWrap(True)
-            label.setMaximumWidth(380)
-            if style == "old":
-                label.setText(f"<s>{text}</s>")
-                label.setStyleSheet(OLD_SHEET)
-            elif style == "new":
-                label.setText(text)
-                label.setStyleSheet(NEW_SHEET)
-            else:
-                label.setText(text)
-                label.setStyleSheet(REASON_SHEET)
-            layout.addWidget(label)
+        diff_label = QLabel(diff_html(span.before, span.after))
+        diff_label.setStyleSheet(DIFF_SHEET)
+        diff_label.setWordWrap(True)
+        diff_label.setMaximumWidth(384)
+        diff_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(diff_label)
+
+        if span.reason:
+            reason = QLabel(span.reason)
+            reason.setStyleSheet(REASON_SHEET)
+            reason.setWordWrap(True)
+            layout.addWidget(reason)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
@@ -180,7 +212,6 @@ class _SuggestionPopup(QFrame):
         self.adjustSize()
 
     def place_near(self, anchor: QRect) -> None:
-        """Position below the anchor, or above it when there is no room."""
         target = QRect(
             anchor.left(),
             anchor.bottom() + 10,
@@ -240,7 +271,6 @@ class LiveOverlay(QWidget):
             and hovered < len(spans)
             and self._popup is not None
         ):
-            # A refresh should follow the moved text, not close the popup.
             self._popup.place_near(spans[hovered].rect)
 
     def hide_overlay(self) -> None:
@@ -250,7 +280,6 @@ class LiveOverlay(QWidget):
         self.dismissed.emit()
 
     def show_popup(self, index: int) -> None:
-        """Show the hover popup for a span (called by the input monitor)."""
         self._hovered = index
         self._show_popup(index)
         self.hovered.emit(index)
@@ -305,18 +334,20 @@ class WordSuggestionCard(QWidget):
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint,
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(SURFACE_SHEET)
-        self.setMaximumWidth(460)
+        self.setMinimumWidth(320)
+        self.setMaximumWidth(480)
 
     def set_spans(self, spans: list[EditSpan]) -> None:
         layout = self.layout()
         if layout is None:
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(16, 14, 16, 14)
-            layout.setSpacing(8)
+            layout.setContentsMargins(18, 16, 18, 16)
+            layout.setSpacing(10)
         else:
             clear_layout(layout)
 
@@ -325,7 +356,7 @@ class WordSuggestionCard(QWidget):
         title = QLabel("Suggested changes")
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(24, 24)
+        close_btn.setFixedSize(26, 26)
         close_btn.setStyleSheet(CLOSE_BUTTON)
         close_btn.clicked.connect(self.dismissed.emit)
         header.addWidget(title)
@@ -336,33 +367,26 @@ class WordSuggestionCard(QWidget):
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(8)
+        body_layout.setSpacing(10)
         for index, span in enumerate(spans):
-            row = QFrame()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 2, 0, 2)
-            row_layout.setSpacing(8)
-            old_label = QLabel(f"<s>{span.before}</s>")
-            old_label.setStyleSheet(OLD_SHEET)
-            old_label.setWordWrap(True)
-            old_label.setMaximumWidth(160)
-            arrow = QLabel("→")
-            arrow.setStyleSheet("color: #9AA0A6;")
-            new_label = QLabel(span.after)
-            new_label.setStyleSheet(NEW_SHEET)
-            new_label.setWordWrap(True)
-            new_label.setMaximumWidth(180)
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            diff_label = QLabel(diff_html(span.before, span.after))
+            diff_label.setStyleSheet(DIFF_SHEET)
+            diff_label.setWordWrap(True)
+            diff_label.setMaximumWidth(320)
+            diff_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
             apply_btn = QPushButton("Apply")
             apply_btn.setStyleSheet(PRIMARY_BUTTON)
             apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             apply_btn.clicked.connect(
                 lambda _checked=False, i=index: self.apply_requested.emit(i)
             )
-            row_layout.addWidget(old_label)
-            row_layout.addWidget(arrow)
-            row_layout.addWidget(new_label, 1)
-            row_layout.addWidget(apply_btn)
-            body_layout.addWidget(row)
+            row.addWidget(diff_label, 1)
+            row.addWidget(apply_btn, 0, Qt.AlignmentFlag.AlignTop)
+            body_layout.addLayout(row)
             if span.reason:
                 reason = QLabel(span.reason)
                 reason.setStyleSheet(REASON_SHEET)

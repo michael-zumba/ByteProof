@@ -434,6 +434,32 @@ def test_span_at_point_hits_inside_rect():
     assert span_at_point(spans, QPoint(200, 15)) is None
 
 
+def test_span_at_point_has_wide_hover_target():
+    from PyQt6.QtCore import QPoint, QRect
+
+    from src.live_overlay import OverlaySpan, span_at_point
+
+    spans = [OverlaySpan("a", "b", "x", QRect(10, 10, 100, 20))]
+    assert span_at_point(spans, QPoint(50, 36)) == 0  # below rect, in pad
+
+
+def test_diff_html_pinpoints_changed_words():
+    from src.live_overlay import diff_html
+
+    rendered = diff_html("He go to school", "He goes to school")
+    assert "go</s>" in rendered
+    assert "goes</span>" in rendered
+    assert "He" in rendered and "to school" in rendered
+
+
+def test_diff_html_replacement_and_escape():
+    from src.live_overlay import diff_html
+
+    rendered = diff_html("teh cat <x>", "the cat <x>")
+    assert "teh</s>" in rendered and "the</span>" in rendered
+    assert "&lt;x&gt;" in rendered
+
+
 def test_popup_rows_track_changes_styles():
     from PyQt6.QtCore import QRect
 
@@ -649,6 +675,8 @@ def test_word_set_live_underline_builds_dotted_script(monkeypatch):
     script = captured[-1].decode("utf-8")
     assert "underline dot dot dash" in script
     assert "start 510 end 513" in script
+    assert "set track revisions of active document to false" in script
+    assert "58082, 14906, 23387" in script
 
 
 def test_load_runtime_settings_includes_live_preview_defaults(monkeypatch, tmp_path):
@@ -855,6 +883,33 @@ def test_card_and_popup_titles_are_suggested_changes():
         if label.text() == "Suggested changes"
     ]
     assert titles
+
+
+class _FakeCursor:
+    def __init__(self, point):
+        self.p = point
+
+    def pos(self):
+        return self.p
+
+
+def test_word_card_keeps_position_across_refresh(monkeypatch):
+    from PyQt6.QtCore import QPoint
+
+    from src import live_service as ls
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    fake = _FakeCursor(QPoint(100, 100))
+    monkeypatch.setattr(ls, "QCursor", fake)
+    spans = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    service._show_card(spans)
+    first_position = service._word_card.pos()
+    fake.p = QPoint(700, 700)
+    service._show_card(spans)
+    assert service._word_card.pos() == first_position
 
 
 def test_card_rebuild_leaves_exactly_one_of_each_control():

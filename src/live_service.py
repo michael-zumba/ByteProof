@@ -368,10 +368,16 @@ class LivePreviewService(QObject):
             self._word_card = WordSuggestionCard()
             self._word_card.apply_requested.connect(self._apply_mark)
             self._word_card.apply_all_requested.connect(self._apply_all)
-            self._word_card.dismissed.connect(self._clear_marks)
+            self._word_card.dismissed.connect(self._hide_word_card)
+        was_visible = self._word_card.isVisible()
         self._word_card.set_spans(spans)
+        if not was_visible:
+            self._word_card.place_near(QCursor.pos())
         self._word_card.show()
-        self._word_card.place_near(QCursor.pos())
+
+    def _hide_word_card(self) -> None:
+        if self._word_card is not None:
+            self._word_card.hide()
 
     @staticmethod
     def _rect_from_bounds(
