@@ -21,6 +21,9 @@
 - [x] Second polish round: Google-styled popup, single-control rebuild fix,
       working single Apply, accumulating marks across selections, hover
       survival across rect refreshes, wider AX search for Pages
+- [x] Third polish round: ephemeral non-tracked Word underlines with exact
+      restore, pinpoint word diffs, stable non-activating popup/card,
+      wider hover targets, brighter UI
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence

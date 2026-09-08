@@ -83,6 +83,31 @@
 - Mail compose remains a platform limit: its WebKit body never reports the
   selection; the hotkey proofread path still works there.
 
+## Third polish round (user feedback, live)
+
+- Word underlines are now fully ephemeral: applied with Track Changes
+  temporarily disabled (no tracked revision is recorded), the original
+  underline and 16-bit RGB colour are captured, and clearing restores them
+  exactly. Verified live: mark → `underline dot dot dash`/pink, clear →
+  original `underline none`/blue. Nothing survives ByteProof quit, an app
+  switch, Apply, Escape, or the settings toggle.
+- Word RGB colours use 16-bit channels; the mark colour is now the correct
+  `#E23A5B` equivalent `{58082, 14906, 23387}` (previously the 8-bit values
+  were silently ignored and the mark was black).
+- Suggestion text now shows a pinpoint word-level diff (only the changed words
+  are struck/green), not a full-phrase deletion. Unit-tested.
+- The Word card no longer follows the mouse on refresh; it positions once and
+  stays put, so buttons can be clicked. The popup and card also gained
+  `WindowDoesNotAcceptFocus`, so clicking them never raises the ByteProof
+  window. Hover hit padding was widened vertically for easier targeting.
+- Popup/card restyled brighter (14px text, larger paddings, pill buttons).
+- Pages live automation is not possible from this host: synthetic clicks and
+  keystrokes land in the wrong app (a few test keystrokes ended up in the
+  ChatGPT window and were previewed, but never applied). The AX search is
+  broadened (focused-window subtree), so Pages must be verified with one real
+  click-and-select; if it still fails, the next step is a live AX dump while
+  the user holds a selection in Pages.
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by
