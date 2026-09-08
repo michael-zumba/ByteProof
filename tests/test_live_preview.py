@@ -354,3 +354,26 @@ def test_ax_replace_range_guards_non_darwin(monkeypatch):
     ok, message = editor.ax_replace_range({"pid": 1}, 0, 5, "x")
     assert ok is False
     assert "macOS" in message
+
+
+def test_span_at_point_hits_inside_rect():
+    from PyQt6.QtCore import QPoint, QRect
+
+    from src.live_overlay import OverlaySpan, span_at_point
+
+    spans = [OverlaySpan("a", "b", "x", QRect(10, 10, 100, 20))]
+    assert span_at_point(spans, QPoint(50, 15)) == 0
+    assert span_at_point(spans, QPoint(200, 15)) is None
+
+
+def test_popup_rows_track_changes_styles():
+    from PyQt6.QtCore import QRect
+
+    from src.live_overlay import OverlaySpan, popup_rows
+
+    rows = popup_rows(
+        OverlaySpan("teh", "the", "Spelling", QRect(0, 0, 10, 10))
+    )
+    assert ("old", "teh") in rows
+    assert ("new", "the") in rows
+    assert ("reason", "Spelling") in rows
