@@ -3,9 +3,9 @@
 ## Automated tests
 
 - `QT_QPA_PLATFORM=offscreen ./venv/bin/python -m pytest tests/test_live_preview.py -q`
-  → `37 passed` (parse, mapping incl. repeated occurrences, trigger decisions,
-  cache/LRU, settings schema, Word AppleScript scripts, overlay render, service
-  cycle, cache efficiency).
+  → `39 passed` (parse, mapping incl. repeated occurrences, trigger decisions
+  for every target bundle id, cache/LRU, settings schema, Word AppleScript
+  scripts, overlay render, service cycle, cache efficiency, card fallback).
 - `QT_QPA_PLATFORM=offscreen ./venv/bin/python tests/test_smoke.py`
   → `ALL_SMOKE_TESTS_PASSED` (existing behavior unchanged after the
   `_request_completion` refactor).
@@ -35,7 +35,12 @@
   not expose selected text through AX until content exists, so live preview is
   inert there rather than failing (documented limitation).
 - Pages: blocked by a macOS automation-permission prompt during the campaign;
-  code path is shared with TextEdit.
+  code path is shared with TextEdit. The real Pages bundle id
+  (`com.apple.iWork.Pages`) was added and is covered by a unit test; a live
+  Pages check still needs a human click-and-type because synthetic keystrokes
+  do not land in Pages' document body.
+- Apps that expose selection but not character bounds now fall back to the
+  floating suggestions card instead of showing nothing (unit-tested).
 
 ## Efficiency
 
@@ -49,6 +54,8 @@
 
 ## Build
 
-- `./build_macos.sh arm64` completed: app signed with the ByteMind Developer ID,
+- `./build_macos.sh arm64` completed twice: app signed with the ByteMind Developer ID,
   notarized and stapled (Apple status `Accepted` for both app and installer).
+- The final installer was rebuilt after the Pages bundle-id and card-fallback
+  fixes, so the artifact includes them.
 - Installer: `ByteProof_Installer_AppleSilicon.dmg`.
