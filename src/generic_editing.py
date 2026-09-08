@@ -349,6 +349,43 @@ class GenericTextEditor:
         return None, None
 
     @staticmethod
+    def _mac_ax_text_element(pid: int) -> tuple[Any, Any]:
+        """Find the element that actually owns the editable text.
+
+        Some apps focus a container (scroll area, canvas) while the text view
+        with the selection lives one or two levels deeper. Walk a bounded
+        subtree and return the first element that exposes the selected-text
+        attribute, falling back to the focused element.
+        """
+        AS, focused = GenericTextEditor._mac_ax_focused(pid)
+        if AS is None:
+            return None, None
+
+        def is_text_target(el: Any) -> bool:
+            try:
+                names = AS.AXUIElementCopyAttributeNames(el, None)[1] or []
+                return "AXSelectedText" in names and "AXValue" in names
+            except Exception:
+                return False
+
+        queue: list[Any] = [focused]
+        visited = 0
+        while queue and visited < 60:
+            el = queue.pop(0)
+            visited += 1
+            if is_text_target(el):
+                return AS, el
+            try:
+                _, children = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXChildrenAttribute, None
+                )
+                if children:
+                    queue.extend(list(children)[:24])
+            except Exception:
+                pass
+        return AS, focused
+
+    @staticmethod
     def _mac_frontmost_app() -> dict[str, Any]:
         try:
             from AppKit import NSWorkspace
@@ -558,7 +595,7 @@ class GenericTextEditor:
         pid = target.get("pid")
         if not pid:
             return result
-        AS, focused = GenericTextEditor._mac_ax_focused(pid)
+        AS, focused = GenericTextEditor._mac_ax_text_element(pid)
         if AS is None:
             return result
         try:
@@ -609,7 +646,9 @@ class GenericTextEditor:
                 return []
         except Exception:
             return []
-        AS, focused = GenericTextEditor._mac_ax_focused(target.get("pid") or 0)
+        AS, focused = GenericTextEditor._mac_ax_text_element(
+            target.get("pid") or 0
+        )
         if AS is None:
             return []
         rects: list[tuple[float, float, float, float]] = []
@@ -648,7 +687,9 @@ class GenericTextEditor:
                 )
         except Exception:
             return False, "Accessibility permission could not be checked."
-        AS, focused = GenericTextEditor._mac_ax_focused(target.get("pid") or 0)
+        AS, focused = GenericTextEditor._mac_ax_text_element(
+            target.get("pid") or 0
+        )
         if AS is None:
             return False, "Could not read the focused text field."
         if hasattr(AS, "AXUIElementSetParameterizedAttributeValue") and hasattr(

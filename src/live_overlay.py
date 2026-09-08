@@ -6,15 +6,45 @@ from dataclasses import dataclass
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QRegion
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
+
+CARD_SHEET = (
+    "QFrame { background: #FFFFFF; border: 1px solid #E8E4E0;"
+    " border-radius: 12px; }"
+)
+TITLE_SHEET = "color: #44403C; font-size: 12px; font-weight: 700;"
+OLD_SHEET = (
+    "color: #B91C1C; background: #FEF2F2; border-radius: 6px;"
+    " padding: 2px 7px; font-size: 12px;"
+)
+NEW_SHEET = (
+    "color: #166534; background: #F0FDF4; border-radius: 6px;"
+    " padding: 2px 7px; font-size: 12px; font-weight: 600;"
+)
+REASON_SHEET = "color: #78716C; font-size: 11px;"
+PRIMARY_BUTTON = (
+    "QPushButton { background: #1A3A2A; color: #FFFFFF;"
+    " border: 1px solid #143024; border-radius: 8px; padding: 5px 14px;"
+    " font-size: 12px; font-weight: 700; }"
+    "QPushButton:hover { background: #143024; }"
+)
+SECONDARY_BUTTON = (
+    "QPushButton { background: #EDF3EF; color: #143024;"
+    " border: 1px solid #A9C7B3; border-radius: 8px; padding: 5px 14px;"
+    " font-size: 12px; font-weight: 600; }"
+    "QPushButton:hover { background: #D6E4DB; }"
+)
 
 
 @dataclass(frozen=True)
@@ -45,11 +75,34 @@ def popup_rows(span: OverlaySpan) -> list[tuple[str, str]]:
     return rows
 
 
+def _add_shadow(widget: QWidget) -> None:
+    effect = QGraphicsDropShadowEffect(widget)
+    effect.setBlurRadius(24)
+    effect.setOffset(0, 6)
+    effect.setColor(QColor(0, 0, 0, 36))
+    widget.setGraphicsEffect(effect)
+
+
+def _clamp_rect(rect: QRect) -> QRect:
+    """Keep a window inside the primary screen's available geometry."""
+    app = QApplication.instance()
+    if app is None:
+        return rect
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return rect
+    area = screen.availableGeometry()
+    x = max(area.left(), min(rect.x(), area.right() - rect.width()))
+    y = max(area.top(), min(rect.y(), area.bottom() - rect.height()))
+    return QRect(x, y, rect.width(), rect.height())
+
+
 class _SuggestionPopup(QFrame):
-    """A small frameless card that never steals focus."""
+    """A compact, premium single-edit card that never steals focus."""
 
     apply_requested = pyqtSignal(int)
     apply_all_requested = pyqtSignal()
+    dismissed = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__(
@@ -58,52 +111,86 @@ class _SuggestionPopup(QFrame):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setStyleSheet(
-            "QFrame { background: #FFFFFF; border: 1px solid #E8E4E0;"
-            " border-radius: 10px; }"
-        )
+        self.setStyleSheet(CARD_SHEET)
+        self.setMaximumWidth(400)
+        _add_shadow(self)
 
     def set_span(self, index: int, span: OverlaySpan) -> None:
         layout = self.layout()
         if layout is None:
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(12, 10, 12, 10)
-            layout.setSpacing(4)
+            layout.setContentsMargins(14, 12, 14, 12)
+            layout.setSpacing(6)
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
 
+        header = QHBoxLayout()
+        title = QLabel("Suggested changes")
+        title.setStyleSheet(TITLE_SHEET)
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setStyleSheet(
+            "QPushButton { border: none; color: #A8A29E; font-size: 14px; }"
+            "QPushButton:hover { color: #44403C; }"
+        )
+        close_btn.clicked.connect(self.dismissed.emit)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(close_btn)
+        layout.addLayout(header)
+
         for style, text in popup_rows(span):
             label = QLabel()
             label.setWordWrap(True)
+            label.setMaximumWidth(372)
             if style == "old":
-                label.setText(f"<s style='color:#B91C1C'>{text}</s>")
-                label.setStyleSheet("color:#B91C1C; font-size:12px;")
+                label.setText(f"<s>{text}</s>")
+                label.setStyleSheet(OLD_SHEET)
             elif style == "new":
-                label.setText(f"<span style='color:#166534'>{text}</span>")
-                label.setStyleSheet(
-                    "color:#166534; font-size:12px; font-weight:600;"
-                )
+                label.setText(text)
+                label.setStyleSheet(NEW_SHEET)
             else:
                 label.setText(text)
-                label.setStyleSheet("color:#78716C; font-size:11px;")
+                label.setStyleSheet(REASON_SHEET)
             layout.addWidget(label)
 
+        buttons = QHBoxLayout()
         apply_btn = QPushButton("Apply")
+        apply_btn.setStyleSheet(PRIMARY_BUTTON)
+        apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_btn.clicked.connect(
             lambda: self.apply_requested.emit(index)
         )
-        layout.addWidget(apply_btn)
         apply_all_btn = QPushButton("Apply all")
+        apply_all_btn.setStyleSheet(SECONDARY_BUTTON)
+        apply_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_all_btn.clicked.connect(self.apply_all_requested.emit)
-        layout.addWidget(apply_all_btn)
+        buttons.addWidget(apply_btn)
+        buttons.addWidget(apply_all_btn)
+        buttons.addStretch()
+        layout.addLayout(buttons)
         self.adjustSize()
+
+    def place_near(self, anchor: QRect) -> None:
+        """Position below the anchor, or above it when there is no room."""
+        target = QRect(
+            anchor.left(),
+            anchor.bottom() + 8,
+            self.width(),
+            self.height(),
+        )
+        area = _clamp_rect(target)
+        if area.y() != target.y():
+            target.moveTop(max(0, anchor.top() - self.height() - 8))
+            area = _clamp_rect(target)
+        self.move(area.topLeft())
 
 
 class LiveOverlay(QWidget):
-    """A frameless, mostly click-through window that hosts underlines."""
+    """A frameless, click-through window that hosts underlines."""
 
     hovered = pyqtSignal(int)
     apply_requested = pyqtSignal(int)
@@ -149,6 +236,16 @@ class LiveOverlay(QWidget):
         self.hide()
         self.dismissed.emit()
 
+    def show_popup(self, index: int) -> None:
+        """Show the hover popup for a span (called by the input monitor)."""
+        self._hovered = index
+        self._show_popup(index)
+        self.hovered.emit(index)
+
+    def hide_popup(self) -> None:
+        self._hovered = None
+        self._hide_popup()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         pen = QPen(QColor(UNDERLINE_COLOR_HEX))
@@ -163,26 +260,17 @@ class LiveOverlay(QWidget):
             )
         painter.end()
 
-    def show_popup(self, index: int) -> None:
-        """Show the hover popup for a span (called by the input monitor)."""
-        self._hovered = index
-        self._show_popup(index)
-        self.hovered.emit(index)
-
-    def hide_popup(self) -> None:
-        self._hovered = None
-        self._hide_popup()
-
     def _show_popup(self, index: int) -> None:
         self._hide_popup()
+        if not (0 <= index < len(self._spans)):
+            return
         span = self._spans[index]
         popup = _SuggestionPopup()
         popup.set_span(index, span)
         popup.apply_requested.connect(self.apply_requested)
         popup.apply_all_requested.connect(self.apply_all_requested)
-        x = span.rect.left()
-        y = span.rect.bottom() + 6
-        popup.move(x, y)
+        popup.dismissed.connect(self.hide_popup)
+        popup.place_near(span.rect)
         popup.show()
         self._popup = popup
 
@@ -196,10 +284,9 @@ class LiveOverlay(QWidget):
 class WordSuggestionCard(QWidget):
     """A cursor-anchored card listing all Word edits in track-changes style.
 
-    Word does not expose character bounds through the Accessibility API, so
-    the per-word hover popup cannot be hit-tested there. Instead, Word gets
-    native in-document underlines plus this card, which appears next to the
-    pointer as soon as the preview finishes.
+    Word exposes no character bounds through Accessibility, so it gets native
+    in-document underlines plus this card, which follows the pointer and stays
+    available while the marks persist.
     """
 
     apply_requested = pyqtSignal(int)
@@ -213,65 +300,93 @@ class WordSuggestionCard(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setStyleSheet(
-            "WordSuggestionCard { background: #FFFFFF;"
-            " border: 1px solid #E8E4E0; border-radius: 10px; }"
-        )
-        self._span_rows: dict[int, QFrame] = {}
+        self.setStyleSheet(CARD_SHEET)
+        self.setMaximumWidth(440)
+        _add_shadow(self)
 
     def set_spans(self, spans: list[EditSpan]) -> None:
         layout = self.layout()
         if layout is None:
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(12, 10, 12, 10)
+            layout.setContentsMargins(14, 12, 14, 12)
             layout.setSpacing(6)
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        self._span_rows = {}
 
         header = QHBoxLayout()
-        title = QLabel("Live suggestions")
-        title.setStyleSheet("color:#44403C; font-size:12px; font-weight:700;")
+        title = QLabel("Suggested changes")
+        title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(22, 22)
+        close_btn.setFixedSize(20, 20)
+        close_btn.setStyleSheet(
+            "QPushButton { border: none; color: #A8A29E; font-size: 14px; }"
+            "QPushButton:hover { color: #44403C; }"
+        )
         close_btn.clicked.connect(self.dismissed.emit)
         header.addWidget(title)
         header.addStretch()
         header.addWidget(close_btn)
         layout.addLayout(header)
 
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
         for index, span in enumerate(spans):
             row = QFrame()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 2, 0, 2)
-            old_label = QLabel(f"<s style='color:#B91C1C'>{span.before}</s>")
-            old_label.setStyleSheet("color:#B91C1C; font-size:12px;")
-            arrow_label = QLabel("→")
-            new_label = QLabel(
-                f"<span style='color:#166534'>{span.after}</span>"
-            )
-            new_label.setStyleSheet(
-                "color:#166534; font-size:12px; font-weight:600;"
-            )
-            reason_label = QLabel(span.reason)
-            reason_label.setStyleSheet("color:#78716C; font-size:11px;")
+            row_layout.setSpacing(6)
+            old_label = QLabel(f"<s>{span.before}</s>")
+            old_label.setStyleSheet(OLD_SHEET)
+            old_label.setWordWrap(True)
+            old_label.setMaximumWidth(150)
+            arrow = QLabel("→")
+            arrow.setStyleSheet("color: #A8A29E;")
+            new_label = QLabel(span.after)
+            new_label.setStyleSheet(NEW_SHEET)
+            new_label.setWordWrap(True)
+            new_label.setMaximumWidth(170)
             apply_btn = QPushButton("Apply")
+            apply_btn.setStyleSheet(PRIMARY_BUTTON)
+            apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             apply_btn.clicked.connect(
                 lambda _checked=False, i=index: self.apply_requested.emit(i)
             )
             row_layout.addWidget(old_label)
-            row_layout.addWidget(arrow_label)
+            row_layout.addWidget(arrow)
             row_layout.addWidget(new_label, 1)
-            if span.reason:
-                row_layout.addWidget(reason_label)
             row_layout.addWidget(apply_btn)
-            layout.addWidget(row)
-            self._span_rows[index] = row
+            body_layout.addWidget(row)
+            if span.reason:
+                reason = QLabel(span.reason)
+                reason.setStyleSheet(REASON_SHEET)
+                reason.setWordWrap(True)
+                body_layout.addWidget(reason)
 
+        if len(spans) > 5:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(body)
+            scroll.setMaximumHeight(360)
+            scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+            layout.addWidget(scroll)
+        else:
+            layout.addWidget(body)
+
+        buttons = QHBoxLayout()
         apply_all_btn = QPushButton("Apply all")
+        apply_all_btn.setStyleSheet(PRIMARY_BUTTON)
+        apply_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_all_btn.clicked.connect(self.apply_all_requested.emit)
-        layout.addWidget(apply_all_btn)
+        buttons.addWidget(apply_all_btn)
+        buttons.addStretch()
+        layout.addLayout(buttons)
         self.adjustSize()
+
+    def place_near(self, point: QPoint) -> None:
+        target = QRect(point.x() + 14, point.y() + 14, self.width(), self.height())
+        self.move(_clamp_rect(target).topLeft())

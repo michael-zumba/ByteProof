@@ -3835,9 +3835,6 @@ class ProofreaderApp(QMainWindow):
             self.live_service = LivePreviewService(self)
             self.live_service.refresh_settings(self.settings)
             self.live_service.preview_error.connect(self._on_live_preview_error)
-            self.live_service.apply_all_requested.connect(
-                self.run_proofread_task
-            )
             if self.settings.get("live_preview", {}).get("enabled", True):
                 self.live_service.start()
             app_inst = QApplication.instance()

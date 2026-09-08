@@ -1,14 +1,12 @@
 """Orchestrates live-preview sampling, provider calls, rendering, and apply."""
 
-import threading
 import time
 from typing import Any
 
 from PyQt6.QtCore import QObject, QPoint, QRect, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 
-from .generic_editing import get_generic_editor
-from .generic_editing import _debug_log
+from .generic_editing import _debug_log, get_generic_editor
 from .live_overlay import (
     LiveOverlay,
     OverlaySpan,
@@ -78,26 +76,28 @@ class LivePreviewService(QObject):
         self._overlay = LiveOverlay()
         self._cache = PreviewCache()
         self._fingerprint = ""
-        self._selection_start = 0
-        self._selection_text = ""
-        self._selected_target: dict[str, Any] = {}
-        self._spans: list[EditSpan] = []
-        self._is_word = False
+        self._marks: list[EditSpan] = []
+        self._mark_target: dict[str, Any] = {}
+        self._mark_start = 0
+        self._mark_is_word = False
+        self._mark_rects: list[QRect] = []
+        self._overlay_spans: list[OverlaySpan] = []
+        self._overlay_indices: list[int] = []
         self._seen_text = ""
         self._changed_at = 0.0
         self._previewed_text = ""
         self._worker: PreviewWorker | None = None
         self._timer: QTimer | None = None
         self._word_card: WordSuggestionCard | None = None
-        self._overlay_spans: list[OverlaySpan] = []
-        self._overlay_indices: list[int] = []
         self._tap: Any = None
         self._tap_source: Any = None
         self._tap_callback_ref: Any = None
         self._hovered: int | None = None
         self._last_hover_ts = 0.0
-        self._overlay.apply_requested.connect(self._apply_overlay_index)
-        self._overlay.apply_all_requested.connect(self.apply_all_requested)
+        self._overlay.apply_requested.connect(self._apply_overlay_mark)
+        self._overlay.apply_all_requested.connect(self._apply_all)
+
+    # --- lifecycle ---
 
     def start(self) -> None:
         if self._timer is None:
@@ -109,16 +109,17 @@ class LivePreviewService(QObject):
     def stop(self) -> None:
         if self._timer is not None:
             self._timer.stop()
-        self._stop_mouse_monitor()
         self._seen_text = ""
         self._previewed_text = ""
-        self._clear_preview()
+        self._clear_marks()
 
     def refresh_settings(self, settings: dict[str, Any]) -> None:
         self._settings = settings
         self._fingerprint = settings_fingerprint(settings)
         if not settings.get("live_preview", {}).get("enabled", True):
-            self._clear_preview()
+            self._clear_marks()
+
+    # --- sampling ---
 
     def _poll(self) -> None:
         try:
@@ -131,11 +132,10 @@ class LivePreviewService(QObject):
             return
         target = self._editor.frontmost_app()
         if not target:
-            self._clear_preview()
             return
-        self._is_word = bool(getattr(self._editor, "is_word", lambda _t: False)(target))
+        is_word = bool(getattr(self._editor, "is_word", lambda _t: False)(target))
         permission_ok, _ = self._editor.permission_status()
-        if self._is_word:
+        if is_word:
             from .word_integration import get_word_integration
 
             try:
@@ -154,11 +154,17 @@ class LivePreviewService(QObject):
         else:
             details = self._editor.selection_details(target)
         text = details.get("text") or ""
+
+        # Switching to a different app discards marks from the previous one.
+        if self._marks and self._target_changed(target):
+            self._clear_marks()
+
         if text != self._seen_text:
             self._seen_text = text
             self._changed_at = now
-            if self._spans:
-                self._clear_preview()
+            # Allow the same selection to be previewed again later.
+            self._previewed_text = ""
+
         stable = now - self._changed_at >= self._delay() / 1000.0
         decision, _reason = evaluate_trigger(
             self._settings,
@@ -170,13 +176,12 @@ class LivePreviewService(QObject):
             text == self._previewed_text,
         )
         if decision != "run":
-            if decision not in ("unchanged", "not_stable", "empty"):
+            if decision not in ("unchanged", "not_stable", "empty", "self"):
                 _debug_log(f"LIVE SKIP: {decision} app={target.get('name')!r}")
             return
-        self._selection_text = text
-        self._selected_target = target
-        self._selection_start = (details.get("range") or (0, 0))[0]
+
         self._previewed_text = text
+        selection_start = (details.get("range") or (0, 0))[0]
         key = preview_cache_key(
             str(target.get("bundle_id", "")),
             text,
@@ -186,10 +191,18 @@ class LivePreviewService(QObject):
         )
         cached = self._cache.get(key)
         if cached is not None:
-            self._spans = cached
-            self._render(cached)
+            self._set_marks(cached, target, selection_start, is_word)
             return
-        self._spawn_preview(target, text, details, key)
+        self._clear_marks()
+        self._spawn_preview(target, text, details, key, selection_start, is_word)
+
+    def _target_changed(self, target: dict[str, Any]) -> bool:
+        old = self._mark_target
+        if not old:
+            return False
+        return old.get("pid") != target.get("pid") or str(
+            old.get("bundle_id", "")
+        ) != str(target.get("bundle_id", ""))
 
     def _delay(self) -> int:
         return int(
@@ -198,16 +211,18 @@ class LivePreviewService(QObject):
             )
         )
 
+    # --- provider ---
+
     def _spawn_preview(
         self,
         target: dict[str, Any],
         text: str,
         details: dict[str, Any],
         key: str,
+        selection_start: int,
+        is_word: bool,
     ) -> None:
-        _debug_log(
-            f"LIVE PREVIEW: app={target.get('name')!r} chars={len(text)}"
-        )
+        _debug_log(f"LIVE PREVIEW: app={target.get('name')!r} chars={len(text)}")
         self._worker = PreviewWorker(
             self._settings,
             target,
@@ -216,40 +231,67 @@ class LivePreviewService(QObject):
             details.get("context_after", ""),
         )
         self._worker.done.connect(
-            lambda result, k=key, t=text: self._on_done(result, k, t)
+            lambda result, k=key, t=text, tg=target, s=selection_start, w=is_word: self._on_done(
+                result, k, t, tg, s, w
+            )
         )
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
-    def _on_done(self, result: dict[str, Any], key: str, text: str) -> None:
+    def _on_done(
+        self,
+        result: dict[str, Any],
+        key: str,
+        text: str,
+        target: dict[str, Any],
+        selection_start: int,
+        is_word: bool,
+    ) -> None:
         self._worker = None
         if text != self._seen_text:
             return
         spans = map_edits_to_ranges(text, result.get("edits") or [])
-        _debug_log(f"LIVE DONE: edits={len(spans)} provider={result.get('meta', {}).get('provider')}")
+        _debug_log(
+            f"LIVE DONE: edits={len(spans)} "
+            f"provider={result.get('meta', {}).get('provider')}"
+        )
         self._cache.put(key, spans)
-        self._spans = spans
-        self._render(spans)
+        self._set_marks(spans, target, selection_start, is_word)
 
     def _on_failed(self, message: str) -> None:
         self._worker = None
-        self._clear_preview()
+        self._clear_marks()
         _debug_log(f"LIVE ERROR: {message}")
         self.preview_error.emit(message)
 
-    def _render(self, spans: list[EditSpan]) -> None:
+    # --- marks and rendering ---
+
+    def _set_marks(
+        self,
+        spans: list[EditSpan],
+        target: dict[str, Any],
+        selection_start: int,
+        is_word: bool,
+    ) -> None:
+        self._marks = spans
+        self._mark_target = target
+        self._mark_start = selection_start
+        self._mark_is_word = is_word
         if not spans:
-            self._clear_preview()
+            self._clear_marks()
             return
-        if getattr(self, "_is_word", False):
+        if is_word:
             self._render_word(spans)
-            return
+        else:
+            self._render_generic(spans)
+
+    def _render_generic(self, spans: list[EditSpan]) -> None:
         overlay_spans: list[OverlaySpan] = []
         overlay_indices: list[int] = []
         for index, span in enumerate(spans):
             bounds = self._editor.ax_bounds_for_range(
-                self._selected_target,
-                self._selection_start + span.start,
+                self._mark_target,
+                self._mark_start + span.start,
                 span.end - span.start,
             )
             rect = self._rect_from_bounds(bounds)
@@ -258,23 +300,15 @@ class LivePreviewService(QObject):
                     OverlaySpan(span.before, span.after, span.reason, rect)
                 )
                 overlay_indices.append(index)
-        if not overlay_spans:
-            # The app does not expose character bounds: fall back to the
-            # floating suggestions card instead of showing nothing.
-            self._show_card(spans)
-            return
-        _debug_log(
-            f"LIVE RENDER: spans={len(spans)} rects={len(overlay_spans)}"
-            f" start={self._selection_start} target={self._selected_target}"
-        )
-        self._overlay.set_spans(overlay_spans)
         self._overlay_spans = overlay_spans
         self._overlay_indices = overlay_indices
-        self._start_mouse_monitor()
-        _debug_log(
-            f"LIVE OVERLAY: visible={self._overlay.isVisible()}"
-            f" geometry={self._overlay.geometry().getRect()}"
-        )
+        if not overlay_spans:
+            self._mark_rects = []
+            self._show_card(spans)
+            return
+        self._mark_rects = [span.rect for span in overlay_spans]
+        self._overlay.set_spans(overlay_spans)
+        self._start_tap()
 
     def _render_word(self, spans: list[EditSpan]) -> None:
         from .word_integration import get_word_integration
@@ -284,23 +318,24 @@ class LivePreviewService(QObject):
             word.clear_live_underlines()
             for span in spans:
                 word.set_live_underline(
-                    self._selection_start, span.start, span.end, True
+                    self._mark_start, span.start, span.end, True
                 )
         except Exception:
             pass
+        self._mark_rects = []
         self._show_card(spans)
+        self._start_tap()
 
     def _show_card(self, spans: list[EditSpan]) -> None:
         """Show the floating suggestions card for the given spans."""
         if self._word_card is None:
             self._word_card = WordSuggestionCard()
-            self._word_card.apply_requested.connect(self._apply_index)
-            self._word_card.apply_all_requested.connect(self.apply_all_requested)
-            self._word_card.dismissed.connect(self._clear_preview)
+            self._word_card.apply_requested.connect(self._apply_mark)
+            self._word_card.apply_all_requested.connect(self._apply_all)
+            self._word_card.dismissed.connect(self._clear_marks)
         self._word_card.set_spans(spans)
-        cursor = QCursor.pos()
-        self._word_card.move(cursor.x() + 12, cursor.y() + 12)
         self._word_card.show()
+        self._word_card.place_near(QCursor.pos())
 
     @staticmethod
     def _rect_from_bounds(
@@ -319,66 +354,20 @@ class LivePreviewService(QObject):
             int(max(bottoms) - min(ys)),
         )
 
-    def _apply_index(self, index: int) -> None:
-        if not (0 <= index < len(self._spans)):
-            return
-        self._apply_span(self._spans[index])
+    # --- input (Quartz event tap, macOS) ---
 
-    def _apply_overlay_index(self, overlay_index: int) -> None:
-        if not (0 <= overlay_index < len(self._overlay_indices)):
-            return
-        span_index = self._overlay_indices[overlay_index]
-        if not (0 <= span_index < len(self._spans)):
-            return
-        self._apply_span(self._spans[span_index])
-
-    def _apply_span(self, span: EditSpan) -> None:
-        if getattr(self, "_is_word", False):
-            from .word_integration import get_word_integration
-
-            ok, message = get_word_integration().apply_live_edit(
-                self._selection_start, span.start, span.end, span.after
-            )
-        else:
-            ok, message = self._editor.ax_replace_range(
-                self._selected_target,
-                self._selection_start + span.start,
-                span.end - span.start,
-                span.after,
-            )
-        self.apply_done.emit(message)
-        if ok:
-            self._previewed_text = ""
-            self._clear_preview()
-
-    def _clear_preview(self) -> None:
-        self._spans = []
-        self._overlay_spans = []
-        self._overlay_indices = []
-        self._stop_mouse_monitor()
-        self._overlay.hide_overlay()
-        if self._word_card is not None:
-            self._word_card.hide()
-        if getattr(self, "_is_word", False):
-            try:
-                from .word_integration import get_word_integration
-
-                get_word_integration().clear_live_underlines()
-            except Exception:
-                pass
-
-    # --- input handling (global mouse monitor, macOS) ---
-
-    def _start_mouse_monitor(self) -> None:
-        self._stop_mouse_monitor()
+    def _start_tap(self) -> None:
+        self._stop_tap()
         try:
             import ApplicationServices as AS
             import Quartz
 
             if not AS.AXIsProcessTrusted():
                 return
-            mask = (1 << Quartz.kCGEventMouseMoved) | (
-                1 << Quartz.kCGEventLeftMouseDown
+            mask = (
+                (1 << Quartz.kCGEventMouseMoved)
+                | (1 << Quartz.kCGEventLeftMouseDown)
+                | (1 << Quartz.kCGEventKeyDown)
             )
             service = self
 
@@ -386,8 +375,18 @@ class LivePreviewService(QObject):
                 try:
                     event_type = int(event_type)
                     location = Quartz.CGEventGetLocation(event)
+                    keycode = -1
+                    if event_type == int(Quartz.kCGEventKeyDown):
+                        keycode = int(
+                            Quartz.CGEventGetIntegerValueField(
+                                event, Quartz.kCGKeyboardEventKeycode
+                            )
+                        )
                     service._on_pointer_event(
-                        event_type, int(location.x), int(location.y)
+                        event_type,
+                        int(location.x),
+                        int(location.y),
+                        keycode,
                     )
                 except Exception as exc:
                     _debug_log(f"LIVE TAP HANDLER ERROR: {exc}")
@@ -411,11 +410,10 @@ class LivePreviewService(QObject):
             self._tap_callback_ref = handler
             self._tap = tap
             self._tap_source = source
-            _debug_log("LIVE TAP: registered")
         except Exception as exc:
             _debug_log(f"LIVE MOUSE MONITOR: {exc}")
 
-    def _stop_mouse_monitor(self) -> None:
+    def _stop_tap(self) -> None:
         if self._tap is not None:
             try:
                 import Quartz
@@ -434,10 +432,24 @@ class LivePreviewService(QObject):
         self._tap_callback_ref = None
         self._hovered = None
 
-    def _on_pointer_event(self, event_type: int, x: int, y: int) -> None:
+    def _on_pointer_event(
+        self, event_type: int, x: int, y: int, keycode: int = -1
+    ) -> None:
+        # Escape dismisses the marks.
+        if event_type == 10 and keycode == 53:  # kCGEventKeyDown, Esc
+            self._clear_marks()
+            return
         pos = QPoint(x, y)
+        if self._mark_is_word:
+            if event_type == 5 and self._word_card is not None:
+                if self._word_window_contains(pos):
+                    if not self._word_card.isVisible():
+                        self._word_card.show()
+                elif self._word_card.isVisible() and not self._overlay.isVisible():
+                    self._word_card.hide()
+            return
         index = span_at_point(self._overlay_spans, pos)
-        if event_type == 5:  # NSEventTypeMouseMoved
+        if event_type == 5:  # mouse moved
             now = time.monotonic()
             if now - self._last_hover_ts < 0.04:
                 return
@@ -451,4 +463,120 @@ class LivePreviewService(QObject):
                     self._overlay.show_popup(index)
         elif event_type == 1 and index is not None:  # left mouse down
             _debug_log(f"LIVE CLICK: index={index} pos={x},{y}")
-            self._apply_overlay_index(index)
+            self._apply_overlay_mark(index)
+
+    def _word_window_contains(self, pos: QPoint) -> bool:
+        try:
+            import ApplicationServices as AS
+
+            pid = self._mark_target.get("pid")
+            if not pid:
+                return True
+            el = AS.AXUIElementCreateApplication(pid)
+            _, win = AS.AXUIElementCopyAttributeValue(
+                el, AS.kAXFocusedWindowAttribute, None
+            )
+            if win is None:
+                return True
+            _, posv = AS.AXUIElementCopyAttributeValue(
+                win, AS.kAXPositionAttribute, None
+            )
+            _, sizev = AS.AXUIElementCopyAttributeValue(
+                win, AS.kAXSizeAttribute, None
+            )
+            ok1, p = AS.AXValueGetValue(posv, AS.kAXValueCGPointType, None)
+            ok2, s = AS.AXValueGetValue(sizev, AS.kAXValueCGSizeType, None)
+            if not (ok1 and ok2):
+                return True
+            return (
+                p.x <= pos.x() <= p.x + s.width
+                and p.y <= pos.y() <= p.y + s.height
+            )
+        except Exception:
+            return True
+
+    # --- apply ---
+
+    def _apply_overlay_mark(self, overlay_index: int) -> None:
+        if not (0 <= overlay_index < len(self._overlay_indices)):
+            return
+        span_index = self._overlay_indices[overlay_index]
+        self._apply_mark(span_index)
+
+    def _apply_mark(self, index: int) -> None:
+        if not (0 <= index < len(self._marks)):
+            return
+        span = self._marks[index]
+        if self._mark_is_word:
+            from .word_integration import get_word_integration
+
+            ok, message = get_word_integration().apply_live_edit(
+                self._mark_start, span.start, span.end, span.after
+            )
+        else:
+            ok, message = self._editor.ax_replace_range(
+                self._mark_target,
+                self._mark_start + span.start,
+                span.end - span.start,
+                span.after,
+            )
+        self.apply_done.emit(message)
+        if ok:
+            self._clear_marks()
+
+    def _apply_all(self) -> None:
+        """Apply every active suggestion directly, without opening the app."""
+        if not self._marks:
+            return
+        if self._mark_is_word:
+            from .word_integration import get_word_integration
+
+            word = get_word_integration()
+        else:
+            word = None
+        applied = 0
+        delta = 0
+        for span in list(self._marks):
+            rel_start = span.start + delta
+            rel_end = span.end + delta
+            try:
+                if word is not None:
+                    ok, _ = word.apply_live_edit(
+                        self._mark_start, rel_start, rel_end, span.after
+                    )
+                else:
+                    ok, _ = self._editor.ax_replace_range(
+                        self._mark_target,
+                        self._mark_start + rel_start,
+                        rel_end - rel_start,
+                        span.after,
+                    )
+            except Exception:
+                ok = False
+            if ok:
+                applied += 1
+                delta += len(span.after) - (span.end - span.start)
+        self.apply_all_requested.emit()
+        self.apply_done.emit(f"Applied {applied} suggestions.")
+        self._clear_marks()
+
+    # --- teardown ---
+
+    def _clear_marks(self) -> None:
+        self._marks = []
+        self._mark_rects = []
+        self._overlay_spans = []
+        self._overlay_indices = []
+        self._mark_target = {}
+        self._stop_tap()
+        self._overlay.hide_overlay()
+        if self._word_card is not None:
+            self._word_card.hide()
+        if self._mark_is_word:
+            try:
+                from .word_integration import get_word_integration
+
+                get_word_integration().clear_live_underlines()
+            except Exception:
+                pass
+        self._mark_is_word = False

@@ -25,6 +25,8 @@ SUPPORTED_BUNDLE_IDS = frozenset(
     }
 )
 
+SELF_BUNDLE_MARKERS = ("bytemind", "byteproof")
+
 DEFAULT_DELAY_MS = 900
 MIN_DELAY_MS = 400
 MAX_DELAY_MS = 2000
@@ -221,8 +223,9 @@ def evaluate_trigger(
     if not has_permission:
         return "no_permission", "Accessibility permission is required."
     bundle = str(target.get("bundle_id", "")).lower()
-    if bundle not in SUPPORTED_BUNDLE_IDS:
-        return "unsupported_app", f"App {bundle!r} is not supported for live preview."
+    name = str(target.get("name", "")).lower()
+    if any(marker in bundle or marker in name for marker in SELF_BUNDLE_MARKERS):
+        return "self", "ByteProof itself is excluded from live preview."
     if not selected_text or not selected_text.strip():
         return "empty", "No text selected."
     length = len(selected_text.strip())
