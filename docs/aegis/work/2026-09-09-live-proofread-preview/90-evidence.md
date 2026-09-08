@@ -37,10 +37,14 @@
   This is a platform limitation, not a crash: the service stays inert in Mail
   compose. The existing hotkey proofread path keeps its clipboard fallback and
   still works there.
-- Pages: `com.apple.iWork.Pages` is recognized and covered by a unit test. A
-  live run could not be completed because synthetic clicks and keystrokes do
-  not establish a text insertion point in the Pages canvas; a human
-  click-and-type check is required.
+- Pages: `com.apple.iWork.Pages` is recognized and covered by a unit test.
+  Automation permission is now granted, the test text can be imported and
+  scripted into the document (`body text` reads/writes correctly), but the
+  canvas exposes nothing to the Accessibility tree until a real human caret
+  is placed in the document. Synthetic clicks, keystrokes, pastes, and
+  scripted selection all fail to create that caret, so the final Pages check
+  requires one human click into the document. The feature itself is inert
+  rather than failing in that state.
 - Apps that expose selection but not character bounds now fall back to the
   floating suggestions card instead of showing nothing (unit-tested).
 
