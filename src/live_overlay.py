@@ -48,8 +48,7 @@ class _SuggestionPopup(QFrame):
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool,
+            | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(
@@ -108,11 +107,11 @@ class LiveOverlay(QWidget):
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool,
+            | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setMouseTracking(True)
         self._spans: list[OverlaySpan] = []
         self._hovered: int | None = None
@@ -128,9 +127,11 @@ class LiveOverlay(QWidget):
         for span in spans[1:]:
             union = union.united(span.rect)
         self.setGeometry(union.adjusted(-40, -40, 40, 40))
+        origin = self.geometry().topLeft()
         region = QRegion()
         for span in spans:
-            region = region.united(QRegion(span.rect.adjusted(-3, -4, 3, 4)))
+            local = span.rect.translated(-origin)
+            region = region.united(QRegion(local.adjusted(-3, -4, 3, 4)))
         self.setMask(region)
         self.show()
         self.update()
@@ -155,33 +156,15 @@ class LiveOverlay(QWidget):
             )
         painter.end()
 
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        index = span_at_point(
-            self._spans,
-            event.position().toPoint() + self.geometry().topLeft(),
-        )
-        if index != self._hovered:
-            self._hovered = index
-            if index is not None:
-                self._show_popup(index)
-                self.hovered.emit(index)
-            else:
-                self._hide_popup()
-        super().mouseMoveEvent(event)
+    def show_popup(self, index: int) -> None:
+        """Show the hover popup for a span (called by the input monitor)."""
+        self._hovered = index
+        self._show_popup(index)
+        self.hovered.emit(index)
 
-    def leaveEvent(self, event) -> None:  # noqa: N802
+    def hide_popup(self) -> None:
         self._hovered = None
         self._hide_popup()
-        super().leaveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        index = span_at_point(
-            self._spans,
-            event.position().toPoint() + self.geometry().topLeft(),
-        )
-        if index is not None:
-            self.apply_requested.emit(index)
-        super().mouseReleaseEvent(event)
 
     def _show_popup(self, index: int) -> None:
         self._hide_popup()
@@ -220,8 +203,7 @@ class WordSuggestionCard(QWidget):
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool,
+            | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(

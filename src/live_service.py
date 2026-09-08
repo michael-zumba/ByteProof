@@ -4,11 +4,17 @@ import threading
 import time
 from typing import Any
 
-from PyQt6.QtCore import QObject, QRect, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPoint, QRect, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 
 from .generic_editing import get_generic_editor
-from .live_overlay import LiveOverlay, OverlaySpan, WordSuggestionCard
+from .generic_editing import _debug_log
+from .live_overlay import (
+    LiveOverlay,
+    OverlaySpan,
+    WordSuggestionCard,
+    span_at_point,
+)
 from .live_preview import (
     DEFAULT_DELAY_MS,
     POLL_INTERVAL_MS,
@@ -83,7 +89,14 @@ class LivePreviewService(QObject):
         self._worker: PreviewWorker | None = None
         self._timer: QTimer | None = None
         self._word_card: WordSuggestionCard | None = None
-        self._overlay.apply_requested.connect(self._apply_index)
+        self._overlay_spans: list[OverlaySpan] = []
+        self._overlay_indices: list[int] = []
+        self._tap: Any = None
+        self._tap_source: Any = None
+        self._tap_callback_ref: Any = None
+        self._hovered: int | None = None
+        self._last_hover_ts = 0.0
+        self._overlay.apply_requested.connect(self._apply_overlay_index)
         self._overlay.apply_all_requested.connect(self.apply_all_requested)
 
     def start(self) -> None:
@@ -96,6 +109,7 @@ class LivePreviewService(QObject):
     def stop(self) -> None:
         if self._timer is not None:
             self._timer.stop()
+        self._stop_mouse_monitor()
         self._seen_text = ""
         self._previewed_text = ""
         self._clear_preview()
@@ -156,6 +170,8 @@ class LivePreviewService(QObject):
             text == self._previewed_text,
         )
         if decision != "run":
+            if decision not in ("unchanged", "not_stable", "empty"):
+                _debug_log(f"LIVE SKIP: {decision} app={target.get('name')!r}")
             return
         self._selection_text = text
         self._selected_target = target
@@ -189,6 +205,9 @@ class LivePreviewService(QObject):
         details: dict[str, Any],
         key: str,
     ) -> None:
+        _debug_log(
+            f"LIVE PREVIEW: app={target.get('name')!r} chars={len(text)}"
+        )
         self._worker = PreviewWorker(
             self._settings,
             target,
@@ -207,6 +226,7 @@ class LivePreviewService(QObject):
         if text != self._seen_text:
             return
         spans = map_edits_to_ranges(text, result.get("edits") or [])
+        _debug_log(f"LIVE DONE: edits={len(spans)} provider={result.get('meta', {}).get('provider')}")
         self._cache.put(key, spans)
         self._spans = spans
         self._render(spans)
@@ -214,6 +234,7 @@ class LivePreviewService(QObject):
     def _on_failed(self, message: str) -> None:
         self._worker = None
         self._clear_preview()
+        _debug_log(f"LIVE ERROR: {message}")
         self.preview_error.emit(message)
 
     def _render(self, spans: list[EditSpan]) -> None:
@@ -224,7 +245,8 @@ class LivePreviewService(QObject):
             self._render_word(spans)
             return
         overlay_spans: list[OverlaySpan] = []
-        for span in spans:
+        overlay_indices: list[int] = []
+        for index, span in enumerate(spans):
             bounds = self._editor.ax_bounds_for_range(
                 self._selected_target,
                 self._selection_start + span.start,
@@ -235,7 +257,19 @@ class LivePreviewService(QObject):
                 overlay_spans.append(
                     OverlaySpan(span.before, span.after, span.reason, rect)
                 )
+                overlay_indices.append(index)
+        _debug_log(
+            f"LIVE RENDER: spans={len(spans)} rects={len(overlay_spans)}"
+            f" start={self._selection_start} target={self._selected_target}"
+        )
         self._overlay.set_spans(overlay_spans)
+        self._overlay_spans = overlay_spans
+        self._overlay_indices = overlay_indices
+        self._start_mouse_monitor()
+        _debug_log(
+            f"LIVE OVERLAY: visible={self._overlay.isVisible()}"
+            f" geometry={self._overlay.geometry().getRect()}"
+        )
 
     def _render_word(self, spans: list[EditSpan]) -> None:
         from .word_integration import get_word_integration
@@ -281,6 +315,14 @@ class LivePreviewService(QObject):
             return
         self._apply_span(self._spans[index])
 
+    def _apply_overlay_index(self, overlay_index: int) -> None:
+        if not (0 <= overlay_index < len(self._overlay_indices)):
+            return
+        span_index = self._overlay_indices[overlay_index]
+        if not (0 <= span_index < len(self._spans)):
+            return
+        self._apply_span(self._spans[span_index])
+
     def _apply_span(self, span: EditSpan) -> None:
         if getattr(self, "_is_word", False):
             from .word_integration import get_word_integration
@@ -302,6 +344,9 @@ class LivePreviewService(QObject):
 
     def _clear_preview(self) -> None:
         self._spans = []
+        self._overlay_spans = []
+        self._overlay_indices = []
+        self._stop_mouse_monitor()
         self._overlay.hide_overlay()
         if self._word_card is not None:
             self._word_card.hide()
@@ -312,3 +357,89 @@ class LivePreviewService(QObject):
                 get_word_integration().clear_live_underlines()
             except Exception:
                 pass
+
+    # --- input handling (global mouse monitor, macOS) ---
+
+    def _start_mouse_monitor(self) -> None:
+        self._stop_mouse_monitor()
+        try:
+            import ApplicationServices as AS
+            import Quartz
+
+            if not AS.AXIsProcessTrusted():
+                return
+            mask = (1 << Quartz.kCGEventMouseMoved) | (
+                1 << Quartz.kCGEventLeftMouseDown
+            )
+            service = self
+
+            def handler(proxy: Any, event_type: Any, event: Any, refcon: Any) -> Any:
+                try:
+                    event_type = int(event_type)
+                    location = Quartz.CGEventGetLocation(event)
+                    service._on_pointer_event(
+                        event_type, int(location.x), int(location.y)
+                    )
+                except Exception as exc:
+                    _debug_log(f"LIVE TAP HANDLER ERROR: {exc}")
+                return event
+
+            tap = Quartz.CGEventTapCreate(
+                Quartz.kCGSessionEventTap,
+                Quartz.kCGHeadInsertEventTap,
+                Quartz.kCGEventTapOptionListenOnly,
+                mask,
+                handler,
+                None,
+            )
+            if tap is None:
+                _debug_log("LIVE TAP: event tap creation failed")
+                return
+            source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+            loop = Quartz.CFRunLoopGetCurrent()
+            Quartz.CFRunLoopAddSource(loop, source, Quartz.kCFRunLoopCommonModes)
+            Quartz.CGEventTapEnable(tap, True)
+            self._tap_callback_ref = handler
+            self._tap = tap
+            self._tap_source = source
+            _debug_log("LIVE TAP: registered")
+        except Exception as exc:
+            _debug_log(f"LIVE MOUSE MONITOR: {exc}")
+
+    def _stop_mouse_monitor(self) -> None:
+        if self._tap is not None:
+            try:
+                import Quartz
+
+                Quartz.CGEventTapEnable(self._tap, False)
+                if self._tap_source is not None:
+                    Quartz.CFRunLoopRemoveSource(
+                        Quartz.CFRunLoopGetCurrent(),
+                        self._tap_source,
+                        Quartz.kCFRunLoopCommonModes,
+                    )
+            except Exception:
+                pass
+        self._tap = None
+        self._tap_source = None
+        self._tap_callback_ref = None
+        self._hovered = None
+
+    def _on_pointer_event(self, event_type: int, x: int, y: int) -> None:
+        pos = QPoint(x, y)
+        index = span_at_point(self._overlay_spans, pos)
+        if event_type == 5:  # NSEventTypeMouseMoved
+            now = time.monotonic()
+            if now - self._last_hover_ts < 0.04:
+                return
+            self._last_hover_ts = now
+            if index != self._hovered:
+                _debug_log(f"LIVE HOVER: index={index} pos={x},{y}")
+                self._hovered = index
+                if index is None:
+                    self._overlay.hide_popup()
+                else:
+                    self._overlay.show_popup(index)
+        elif event_type == 1 and index is not None:  # left mouse down
+            _debug_log(f"LIVE CLICK: index={index} pos={x},{y}")
+            self._apply_overlay_index(index)

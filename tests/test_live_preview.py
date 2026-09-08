@@ -413,6 +413,28 @@ def test_popup_rows_track_changes_styles():
     assert ("reason", "Spelling") in rows
 
 
+def test_overlay_renders_dashed_rose_underline():
+    from PyQt6.QtCore import QRect, Qt
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from src.live_overlay import LiveOverlay, OverlaySpan
+
+    overlay = LiveOverlay()
+    overlay.set_spans([OverlaySpan("teh", "the", "S", QRect(100, 100, 60, 20))])
+    image = QImage(160, 120, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    overlay.render(painter)
+    painter.end()
+    rose = QColor("#E23A5B")
+    found = any(
+        image.pixelColor(x, y) == rose
+        for y in range(image.height())
+        for x in range(image.width())
+    )
+    assert found, "no rose-colored underline pixels were rendered"
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _qapp():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

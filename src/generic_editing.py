@@ -651,19 +651,22 @@ class GenericTextEditor:
         AS, focused = GenericTextEditor._mac_ax_focused(target.get("pid") or 0)
         if AS is None:
             return False, "Could not read the focused text field."
-        try:
-            param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
-            err = AS.AXUIElementSetParameterizedAttributeValue(
-                focused,
-                AS.kAXReplaceRangeWithTextParameterizedAttribute,
-                param,
-                new_text,
-            )
-            if err == 0:
-                return True, "Applied."
-            _debug_log(f"AXReplaceRangeWithText unavailable or failed: {err}")
-        except Exception as exc:
-            _debug_log(f"ax_replace_range error: {exc}")
+        if hasattr(AS, "AXUIElementSetParameterizedAttributeValue") and hasattr(
+            AS, "kAXReplaceRangeWithTextParameterizedAttribute"
+        ):
+            try:
+                param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
+                err = AS.AXUIElementSetParameterizedAttributeValue(
+                    focused,
+                    AS.kAXReplaceRangeWithTextParameterizedAttribute,
+                    param,
+                    new_text,
+                )
+                if err == 0:
+                    return True, "Applied."
+                _debug_log(f"AXReplaceRangeWithText unavailable or failed: {err}")
+            except Exception as exc:
+                _debug_log(f"ax_replace_range error: {exc}")
         try:
             param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
             AS.AXUIElementSetAttributeValue(
