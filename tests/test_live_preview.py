@@ -321,6 +321,20 @@ def test_parse_ax_range_shapes():
     assert ge._parse_ax_range(None) == (None, None)
 
 
+def test_parse_ax_range_unwraps_ax_value(monkeypatch):
+    from src import generic_editing as ge
+
+    class FakeAS:
+        kAXValueCFRangeType = "cfrange"
+
+        @staticmethod
+        def AXValueGetValue(value, kind, out):
+            return True, (5, 6)
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    assert ge._parse_ax_range(SimpleNamespace()) == (5, 6)
+
+
 def test_parse_ax_rect_struct_and_tuple_shapes():
     from src import generic_editing as ge
 

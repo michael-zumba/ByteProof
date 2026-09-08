@@ -52,6 +52,11 @@ def _parse_ax_range(value: Any) -> tuple[int | None, int | None]:
         length = getattr(value, "length", None)
         if location is not None and length is not None:
             return int(location), int(length)
+        import ApplicationServices as AS
+
+        ok, unwrapped = AS.AXValueGetValue(value, AS.kAXValueCFRangeType, None)
+        if ok and isinstance(unwrapped, (tuple, list)) and len(unwrapped) >= 2:
+            return int(unwrapped[0]), int(unwrapped[1])
     except Exception:
         pass
     return None, None
