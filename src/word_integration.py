@@ -493,6 +493,26 @@ class MacOSWordIntegration(WordIntegration):
         for entry in ranges:
             self._restore_underline(entry["start"], entry["end"], entry)
 
+    def active_document_name(self) -> str:
+        try:
+            return self._run_applescript(
+                'tell application "Microsoft Word" to get name of active document'
+            ).strip()
+        except Exception:
+            return ""
+
+    def live_marks(self) -> list[dict[str, Any]]:
+        """Return the currently applied live marks with their originals."""
+        return [
+            dict(entry)
+            for entry in getattr(self, "_live_underline_ranges", [])
+        ]
+
+    def restore_live_mark(
+        self, start: int, end: int, original: dict[str, Any]
+    ) -> None:
+        self._restore_underline(start, end, original)
+
     def ensure_ready(self) -> None:
         script = """
         tell application "Microsoft Word"

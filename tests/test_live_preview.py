@@ -907,6 +907,94 @@ def test_popup_stays_open_while_cursor_moves_to_buttons(monkeypatch):
     assert fake.hidden is True
 
 
+def test_tap_does_not_steal_clicks_over_popup(monkeypatch):
+    from PyQt6.QtCore import QRect
+
+    from src.live_overlay import OverlaySpan
+    from src.live_service import LivePreviewService
+
+    class FakeOverlay:
+        def __init__(self):
+            self.popup_open = True
+
+        def popup_contains(self, pos):
+            return self.popup_open
+
+        def hide_popup(self):
+            pass
+
+        def hide_overlay(self):
+            pass
+
+    applied = []
+
+    class FakeEditor:
+        def ax_replace_range(self, target, start, length, text):
+            applied.append((start, length, text))
+            return True, "Applied."
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    overlay = FakeOverlay()
+    service._overlay = overlay
+    service._overlay_spans = [
+        OverlaySpan("teh", "the", "S", QRect(100, 100, 60, 20))
+    ]
+    service._overlay_indices = [0]
+    service._marks = [EditSpan("teh", "the", "S", 0, 3)]
+    service._mark_target = {"bundle_id": "com.apple.TextEdit", "pid": 9}
+    service._mark_is_word = False
+    service._editor = FakeEditor()
+    service._on_pointer_event(1, 110, 110)  # over the popup -> no steal
+    assert applied == []
+    overlay.popup_open = False
+    service._on_pointer_event(1, 110, 110)  # directly on the mark -> apply
+    assert applied == [(0, 3, "the")]
+
+
+def test_word_journal_round_trip_and_heal(monkeypatch, tmp_path):
+    import json
+
+    from src import live_service as ls
+    from src.live_service import LivePreviewService
+
+    class FakeWord:
+        def active_document_name(self):
+            return "Doc1"
+
+        def live_marks(self):
+            return [
+                {
+                    "start": 0,
+                    "end": 3,
+                    "underline": "underline none",
+                    "color": [0, 0, 0],
+                }
+            ]
+
+    restored = []
+
+    def restore(self, start, end, original):
+        restored.append((start, end, original))
+
+    FakeWord.restore_live_mark = restore
+    monkeypatch.setattr(
+        "src.word_integration.get_word_integration", lambda: FakeWord()
+    )
+    service = LivePreviewService()
+    service._journal_path = str(tmp_path / "journal.json")
+    service._write_word_journal()
+    payload = json.loads((tmp_path / "journal.json").read_text())
+    assert payload["document"] == "Doc1"
+    assert len(payload["ranges"]) == 1
+    service._heal_word_marks()
+    assert restored == [
+        (0, 3, {"underline": "underline none", "color": (0, 0, 0)})
+    ]
+    payload = json.loads((tmp_path / "journal.json").read_text())
+    assert payload["ranges"] == []
+
+
 def test_card_and_popup_titles_are_suggested_changes():
     from PyQt6.QtWidgets import QLabel
 

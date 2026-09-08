@@ -1,11 +1,14 @@
 """Orchestrates live-preview sampling, provider calls, rendering, and apply."""
 
+import json
+import os
 import time
 from typing import Any
 
 from PyQt6.QtCore import QObject, QPoint, QRect, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 
+from .settings import get_app_support_dir
 from .generic_editing import _debug_log, get_generic_editor
 from .live_overlay import (
     LiveOverlay,
@@ -95,6 +98,11 @@ class LivePreviewService(QObject):
         self._last_hover_ts = 0.0
         self._last_rect_refresh = 0.0
         self._popup_hide_timer: QTimer | None = None
+        self._journal_path = os.path.join(
+            get_app_support_dir(), "live_word_marks.json"
+        )
+        self._healed = False
+        self._last_heal_attempt = 0.0
         self._overlay.apply_requested.connect(self._apply_overlay_mark)
         self._overlay.apply_all_requested.connect(self._apply_all)
 
@@ -106,6 +114,7 @@ class LivePreviewService(QObject):
             self._timer.setInterval(POLL_INTERVAL_MS)
             self._timer.timeout.connect(self._poll)
         self._timer.start()
+        QTimer.singleShot(1500, self._heal_word_marks)
 
     def stop(self) -> None:
         if self._timer is not None:
@@ -135,6 +144,9 @@ class LivePreviewService(QObject):
         if not target:
             return
         is_word = bool(getattr(self._editor, "is_word", lambda _t: False)(target))
+        if is_word and now - self._last_heal_attempt >= 2.0:
+            self._last_heal_attempt = now
+            self._heal_word_marks()
         permission_ok, _ = self._editor.permission_status()
         if is_word:
             from .word_integration import get_word_integration
@@ -362,6 +374,64 @@ class LivePreviewService(QObject):
         self._mark_rects = []
         self._show_card(spans)
         self._start_tap()
+        self._write_word_journal()
+
+    def _write_word_journal(self) -> None:
+        try:
+            from .word_integration import get_word_integration
+
+            word = get_word_integration()
+            payload = {
+                "document": word.active_document_name(),
+                "ranges": word.live_marks(),
+            }
+            os.makedirs(os.path.dirname(self._journal_path), exist_ok=True)
+            with open(self._journal_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+        except Exception as exc:
+            _debug_log(f"LIVE JOURNAL WRITE: {exc}")
+
+    def _read_word_journal(self) -> dict[str, Any]:
+        try:
+            with open(self._journal_path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+            return value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _heal_word_marks(self) -> None:
+        """Restore Word marks left by a force-quit, once possible."""
+        if self._healed:
+            return
+        payload = self._read_word_journal()
+        ranges = payload.get("ranges") or []
+        if not ranges:
+            return
+        try:
+            from .word_integration import get_word_integration
+
+            word = get_word_integration()
+            if word.active_document_name() != payload.get("document"):
+                return  # different document; keep the journal for later
+            for entry in ranges:
+                try:
+                    word.restore_live_mark(
+                        int(entry["start"]),
+                        int(entry["end"]),
+                        {
+                            "underline": entry.get("underline")
+                            or "underline none",
+                            "color": tuple(entry.get("color") or (0, 0, 0)),
+                        },
+                    )
+                except Exception:
+                    pass
+            self._healed = True
+            with open(self._journal_path, "w", encoding="utf-8") as handle:
+                json.dump({"document": "", "ranges": []}, handle)
+            _debug_log(f"LIVE HEAL: restored {len(ranges)} leftover Word marks")
+        except Exception as exc:
+            _debug_log(f"LIVE HEAL: {exc}")
 
     def _show_card(self, spans: list[EditSpan]) -> None:
         """Show the floating suggestions card for the given spans."""
@@ -510,8 +580,9 @@ class LivePreviewService(QObject):
                 self._hovered = None
                 self._schedule_popup_hide()
         elif event_type == 1 and index is not None:  # left mouse down
-            _debug_log(f"LIVE CLICK: index={index} pos={x},{y}")
-            self._apply_overlay_mark(index)
+            if not self._overlay.popup_contains(pos):
+                _debug_log(f"LIVE CLICK: index={index} pos={x},{y}")
+                self._apply_overlay_mark(index)
 
     def _schedule_popup_hide(self) -> None:
         self._cancel_popup_hide()
@@ -675,6 +746,7 @@ class LivePreviewService(QObject):
                 from .word_integration import get_word_integration
 
                 get_word_integration().clear_live_underlines()
+                self._write_word_journal()
             except Exception:
                 pass
         self._mark_is_word = False
