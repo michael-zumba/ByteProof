@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from unittest import mock
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -152,3 +153,160 @@ def test_settings_fingerprint_only_uses_live_preview():
     b = settings_fingerprint(_settings(delay_ms=1200))
     assert a != b
     assert a == settings_fingerprint(_settings())
+
+
+def _mock_completion(returned):
+    def fake(*args, **kwargs):
+        fake.calls.append((args, kwargs))
+        return returned
+
+    fake.calls = []
+    return fake
+
+
+def test_load_preview_prompt_has_json_contract():
+    from src import logic
+
+    prompt = logic.load_preview_prompt()
+    assert '"edits"' in prompt and '"before"' in prompt
+
+
+def test_preview_edits_once_uses_local_model_and_parses_edits(monkeypatch):
+    from src import logic
+
+    fake = _mock_completion(
+        '{"edits":[{"before":"teh","after":"the","reason":"Spelling"}]}'
+    )
+    monkeypatch.setattr(logic, "_request_completion", fake)
+    monkeypatch.setattr(
+        logic,
+        "resolve_provider_connection",
+        lambda settings: (
+            logic.LOCAL_MODEL_PROVIDER,
+            "",
+            "http://127.0.0.1:9999/v1",
+            "phi4-mini",
+        ),
+    )
+    settings = {
+        "general": {"spelling": "UK/AU/NZ", "context": "General Editing"},
+        "live_preview": {
+            "enabled": True,
+            "use_local_model": True,
+            "max_chars": 1500,
+        },
+    }
+    status, edits, meta = logic.preview_edits_once(
+        settings,
+        {"bundle_id": "com.apple.TextEdit", "name": "TextEdit", "pid": 1},
+        "teh quick brown fox",
+        "ctx before",
+        "ctx after",
+    )
+    assert status == "ok"
+    assert edits == [Edit("teh", "the", "Spelling")]
+    assert meta["provider"] == logic.LOCAL_MODEL_PROVIDER
+    assert "teh quick brown fox" in fake.calls[0][0][1]
+
+
+def test_preview_edits_once_prefers_active_provider_when_configured(monkeypatch):
+    from src import logic
+
+    fake = _mock_completion("[]")
+    monkeypatch.setattr(logic, "_request_completion", fake)
+    monkeypatch.setattr(
+        logic,
+        "resolve_provider_connection",
+        lambda settings: (
+            "OpenAI",
+            "sk-test",
+            "https://api.openai.com/v1",
+            "gpt-4o",
+        ),
+    )
+    monkeypatch.setattr(logic, "get_access_status", lambda: {"tier": "licensed"})
+    monkeypatch.setattr(logic, "provider_requires_api_key", lambda name: True)
+    settings = {
+        "general": {"spelling": "UK/AU/NZ", "context": "General Editing"},
+        "live_preview": {
+            "enabled": True,
+            "use_local_model": False,
+            "max_chars": 1500,
+        },
+    }
+    status, edits, meta = logic.preview_edits_once(
+        settings,
+        {"bundle_id": "com.apple.TextEdit"},
+        "hello world",
+        "",
+        "",
+    )
+    assert status == "ok"
+    assert edits == []
+    assert meta["provider"] == "OpenAI"
+
+
+def test_preview_edits_once_parses_empty_reply_as_no_edits(monkeypatch):
+    from src import logic
+
+    monkeypatch.setattr(
+        logic, "_request_completion", lambda *a, **k: "no issues"
+    )
+    monkeypatch.setattr(
+        logic,
+        "resolve_provider_connection",
+        lambda settings: (
+            logic.LOCAL_MODEL_PROVIDER,
+            "",
+            "http://x/v1",
+            "m",
+        ),
+    )
+    status, edits, _ = logic.preview_edits_once(
+        {
+            "general": {"spelling": "UK/AU/NZ", "context": "General Editing"},
+            "live_preview": {
+                "enabled": True,
+                "use_local_model": True,
+                "max_chars": 1500,
+            },
+        },
+        {"bundle_id": "com.apple.TextEdit"},
+        "hello world",
+        "",
+        "",
+    )
+    assert status == "ok"
+    assert edits == []
+
+
+def test_request_completion_survives_refactor(monkeypatch):
+    """The extracted helper keeps the same OpenAI-compatible call shape."""
+    from src import logic
+
+    captured = {}
+
+    response = mock.MagicMock()
+    response.read.return_value = json.dumps(
+        {"choices": [{"message": {"content": "ok"}}]}
+    ).encode("utf-8")
+    urlopen = mock.MagicMock()
+    urlopen.return_value.__enter__.return_value = response
+
+    def fake_request(*args, **kwargs):
+        captured["url"] = kwargs["url"]
+        captured["payload"] = json.loads(kwargs["data"].decode("utf-8"))
+        request = mock.MagicMock()
+        request.full_url = kwargs["url"]
+        request.data = kwargs["data"]
+        return request
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("urllib.request.Request", fake_request)
+    result = logic._request_completion(
+        "sys", "user", "key", 64, "https://api.example.com/v1",
+        "gpt-test", "FakeProvider", 0.2, None,
+    )
+    assert result == "ok"
+    assert captured["url"] == "https://api.example.com/v1/chat/completions"
+    assert captured["payload"]["messages"][0]["content"] == "sys"

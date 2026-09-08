@@ -16,6 +16,7 @@ from typing import Any, cast
 import certifi
 
 from .licensing import get_access_status
+from .live_preview import PREVIEW_MAX_OUTPUT_TOKENS, parse_preview_response
 from .local_model import resolve_model_id, start_local_server
 from .prompt_data import PROMPT_FILES
 from .settings import (
@@ -1056,6 +1057,91 @@ def _clean_local_model_output(text: str) -> str:
     return text.strip()
 
 
+def _request_completion(
+    system_prompt: str,
+    user_content: str,
+    api_key: str,
+    max_tokens: int,
+    base_url: str,
+    model: str,
+    provider_name: str,
+    temperature: float,
+    cancel_event: threading.Event | None = None,
+) -> str:
+    """Send one chat completion and return the assistant text."""
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if provider_name == "Anthropic":
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_content}],
+        }
+        endpoint = f"{base_url}/messages"
+    else:
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        payload = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        if provider_name == "DeepSeek":
+            payload["thinking"] = {"type": "disabled"}
+        endpoint = f"{base_url}/chat/completions"
+
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+    def _do_request() -> str:
+        try:
+            request = urllib.request.Request(
+                url=endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(
+                request, timeout=120, context=ssl_context
+            ) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"{provider_name} API HTTP error: {exc.code} {body}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"{provider_name} API connection error: {exc.reason}"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unexpected error connecting to {provider_name} API: {exc}"
+            ) from exc
+
+        try:
+            if provider_name == "Anthropic":
+                return response_data["content"][0]["text"].strip()
+            content = response_data["choices"][0]["message"]["content"].strip()
+            if PROVIDERS.get(provider_name, {}).get("is_local"):
+                content = _clean_local_model_output(content)
+            return content
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(
+                f"Unexpected {provider_name} response format: {response_data}"
+            ) from exc
+
+    return _api_call_with_retry(_do_request, cancel_event=cancel_event)
+
+
 def proofread_with_provider(
     source_text: str,
     api_key: str,
@@ -1128,73 +1214,18 @@ def proofread_with_provider(
     if user_instructions:
         user_content += "\n\n" + user_instructions
 
-    ssl_context = ssl.create_default_context(cafile=certifi.where())
-
     def _send(system_prompt: str, user_content: str) -> str:
-        headers = {
-            "Content-Type": "application/json",
-        }
-
-        if provider_name == "Anthropic":
-            headers["x-api-key"] = api_key
-            headers["anthropic-version"] = "2023-06-01"
-            payload = {
-                "model": model,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "system": system_prompt,
-                "messages": [
-                    {"role": "user", "content": user_content}
-                ]
-            }
-            endpoint = f"{base_url}/messages"
-
-        else:
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            payload = {
-                "model": model,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-            }
-            if provider_name == "DeepSeek":
-                payload["thinking"] = {"type": "disabled"}
-            endpoint = f"{base_url}/chat/completions"
-
-        def _do_request() -> str:
-            try:
-                request = urllib.request.Request(
-                    url=endpoint,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers=headers,
-                    method="POST",
-                )
-                with urllib.request.urlopen(request, timeout=120, context=ssl_context) as response:
-                    response_data = json.loads(response.read().decode("utf-8"))
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                raise RuntimeError(f"{provider_name} API HTTP error: {exc.code} {body}") from exc
-            except urllib.error.URLError as exc:
-                raise RuntimeError(f"{provider_name} API connection error: {exc.reason}") from exc
-            except Exception as exc:
-                raise RuntimeError(f"Unexpected error connecting to {provider_name} API: {exc}") from exc
-
-            try:
-                if provider_name == "Anthropic":
-                    return response_data["content"][0]["text"].strip()
-                else:
-                    content = response_data["choices"][0]["message"]["content"].strip()
-                    if PROVIDERS.get(provider_name, {}).get("is_local"):
-                        content = _clean_local_model_output(content)
-                    return content
-            except (KeyError, IndexError, TypeError) as exc:
-                raise RuntimeError(f"Unexpected {provider_name} response format: {response_data}") from exc
-
-        return _api_call_with_retry(_do_request, cancel_event=cancel_event)
+        return _request_completion(
+            system_prompt,
+            user_content,
+            api_key,
+            max_tokens,
+            base_url,
+            model,
+            provider_name,
+            temperature,
+            cancel_event,
+        )
 
     result = _send(system_prompt, user_content)
     if cancel_event is not None and cancel_event.is_set():
@@ -2017,3 +2048,78 @@ def polish_selection_once(
     except Exception as e:
         print(f"Error in polish_selection_once: {e}")
         return f"Error: {e!s}", None, None, None, 0
+
+
+def load_preview_prompt() -> str:
+    content = PROMPT_FILES.get("preview_edits.txt")
+    if content:
+        return content
+    return (
+        'Return only JSON: {"edits":[{"before":"...","after":"...",'
+        '"reason":"..."}]}. Correct only real errors in the text between markers.'
+    )
+
+
+def preview_edits_once(
+    settings: dict[str, Any],
+    target: dict[str, Any],
+    selected_text: str,
+    context_before: str = "",
+    context_after: str = "",
+    cancel_event: threading.Event | None = None,
+) -> tuple[str, list[Any], dict[str, Any]]:
+    """Run the compact live-preview call and return (status, edits, meta)."""
+    live = settings.get("live_preview", {})
+    use_local = bool(live.get("use_local_model", True))
+    active_provider, api_key, base_url, model = resolve_provider_connection(settings)
+    provider_name = active_provider
+    if use_local and active_provider != LOCAL_MODEL_PROVIDER:
+        try:
+            provider_name, api_key, base_url, model = resolve_provider_connection(
+                {**settings, "active_provider": LOCAL_MODEL_PROVIDER}
+            )
+        except Exception:
+            provider_name = active_provider
+
+    if provider_name != LOCAL_MODEL_PROVIDER:
+        access = get_access_status()
+        if access.get("tier") == "free" and not access.get("free_mode_allowed"):
+            return "limit_reached", [], {"provider": provider_name}
+        if provider_requires_api_key(provider_name) and not api_key:
+            return "no_api_key", [], {"provider": provider_name}
+
+    spelling = settings.get("general", {}).get("spelling", "UK/AU/NZ")
+    system_prompt = load_preview_prompt()
+    if spelling == "UK/AU/NZ":
+        system_prompt += "\n\nUse British/Australian/New Zealand spelling."
+    elif spelling == "US English":
+        system_prompt += "\n\nUse American spelling."
+
+    marked = f"<SELECTED>\n{selected_text}\n</SELECTED>"
+    parts = [marked]
+    if context_before:
+        parts.insert(0, f"Context before:\n{context_before}")
+    if context_after:
+        parts.append(f"Context after:\n{context_after}")
+    user_content = "\n\n".join(parts) + (
+        "\n\nEdit only the text between <SELECTED> and </SELECTED>. "
+        "Return only the JSON edits object."
+    )
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise TaskCancelledError()
+    raw = _request_completion(
+        system_prompt,
+        user_content,
+        api_key,
+        PREVIEW_MAX_OUTPUT_TOKENS,
+        base_url,
+        model,
+        provider_name,
+        0.1,
+        cancel_event,
+    )
+    if cancel_event is not None and cancel_event.is_set():
+        raise TaskCancelledError()
+    edits = parse_preview_response(raw)
+    return "ok", edits, {"provider": provider_name, "raw": raw}
