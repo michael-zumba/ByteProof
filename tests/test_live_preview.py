@@ -55,9 +55,25 @@ def test_parse_caps_and_dedupes_edits():
     assert parsed[0] == Edit("a0", "b0", "")
 
 
+def test_parse_keeps_duplicate_pairs_for_repeated_occurrences():
+    raw = (
+        '[{"before":"teh","after":"the","reason":"S"},'
+        '{"before":"teh","after":"the","reason":"S"}]'
+    )
+    assert len(parse_preview_response(raw)) == 2
+
+
 def test_map_exact_edits():
     spans = map_edits_to_ranges("teh cat sat", [Edit("teh", "the", "Spelling")])
     assert spans == [EditSpan("teh", "the", "Spelling", 0, 3)]
+
+
+def test_map_repeated_edits_hit_distinct_occurrences():
+    spans = map_edits_to_ranges(
+        "teh cat and teh mat",
+        [Edit("teh", "the", "S"), Edit("teh", "the", "S")],
+    )
+    assert [(s.start, s.end) for s in spans] == [(0, 3), (12, 15)]
 
 
 def test_map_fuzzy_typo():

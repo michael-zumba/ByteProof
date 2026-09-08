@@ -87,7 +87,6 @@ def parse_preview_response(raw: str) -> list[Edit]:
     if not isinstance(items, list):
         return []
     edits: list[Edit] = []
-    seen: set[tuple[str, str]] = set()
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -96,10 +95,6 @@ def parse_preview_response(raw: str) -> list[Edit]:
         if not before or not after or before == after:
             continue
         reason = str(item.get("reason") or "").strip()
-        pair = (before, after)
-        if pair in seen:
-            continue
-        seen.add(pair)
         edits.append(Edit(before, after, reason))
         if len(edits) >= PREVIEW_MAX_EDITS:
             break
@@ -134,33 +129,47 @@ def _fuzzy_locate(text: str, needle: str) -> int | None:
     return found if found >= 0 else None
 
 
-def _locate(text: str, needle: str) -> tuple[int, int] | None:
-    index = text.find(needle)
-    if index >= 0:
-        return index, index + len(needle)
+def _locate_all(text: str, needle: str) -> list[tuple[int, int]]:
+    """Return every exact occurrence; fall back to one fuzzy match."""
+    occurrences: list[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        index = text.find(needle, cursor)
+        if index < 0:
+            break
+        occurrences.append((index, index + len(needle)))
+        cursor = index + 1
+    if occurrences:
+        return occurrences
     fuzzy = _fuzzy_locate(text, needle)
     if fuzzy is None:
-        return None
-    return fuzzy, max(fuzzy + 1, fuzzy + len(needle))
+        return []
+    return [(fuzzy, max(fuzzy + 1, fuzzy + len(needle)))]
 
 
 def map_edits_to_ranges(
     original: str, edits: Sequence[Edit]
 ) -> list[EditSpan]:
-    """Map edits to character offsets; longest non-overlapping spans win."""
-    candidates: list[tuple[Edit, int, int]] = []
-    for edit in edits:
-        located = _locate(original, edit.before)
-        if located is None:
-            continue
-        start, end = located
-        candidates.append((edit, start, end))
-    candidates.sort(key=lambda c: (c[2] - c[1], -c[1]), reverse=True)
+    """Map edits to character offsets.
+
+    Each edit is assigned a distinct occurrence of its "before" text. When
+    spans overlap, the longest span wins and the loser is dropped.
+    """
+    candidates: list[tuple[int, Edit, int, int]] = []
+    for edit_index, edit in enumerate(edits):
+        for located in _locate_all(original, edit.before):
+            start, end = located
+            candidates.append((edit_index, edit, start, end))
+    candidates.sort(key=lambda c: (c[3] - c[2], -c[2]), reverse=True)
+    used_edits: set[int] = set()
     kept: list[tuple[int, int, Edit]] = []
-    for edit, start, end in candidates:
+    for edit_index, edit, start, end in candidates:
+        if edit_index in used_edits:
+            continue
         if any(start < k_end and end > k_start for k_start, k_end, _ in kept):
             continue
         kept.append((start, end, edit))
+        used_edits.add(edit_index)
     kept.sort(key=lambda k: k[0])
     return [
         EditSpan(edit.before, edit.after, edit.reason, start, end)
