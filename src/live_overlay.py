@@ -7,7 +7,7 @@ from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QRegion
 from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from .live_preview import UNDERLINE_COLOR_HEX
+from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
 
 
 @dataclass(frozen=True)
@@ -201,3 +201,88 @@ class LiveOverlay(QWidget):
             self._popup.close()
             self._popup.deleteLater()
             self._popup = None
+
+
+class WordSuggestionCard(QWidget):
+    """A cursor-anchored card listing all Word edits in track-changes style.
+
+    Word does not expose character bounds through the Accessibility API, so
+    the per-word hover popup cannot be hit-tested there. Instead, Word gets
+    native in-document underlines plus this card, which appears next to the
+    pointer as soon as the preview finishes.
+    """
+
+    apply_requested = pyqtSignal(int)
+    apply_all_requested = pyqtSignal()
+    dismissed = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setStyleSheet(
+            "WordSuggestionCard { background: #FFFFFF;"
+            " border: 1px solid #E8E4E0; border-radius: 10px; }"
+        )
+        self._span_rows: dict[int, QFrame] = {}
+
+    def set_spans(self, spans: list[EditSpan]) -> None:
+        layout = self.layout()
+        if layout is None:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(12, 10, 12, 10)
+            layout.setSpacing(6)
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._span_rows = {}
+
+        header = QHBoxLayout()
+        title = QLabel("Live suggestions")
+        title.setStyleSheet("color:#44403C; font-size:12px; font-weight:700;")
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(22, 22)
+        close_btn.clicked.connect(self.dismissed.emit)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(close_btn)
+        layout.addLayout(header)
+
+        for index, span in enumerate(spans):
+            row = QFrame()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 2, 0, 2)
+            old_label = QLabel(f"<s style='color:#B91C1C'>{span.before}</s>")
+            old_label.setStyleSheet("color:#B91C1C; font-size:12px;")
+            arrow_label = QLabel("→")
+            new_label = QLabel(
+                f"<span style='color:#166534'>{span.after}</span>"
+            )
+            new_label.setStyleSheet(
+                "color:#166534; font-size:12px; font-weight:600;"
+            )
+            reason_label = QLabel(span.reason)
+            reason_label.setStyleSheet("color:#78716C; font-size:11px;")
+            apply_btn = QPushButton("Apply")
+            apply_btn.clicked.connect(
+                lambda _checked=False, i=index: self.apply_requested.emit(i)
+            )
+            row_layout.addWidget(old_label)
+            row_layout.addWidget(arrow_label)
+            row_layout.addWidget(new_label, 1)
+            if span.reason:
+                row_layout.addWidget(reason_label)
+            row_layout.addWidget(apply_btn)
+            layout.addWidget(row)
+            self._span_rows[index] = row
+
+        apply_all_btn = QPushButton("Apply all")
+        apply_all_btn.clicked.connect(self.apply_all_requested.emit)
+        layout.addWidget(apply_all_btn)
+        self.adjustSize()

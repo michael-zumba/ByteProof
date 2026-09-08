@@ -5,9 +5,10 @@ import time
 from typing import Any
 
 from PyQt6.QtCore import QObject, QRect, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QCursor
 
 from .generic_editing import get_generic_editor
-from .live_overlay import LiveOverlay, OverlaySpan
+from .live_overlay import LiveOverlay, OverlaySpan, WordSuggestionCard
 from .live_preview import (
     DEFAULT_DELAY_MS,
     POLL_INTERVAL_MS,
@@ -81,6 +82,7 @@ class LivePreviewService(QObject):
         self._previewed_text = ""
         self._worker: PreviewWorker | None = None
         self._timer: QTimer | None = None
+        self._word_card: WordSuggestionCard | None = None
         self._overlay.apply_requested.connect(self._apply_index)
         self._overlay.apply_all_requested.connect(self.apply_all_requested)
 
@@ -119,7 +121,24 @@ class LivePreviewService(QObject):
             return
         self._is_word = bool(getattr(self._editor, "is_word", lambda _t: False)(target))
         permission_ok, _ = self._editor.permission_status()
-        details = self._editor.selection_details(target)
+        if self._is_word:
+            from .word_integration import get_word_integration
+
+            try:
+                text, start, end, before, after = (
+                    get_word_integration().get_selection_info()
+                )
+            except Exception:
+                return
+            details = {
+                "text": text,
+                "range": (start, end),
+                "context_before": before,
+                "context_after": after,
+            }
+            permission_ok = True
+        else:
+            details = self._editor.selection_details(target)
         text = details.get("text") or ""
         if text != self._seen_text:
             self._seen_text = text
@@ -201,6 +220,9 @@ class LivePreviewService(QObject):
         if not spans:
             self._clear_preview()
             return
+        if getattr(self, "_is_word", False):
+            self._render_word(spans)
+            return
         overlay_spans: list[OverlaySpan] = []
         for span in spans:
             bounds = self._editor.ax_bounds_for_range(
@@ -214,6 +236,28 @@ class LivePreviewService(QObject):
                     OverlaySpan(span.before, span.after, span.reason, rect)
                 )
         self._overlay.set_spans(overlay_spans)
+
+    def _render_word(self, spans: list[EditSpan]) -> None:
+        from .word_integration import get_word_integration
+
+        word = get_word_integration()
+        try:
+            word.clear_live_underlines()
+            for span in spans:
+                word.set_live_underline(
+                    self._selection_start, span.start, span.end, True
+                )
+        except Exception:
+            pass
+        if self._word_card is None:
+            self._word_card = WordSuggestionCard()
+            self._word_card.apply_requested.connect(self._apply_index)
+            self._word_card.apply_all_requested.connect(self.apply_all_requested)
+            self._word_card.dismissed.connect(self._clear_preview)
+        self._word_card.set_spans(spans)
+        cursor = QCursor.pos()
+        self._word_card.move(cursor.x() + 12, cursor.y() + 12)
+        self._word_card.show()
 
     @staticmethod
     def _rect_from_bounds(
@@ -259,3 +303,12 @@ class LivePreviewService(QObject):
     def _clear_preview(self) -> None:
         self._spans = []
         self._overlay.hide_overlay()
+        if self._word_card is not None:
+            self._word_card.hide()
+        if getattr(self, "_is_word", False):
+            try:
+                from .word_integration import get_word_integration
+
+                get_word_integration().clear_live_underlines()
+            except Exception:
+                pass

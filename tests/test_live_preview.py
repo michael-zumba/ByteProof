@@ -484,3 +484,54 @@ def test_service_applies_span_through_ax(monkeypatch):
     service._selection_start = 100
     service._apply_span(EditSpan("teh", "the", "Spelling", 0, 3))
     assert applied == [(100, 3, "the")]
+
+
+def _fake_subprocess_run(stdout: bytes = b"OK"):
+    completed = mock.Mock()
+    completed.returncode = 0
+    completed.stdout = stdout
+    completed.stderr = b""
+    return completed
+
+
+def test_word_apply_live_edit_builds_subrange_script(monkeypatch):
+    import subprocess
+
+    from src import word_integration as wi
+
+    captured = []
+
+    def fake_run(args, **kwargs):
+        captured.append(kwargs.get("input"))
+        return _fake_subprocess_run()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_set_clipboard", lambda text: None
+    )
+    integration = wi.MacOSWordIntegration()
+    ok, _ = integration.apply_live_edit(500, 10, 13, "the")
+    assert ok is True
+    script = captured[-1].decode("utf-8")
+    assert "start 510 end 513" in script
+    assert "clipboard as text" in script
+
+
+def test_word_set_live_underline_builds_dotted_script(monkeypatch):
+    import subprocess
+
+    from src import word_integration as wi
+
+    captured = []
+
+    def fake_run(args, **kwargs):
+        captured.append(kwargs.get("input"))
+        return _fake_subprocess_run()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    integration = wi.MacOSWordIntegration()
+    ok, _ = integration.set_live_underline(500, 10, 13, True)
+    assert ok is True
+    script = captured[-1].decode("utf-8")
+    assert "underline dot dot dash" in script
+    assert "start 510 end 513" in script

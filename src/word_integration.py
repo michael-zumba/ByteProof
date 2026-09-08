@@ -59,6 +59,19 @@ def _drop_nested_fields(
 class WordIntegration:
     """Abstract base class for Microsoft Word interaction."""
 
+    def apply_live_edit(
+        self, selection_start: int, rel_start: int, rel_end: int, replacement: str
+    ) -> tuple[bool, str]:
+        raise NotImplementedError
+
+    def set_live_underline(
+        self, selection_start: int, rel_start: int, rel_end: int, enable: bool
+    ) -> tuple[bool, str]:
+        raise NotImplementedError
+
+    def clear_live_underlines(self) -> None:
+        raise NotImplementedError
+
     def ensure_ready(self) -> None:
         raise NotImplementedError
 
@@ -367,6 +380,61 @@ class MacOSWordIntegration(WordIntegration):
             stdout_str = e.stdout.decode('utf-8') if e.stdout else ""
             stderr_str = e.stderr.decode('utf-8') if e.stderr else ""
             raise subprocess.CalledProcessError(e.returncode, e.cmd, output=stdout_str, stderr=stderr_str)
+
+    def apply_live_edit(
+        self, selection_start: int, rel_start: int, rel_end: int, replacement: str
+    ) -> tuple[bool, str]:
+        """Replace one mapped sub-range of the current selection (tracked)."""
+        from .generic_editing import _mac_set_clipboard
+
+        start = selection_start + rel_start
+        end = selection_start + rel_end
+        _mac_set_clipboard(replacement)
+        script = f"""
+        tell application "Microsoft Word"
+            set r to create range active document start {start} end {end}
+            set content of r to (the clipboard as text)
+        end tell
+        """
+        try:
+            self._run_applescript(script)
+            return True, "Applied."
+        except Exception as exc:
+            return False, str(exc)
+
+    def set_live_underline(
+        self, selection_start: int, rel_start: int, rel_end: int, enable: bool
+    ) -> tuple[bool, str]:
+        """Apply (or clear) the pink dot-dot-dash underline on a sub-range."""
+        start = selection_start + rel_start
+        end = selection_start + rel_end
+        style = "underline dot dot dash" if enable else "underline none"
+        lines = [
+            'tell application "Microsoft Word"',
+            f"set r to create range active document start {start} end {end}",
+            f"set underline of font object of r to {style}",
+        ]
+        if enable:
+            lines.append("set color of font object of r to {228, 58, 91}")
+        lines.append("end tell")
+        try:
+            self._run_applescript("\n".join(lines))
+            if enable:
+                if not hasattr(self, "_live_underline_ranges"):
+                    self._live_underline_ranges: list[tuple[int, int]] = []
+                self._live_selection_start = selection_start
+                self._live_underline_ranges.append((rel_start, rel_end))
+            return True, "Applied."
+        except Exception as exc:
+            return False, str(exc)
+
+    def clear_live_underlines(self) -> None:
+        """Revert every underline this integration applied."""
+        ranges = list(getattr(self, "_live_underline_ranges", []))
+        start = getattr(self, "_live_selection_start", 0)
+        self._live_underline_ranges = []
+        for rel_start, rel_end in ranges:
+            self.set_live_underline(start, rel_start, rel_end, False)
 
     def ensure_ready(self) -> None:
         script = """
