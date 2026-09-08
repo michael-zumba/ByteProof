@@ -217,9 +217,10 @@ class LiveOverlay(QWidget):
         self._popup: _SuggestionPopup | None = None
 
     def set_spans(self, spans: list[OverlaySpan]) -> None:
+        hovered = self._hovered
         self._spans = spans
-        self._hide_popup()
         if not spans:
+            self._hide_popup()
             self.hide()
             return
         union = spans[0].rect
@@ -234,6 +235,13 @@ class LiveOverlay(QWidget):
         self.setMask(region)
         self.show()
         self.update()
+        if (
+            hovered is not None
+            and hovered < len(spans)
+            and self._popup is not None
+        ):
+            # A refresh should follow the moved text, not close the popup.
+            self._popup.place_near(spans[hovered].rect)
 
     def hide_overlay(self) -> None:
         self._hide_popup()

@@ -469,6 +469,19 @@ def test_overlay_renders_dashed_rose_underline():
     assert found, "no rose-colored underline pixels were rendered"
 
 
+def test_overlay_refresh_keeps_popup_open():
+    from PyQt6.QtCore import QRect
+
+    from src.live_overlay import LiveOverlay, OverlaySpan
+
+    overlay = LiveOverlay()
+    overlay.set_spans([OverlaySpan("teh", "the", "S", QRect(100, 100, 60, 20))])
+    overlay.show_popup(0)
+    assert overlay._popup is not None
+    overlay.set_spans([OverlaySpan("teh", "the", "S", QRect(100, 120, 60, 20))])
+    assert overlay._popup is not None
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _qapp():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
