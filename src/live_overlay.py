@@ -288,6 +288,12 @@ class LiveOverlay(QWidget):
         self._hovered = None
         self._hide_popup()
 
+    def popup_contains(self, pos: QPoint) -> bool:
+        """Whether pos is on (or near) the open popup card."""
+        if self._popup is None or not self._popup.isVisible():
+            return False
+        return self._popup.geometry().adjusted(-16, -28, 16, 28).contains(pos)
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         pen = QPen(QColor(UNDERLINE_COLOR_HEX))

@@ -869,6 +869,44 @@ def test_service_keeps_marks_after_deselect(monkeypatch):
     assert service._overlay._spans
 
 
+def test_popup_stays_open_while_cursor_moves_to_buttons(monkeypatch):
+    from PyQt6.QtCore import QRect
+
+    from src.live_overlay import OverlaySpan
+    from src.live_service import LivePreviewService
+
+    class FakeOverlay:
+        def __init__(self):
+            self.hidden = False
+            self._spans = [OverlaySpan("a", "b", "x", QRect(100, 100, 60, 20))]
+
+        def popup_contains(self, pos):
+            return QRect(80, 130, 90, 50).contains(pos)
+
+        def hide_popup(self):
+            self.hidden = True
+
+        def show_popup(self, index):
+            self.hidden = False
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    fake = FakeOverlay()
+    service._overlay = fake
+    service._overlay_spans = fake._spans
+    service._last_hover_ts = 0.0
+    service._on_pointer_event(5, 110, 110)
+    assert service._hovered == 0 and fake.hidden is False
+    service._last_hover_ts = 0.0
+    service._on_pointer_event(5, 110, 140)  # over the popup card
+    assert service._hovered == 0 and fake.hidden is False
+    service._last_hover_ts = 0.0
+    service._on_pointer_event(5, 500, 500)  # far away -> delayed hide
+    assert service._popup_hide_timer is not None
+    service._finish_popup_hide()
+    assert fake.hidden is True
+
+
 def test_card_and_popup_titles_are_suggested_changes():
     from PyQt6.QtWidgets import QLabel
 

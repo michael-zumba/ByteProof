@@ -94,6 +94,7 @@ class LivePreviewService(QObject):
         self._hovered: int | None = None
         self._last_hover_ts = 0.0
         self._last_rect_refresh = 0.0
+        self._popup_hide_timer: QTimer | None = None
         self._overlay.apply_requested.connect(self._apply_overlay_mark)
         self._overlay.apply_all_requested.connect(self._apply_all)
 
@@ -484,7 +485,7 @@ class LivePreviewService(QObject):
         pos = QPoint(x, y)
         if self._mark_is_word:
             if event_type == 5 and self._word_card is not None:
-                if self._word_window_contains(pos):
+                if self._word_window_contains(pos) or self._word_card.geometry().contains(pos):
                     if not self._word_card.isVisible():
                         self._word_card.show()
                 elif self._word_card.isVisible() and not self._overlay.isVisible():
@@ -496,16 +497,38 @@ class LivePreviewService(QObject):
             if now - self._last_hover_ts < 0.04:
                 return
             self._last_hover_ts = now
-            if index != self._hovered:
-                _debug_log(f"LIVE HOVER: index={index} pos={x},{y}")
-                self._hovered = index
-                if index is None:
-                    self._overlay.hide_popup()
-                else:
+            if index is not None:
+                self._cancel_popup_hide()
+                if index != self._hovered:
+                    _debug_log(f"LIVE HOVER: index={index} pos={x},{y}")
+                    self._hovered = index
                     self._overlay.show_popup(index)
+            elif self._overlay.popup_contains(pos):
+                # Cursor is travelling from the word to the buttons: keep it.
+                self._cancel_popup_hide()
+            elif self._hovered is not None:
+                self._hovered = None
+                self._schedule_popup_hide()
         elif event_type == 1 and index is not None:  # left mouse down
             _debug_log(f"LIVE CLICK: index={index} pos={x},{y}")
             self._apply_overlay_mark(index)
+
+    def _schedule_popup_hide(self) -> None:
+        self._cancel_popup_hide()
+        self._popup_hide_timer = QTimer(self)
+        self._popup_hide_timer.setSingleShot(True)
+        self._popup_hide_timer.setInterval(700)
+        self._popup_hide_timer.timeout.connect(self._finish_popup_hide)
+        self._popup_hide_timer.start()
+
+    def _cancel_popup_hide(self) -> None:
+        if self._popup_hide_timer is not None:
+            self._popup_hide_timer.stop()
+            self._popup_hide_timer = None
+
+    def _finish_popup_hide(self) -> None:
+        self._popup_hide_timer = None
+        self._overlay.hide_popup()
 
     def _word_window_contains(self, pos: QPoint) -> bool:
         try:
@@ -642,6 +665,7 @@ class LivePreviewService(QObject):
         self._overlay_spans = []
         self._overlay_indices = []
         self._mark_target = {}
+        self._cancel_popup_hide()
         self._stop_tap()
         self._overlay.hide_overlay()
         if self._word_card is not None:

@@ -368,10 +368,13 @@ class GenericTextEditor:
                 )
                 if err != 0 or not isinstance(value, str):
                     return False
-                err, _ = AS.AXUIElementCopyAttributeValue(
+                err_text, _ = AS.AXUIElementCopyAttributeValue(
                     el, AS.kAXSelectedTextAttribute, None
                 )
-                return err == 0
+                err_range, _ = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXSelectedTextRangeAttribute, None
+                )
+                return err_text == 0 or err_range == 0
             except Exception:
                 return False
 
@@ -637,6 +640,10 @@ class GenericTextEditor:
                 focused, AS.kAXValueAttribute, None
             )
             full = str(value) if err == 0 and isinstance(value, str) else ""
+            if not result["text"] and full and result["range"]:
+                location, length = result["range"]
+                if location is not None and length:
+                    result["text"] = full[location : location + length]
             location = (result["range"] or (None, None))[0]
             if result["text"] and full:
                 before = ""
