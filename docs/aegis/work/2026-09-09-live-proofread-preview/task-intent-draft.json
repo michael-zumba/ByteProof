@@ -1,0 +1,18 @@
+{
+  "task": "live-proofread-preview",
+  "objective": "Ship a tested beta of Grammarly-style live proofread previews in ByteProof: dashed pink-red underlines, hover popup with track-changes styling, one-click apply, a General-settings toggle, and token efficiency.",
+  "status": "in-progress",
+  "branch": "codex/live-proofread-preview",
+  "createdAt": "2026-09-09T09:00:00+13:00",
+  "acceptance": [
+    "underlines render under changed words in AX-compatible apps",
+    "hover popup shows struck-through old and green new text",
+    "clicking a suggestion applies the edit in place",
+    "General settings toggle turns the feature on and off",
+    "test suite green and installer signed and notarized"
+  ],
+  "nonGoals": [
+    "Windows live preview",
+    "changes to the existing Word tracked-changes proofread"
+  ]
+}
