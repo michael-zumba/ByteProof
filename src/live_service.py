@@ -558,6 +558,7 @@ class LivePreviewService(QObject):
             )
         self.apply_done.emit(message)
         if ok:
+            self._overlay.hide_popup()
             self._rerender_after_apply(index)
 
     def _rerender_after_apply(self, removed_index: int) -> None:

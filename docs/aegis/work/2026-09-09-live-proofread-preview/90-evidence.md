@@ -62,6 +62,27 @@
 - Popup and card redesigned (premium styling, auto-sizing, screen clamping)
   and titled "Suggested changes".
 
+## Second polish round (user feedback, live)
+
+- Popup/card rebuilds now remove nested layouts too, so repeated refreshes
+  leave exactly one "×", one "Apply all", and one "Apply" per suggestion
+  (regression-tested).
+- The single "Apply" button works: clicking it live replaced `teh` with `the`
+  in TextEdit while leaving the other marks visible.
+- Underlines persist across selections: while a second preview was running,
+  the first selection's underlines stayed on screen and the new edit merged
+  in (marks accumulate; they no longer clear when the selection moves).
+- The hover popup survives the periodic underline rect refresh (it now
+  repositions instead of closing), which was the cause of intermittent
+  hover failure.
+- Popup/card restyled toward Google's design language: pill buttons
+  (#1A73E8), red/green suggestion chips, grey secondary text, rounded 14px
+  surfaces, Google close-button styling.
+- The AX text-element search now also walks the focused window subtree, which
+  covers canvas-style editors such as Pages when a caret exists.
+- Mail compose remains a platform limit: its WebKit body never reports the
+  selection; the hotkey proofread path still works there.
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by

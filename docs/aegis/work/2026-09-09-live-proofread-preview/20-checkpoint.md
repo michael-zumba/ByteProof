@@ -18,6 +18,9 @@
       popup/card redesign with auto-sizing, direct background apply/apply-all,
       persistent marks + hover-after-deselect, reselect fix, permissive
       app/browser compatibility, AX descendant text search
+- [x] Second polish round: Google-styled popup, single-control rebuild fix,
+      working single Apply, accumulating marks across selections, hover
+      survival across rect refreshes, wider AX search for Pages
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence
