@@ -57,6 +57,27 @@ def _parse_ax_range(value: Any) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _parse_ax_rect(value: Any) -> tuple[float, float, float, float] | None:
+    """Parse an AX CGRect value into (x, y, width, height), if possible."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (tuple, list)) and len(value) == 4:
+            return tuple(float(v) for v in value)  # type: ignore[return-value]
+        origin = getattr(value, "origin", None)
+        size = getattr(value, "size", None)
+        if origin is not None and size is not None:
+            return (
+                float(origin.x),
+                float(origin.y),
+                float(size.width),
+                float(size.height),
+            )
+    except Exception:
+        pass
+    return None
+
+
 def _mac_clipboard_string() -> str | None:
     try:
         from AppKit import NSPasteboard, NSPasteboardTypeString
@@ -307,6 +328,22 @@ class GenericTextEditor:
     # --- macOS ---
 
     @staticmethod
+    def _mac_ax_focused(pid: int) -> tuple[Any, Any]:
+        """Return (ApplicationServices module, focused AX element) or (None, None)."""
+        try:
+            import ApplicationServices as AS
+
+            app_el = AS.AXUIElementCreateApplication(pid)
+            err, focused = AS.AXUIElementCopyAttributeValue(
+                app_el, AS.kAXFocusedUIElementAttribute, None
+            )
+            if err == 0 and focused is not None:
+                return AS, focused
+        except Exception:
+            pass
+        return None, None
+
+    @staticmethod
     def _mac_frontmost_app() -> dict[str, Any]:
         try:
             from AppKit import NSWorkspace
@@ -395,12 +432,8 @@ class GenericTextEditor:
     def _mac_ax_selection(pid: int) -> str:
         """Read selected text via the Accessibility API only (no clipboard)."""
         try:
-            import ApplicationServices as AS
-            app_el = AS.AXUIElementCreateApplication(pid)
-            err, focused = AS.AXUIElementCopyAttributeValue(
-                app_el, AS.kAXFocusedUIElementAttribute, None
-            )
-            if err == 0 and focused is not None:
+            AS, focused = GenericTextEditor._mac_ax_focused(pid)
+            if AS is not None:
                 err, text = AS.AXUIElementCopyAttributeValue(
                     focused, AS.kAXSelectedTextAttribute, None
                 )
@@ -457,16 +490,12 @@ class GenericTextEditor:
         if not pid:
             return "", "", ""
         try:
-            import ApplicationServices as AS
-            app_el = AS.AXUIElementCreateApplication(pid)
-            err, focused = AS.AXUIElementCopyAttributeValue(
-                app_el, AS.kAXFocusedUIElementAttribute, None
-            )
+            AS, focused = GenericTextEditor._mac_ax_focused(pid)
             selected = ""
             full = ""
             location: int | None = None
             length: int | None = None
-            if err == 0 and focused is not None:
+            if AS is not None:
                 err, text = AS.AXUIElementCopyAttributeValue(
                     focused, AS.kAXSelectedTextAttribute, None
                 )
@@ -510,6 +539,139 @@ class GenericTextEditor:
             return selected, before, after
         except Exception:
             return "", "", ""
+
+    def selection_details(self, target: dict[str, Any]) -> dict[str, Any]:
+        """Read (text, absolute range, context) through AX only, no clipboard."""
+        result: dict[str, Any] = {
+            "text": "",
+            "range": None,
+            "context_before": "",
+            "context_after": "",
+        }
+        if SYSTEM != "Darwin":
+            return result
+        pid = target.get("pid")
+        if not pid:
+            return result
+        AS, focused = GenericTextEditor._mac_ax_focused(pid)
+        if AS is None:
+            return result
+        try:
+            err, text = AS.AXUIElementCopyAttributeValue(
+                focused, AS.kAXSelectedTextAttribute, None
+            )
+            if err == 0 and text:
+                result["text"] = str(text)
+            err, range_val = AS.AXUIElementCopyAttributeValue(
+                focused, AS.kAXSelectedTextRangeAttribute, None
+            )
+            if err == 0 and range_val is not None:
+                result["range"] = _parse_ax_range(range_val)
+            err, value = AS.AXUIElementCopyAttributeValue(
+                focused, AS.kAXValueAttribute, None
+            )
+            full = str(value) if err == 0 and isinstance(value, str) else ""
+            location = (result["range"] or (None, None))[0]
+            if result["text"] and full:
+                before = ""
+                after = ""
+                if location is not None and 0 <= location <= len(full):
+                    end = location + len(result["text"])
+                    before = full[:location]
+                    after = full[end:]
+                elif result["text"] in full:
+                    idx = full.find(result["text"])
+                    before = full[:idx]
+                    after = full[idx + len(result["text"]) :]
+                from .live_preview import CONTEXT_CHARS
+
+                result["context_before"] = before[-CONTEXT_CHARS:]
+                result["context_after"] = after[:CONTEXT_CHARS]
+        except Exception:
+            pass
+        return result
+
+    def ax_bounds_for_range(
+        self, target: dict[str, Any], start: int, length: int
+    ) -> list[tuple[float, float, float, float]]:
+        """Return per-character screen rects for the absolute range via AX."""
+        if SYSTEM != "Darwin" or length <= 0:
+            return []
+        try:
+            import ApplicationServices as AS
+
+            if not AS.AXIsProcessTrusted():
+                return []
+        except Exception:
+            return []
+        AS, focused = GenericTextEditor._mac_ax_focused(target.get("pid") or 0)
+        if AS is None:
+            return []
+        rects: list[tuple[float, float, float, float]] = []
+        for offset in range(start, start + length):
+            try:
+                param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (offset, 1))
+                err, value = AS.AXUIElementCopyParameterizedAttributeValue(
+                    focused,
+                    AS.kAXBoundsForRangeParameterizedAttribute,
+                    param,
+                    None,
+                )
+                if err != 0 or value is None:
+                    continue
+                parsed = _parse_ax_rect(
+                    AS.AXValueGetValue(value, AS.kAXValueCGRectType, None)[1]
+                )
+                if parsed is not None:
+                    rects.append(parsed)
+            except Exception:
+                continue
+        return rects
+
+    def ax_replace_range(
+        self, target: dict[str, Any], start: int, length: int, new_text: str
+    ) -> tuple[bool, str]:
+        """Replace an absolute range in the focused field without keystrokes."""
+        if SYSTEM != "Darwin":
+            return False, "Live apply is only supported on macOS in this beta."
+        try:
+            import ApplicationServices as AS
+
+            if not AS.AXIsProcessTrusted():
+                return False, (
+                    "Accessibility permission is required to apply edits."
+                )
+        except Exception:
+            return False, "Accessibility permission could not be checked."
+        AS, focused = GenericTextEditor._mac_ax_focused(target.get("pid") or 0)
+        if AS is None:
+            return False, "Could not read the focused text field."
+        try:
+            param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
+            err = AS.AXUIElementSetParameterizedAttributeValue(
+                focused,
+                AS.kAXReplaceRangeWithTextParameterizedAttribute,
+                param,
+                new_text,
+            )
+            if err == 0:
+                return True, "Applied."
+            _debug_log(f"AXReplaceRangeWithText unavailable or failed: {err}")
+        except Exception as exc:
+            _debug_log(f"ax_replace_range error: {exc}")
+        try:
+            param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
+            AS.AXUIElementSetAttributeValue(
+                focused, AS.kAXSelectedTextRangeAttribute, param
+            )
+            err = AS.AXUIElementSetAttributeValue(
+                focused, AS.kAXSelectedTextAttribute, new_text
+            )
+            if err == 0:
+                return True, "Applied."
+        except Exception as exc:
+            _debug_log(f"ax_replace_range fallback error: {exc}")
+        return False, "Could not apply the edit in this app."
 
     @staticmethod
     def _mac_activate(target: dict[str, Any]) -> bool:

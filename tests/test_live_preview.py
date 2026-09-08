@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from types import SimpleNamespace
 from unittest import mock
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -310,3 +311,46 @@ def test_request_completion_survives_refactor(monkeypatch):
     assert result == "ok"
     assert captured["url"] == "https://api.example.com/v1/chat/completions"
     assert captured["payload"]["messages"][0]["content"] == "sys"
+
+
+def test_parse_ax_range_shapes():
+    from src import generic_editing as ge
+
+    assert ge._parse_ax_range((3, 4)) == (3, 4)
+    assert ge._parse_ax_range(SimpleNamespace(location=3, length=4)) == (3, 4)
+    assert ge._parse_ax_range(None) == (None, None)
+
+
+def test_parse_ax_rect_struct_and_tuple_shapes():
+    from src import generic_editing as ge
+
+    struct = SimpleNamespace(
+        origin=SimpleNamespace(x=1.0, y=2.0),
+        size=SimpleNamespace(width=30.0, height=16.0),
+    )
+    assert ge._parse_ax_rect(struct) == (1.0, 2.0, 30.0, 16.0)
+    assert ge._parse_ax_rect((5.0, 6.0, 7.0, 8.0)) == (
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+    )
+    assert ge._parse_ax_rect(None) is None
+
+
+def test_ax_bounds_for_range_guards_non_darwin(monkeypatch):
+    from src.generic_editing import GenericTextEditor
+
+    monkeypatch.setattr("src.generic_editing.SYSTEM", "Windows")
+    editor = GenericTextEditor()
+    assert editor.ax_bounds_for_range({"pid": 1}, 0, 5) == []
+
+
+def test_ax_replace_range_guards_non_darwin(monkeypatch):
+    from src.generic_editing import GenericTextEditor
+
+    monkeypatch.setattr("src.generic_editing.SYSTEM", "Windows")
+    editor = GenericTextEditor()
+    ok, message = editor.ax_replace_range({"pid": 1}, 0, 5, "x")
+    assert ok is False
+    assert "macOS" in message
