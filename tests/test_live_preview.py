@@ -559,3 +559,81 @@ def test_load_runtime_settings_merges_existing_live_preview(monkeypatch, tmp_pat
     loaded = settings_mod.load_runtime_settings()
     assert loaded["live_preview"]["enabled"] is False
     assert loaded["live_preview"]["delay_ms"] == 900
+
+
+def _live_settings():
+    return {
+        "live_preview": {
+            "enabled": True,
+            "delay_ms": 900,
+            "max_chars": 1500,
+            "use_local_model": True,
+        }
+    }
+
+
+def test_service_full_cycle_with_fake_provider(monkeypatch):
+    from src import live_preview as lp
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _FakeEditor("com.apple.TextEdit", "teh cat sat on teh mat")
+    editor.rects = [(10.0, 10.0, 30.0, 16.0)]
+    editor.applied = []
+    editor.ax_bounds_for_range = lambda target, start, length: [editor.rects[0]]
+
+    def replace(target, start, length, text):
+        editor.applied.append((start, length, text))
+        return True, "Applied."
+
+    editor.ax_replace_range = replace
+    monkeypatch.setattr(service, "_editor", editor)
+    result = {
+        "status": "ok",
+        "edits": [lp.Edit("teh", "the", "Spelling")],
+        "meta": {"provider": "fake"},
+    }
+
+    def fake_spawn(target, text, details, key):
+        service._on_done(result, key, text)
+
+    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
+    service._sample(now=10.0)
+    service._sample(now=11.0)
+    assert service._spans and service._spans[0].before == "teh"
+    service._apply_span(service._spans[0])
+    assert editor.applied == [(0, 3, "the")]
+
+
+def test_preview_cache_prevents_duplicate_provider_calls(monkeypatch):
+    from src import live_preview as lp
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _FakeEditor("com.apple.TextEdit", "teh cat sat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    calls = []
+    result = {
+        "status": "ok",
+        "edits": [lp.Edit("teh", "the", "Spelling")],
+        "meta": {"provider": "fake"},
+    }
+
+    def fake_spawn(target, text, details, key):
+        calls.append(text)
+        service._on_done(result, key, text)
+
+    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    service._sample(now=3.0)
+    service._sample(now=4.0)
+    assert len(calls) == 1
+    # Even when the unchanged-selection guard is bypassed, the cache key
+    # must prevent a second provider call for the same text.
+    service._previewed_text = ""
+    service._sample(now=5.0)
+    assert len(calls) == 1
