@@ -31,14 +31,16 @@
 - Packaged `dist/ByteProof.app`: launches; Settings contains
   "Live Suggestions (Beta)", the enable checkbox, the delay slider, and the
   local-model checkbox (verified through the accessibility tree).
-- Mail: shared AX capture path verified via TextEdit; Mail compose body does
-  not expose selected text through AX until content exists, so live preview is
-  inert there rather than failing (documented limitation).
-- Pages: blocked by a macOS automation-permission prompt during the campaign;
-  code path is shared with TextEdit. The real Pages bundle id
-  (`com.apple.iWork.Pages`) was added and is covered by a unit test; a live
-  Pages check still needs a human click-and-type because synthetic keystrokes
-  do not land in Pages' document body.
+- Mail: the compose body is a WebKit view. Even after text is pasted into it,
+  Mail exposes the body only as a read-only `AXStaticText` snapshot and never
+  reports `AXSelectedText`, so the live preview cannot capture the selection.
+  This is a platform limitation, not a crash: the service stays inert in Mail
+  compose. The existing hotkey proofread path keeps its clipboard fallback and
+  still works there.
+- Pages: `com.apple.iWork.Pages` is recognized and covered by a unit test. A
+  live run could not be completed because synthetic clicks and keystrokes do
+  not establish a text insertion point in the Pages canvas; a human
+  click-and-type check is required.
 - Apps that expose selection but not character bounds now fall back to the
   floating suggestions card instead of showing nothing (unit-tested).
 
