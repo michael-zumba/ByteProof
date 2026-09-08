@@ -204,7 +204,13 @@ def load_runtime_settings() -> dict[str, Any]:
         "automation": {
             "enabled": True,
             "rules": default_automation_rules(),
-        }
+        },
+        "live_preview": {
+            "enabled": True,
+            "delay_ms": 900,
+            "max_chars": 1500,
+            "use_local_model": True,
+        },
     }
     
     # Initialize providers with defaults
@@ -277,6 +283,9 @@ def load_runtime_settings() -> dict[str, Any]:
 
     if "automation" in loaded:
         settings["automation"].update(loaded["automation"])
+
+    if "live_preview" in loaded:
+        settings["live_preview"].update(loaded["live_preview"])
 
     _migrate_mac_hotkeys(settings)
     settings["general"]["temperature"] = max(0.0, min(2.0, settings["general"]["temperature"]))

@@ -535,3 +535,27 @@ def test_word_set_live_underline_builds_dotted_script(monkeypatch):
     script = captured[-1].decode("utf-8")
     assert "underline dot dot dash" in script
     assert "start 510 end 513" in script
+
+
+def test_load_runtime_settings_includes_live_preview_defaults(monkeypatch, tmp_path):
+    from src import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+    loaded = settings_mod.load_runtime_settings()
+    assert loaded["live_preview"] == {
+        "enabled": True,
+        "delay_ms": 900,
+        "max_chars": 1500,
+        "use_local_model": True,
+    }
+
+
+def test_load_runtime_settings_merges_existing_live_preview(monkeypatch, tmp_path):
+    from src import settings as settings_mod
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"live_preview": {"enabled": False}}))
+    monkeypatch.setattr(settings_mod, "SETTINGS_FILE", str(path))
+    loaded = settings_mod.load_runtime_settings()
+    assert loaded["live_preview"]["enabled"] is False
+    assert loaded["live_preview"]["delay_ms"] == 900

@@ -1035,6 +1035,8 @@ class SettingsDialog(QDialog):
     chk_launch_login: QCheckBox
     chk_keep_top: QCheckBox
     chk_auto_apply: QCheckBox
+    chk_live_preview: QCheckBox
+    chk_live_local: QCheckBox
     chk_sound: QCheckBox
     open_hotkey_edit: QKeySequenceEdit
     proofread_hotkey_edit: QKeySequenceEdit
@@ -1047,6 +1049,8 @@ class SettingsDialog(QDialog):
     combo_style: QComboBox
     combo_comment: QComboBox
     combo_context: QComboBox
+    live_delay_slider: QSlider
+    live_delay_label: QLabel
     automation_enabled_check: QCheckBox
     automation_list: QListWidget
     automation_add_btn: QPushButton
@@ -1374,6 +1378,50 @@ class SettingsDialog(QDialog):
         prefs_layout.addWidget(self.chk_sound)
 
         layout.addWidget(prefs_group)
+
+        live_group = QGroupBox("Live Suggestions (Beta)")
+        live_layout = QVBoxLayout(live_group)
+        live_layout.setSpacing(12)
+
+        self.chk_live_preview = QCheckBox(
+            "Show live suggestions when text is selected"
+        )
+        self.chk_live_preview.setChecked(
+            self.settings.get("live_preview", {}).get("enabled", True)
+        )
+        self.chk_live_preview.setToolTip(
+            "Underline suggested changes as soon as you select text in Word, "
+            "Pages, Mail, or Outlook. Hover a suggestion to preview it and "
+            "click to apply."
+        )
+        live_layout.addWidget(self.chk_live_preview)
+
+        delay_row = QHBoxLayout()
+        delay_label = QLabel("Preview delay")
+        self.live_delay_slider = QSlider(Qt.Orientation.Horizontal)
+        self.live_delay_slider.setRange(400, 2000)
+        self.live_delay_slider.setSingleStep(100)
+        self.live_delay_slider.setValue(
+            int(self.settings.get("live_preview", {}).get("delay_ms", 900))
+        )
+        self.live_delay_label = QLabel(f"{self.live_delay_slider.value()} ms")
+        self.live_delay_slider.valueChanged.connect(
+            lambda v: self.live_delay_label.setText(f"{v} ms")
+        )
+        delay_row.addWidget(delay_label)
+        delay_row.addWidget(self.live_delay_slider)
+        delay_row.addWidget(self.live_delay_label)
+        live_layout.addLayout(delay_row)
+
+        self.chk_live_local = QCheckBox(
+            "Prefer Local AI for live suggestions (saves cloud tokens)"
+        )
+        self.chk_live_local.setChecked(
+            self.settings.get("live_preview", {}).get("use_local_model", True)
+        )
+        live_layout.addWidget(self.chk_live_local)
+
+        layout.addWidget(live_group)
 
         hotkey_group = QGroupBox("Hotkeys")
         hotkey_layout = QFormLayout(hotkey_group)
@@ -3432,6 +3480,18 @@ class SettingsDialog(QDialog):
         self.settings.setdefault("automation", {})
         self.settings["automation"]["enabled"] = self.automation_enabled_check.isChecked()
         self.settings["automation"]["rules"] = self._read_automation_rules_from_list()
+
+        self.settings.setdefault("live_preview", {})
+        self.settings["live_preview"]["enabled"] = self.chk_live_preview.isChecked()
+        self.settings["live_preview"]["delay_ms"] = int(
+            self.live_delay_slider.value()
+        )
+        self.settings["live_preview"]["max_chars"] = int(
+            self.settings.get("live_preview", {}).get("max_chars", 1500)
+        )
+        self.settings["live_preview"]["use_local_model"] = (
+            self.chk_live_local.isChecked()
+        )
         
         open_seq = self.open_hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         self.settings["general"]["open_hotkey"] = self.qt_to_pynput(open_seq)
@@ -3768,6 +3828,18 @@ class ProofreaderApp(QMainWindow):
         self._escape_monitor = None
         self.toast = ToastNotification()
         self._start_app_tracking()
+        self.live_service = None
+        if platform.system() == "Darwin":
+            from .live_service import LivePreviewService
+
+            self.live_service = LivePreviewService(self)
+            self.live_service.refresh_settings(self.settings)
+            self.live_service.preview_error.connect(self._on_live_preview_error)
+            if self.settings.get("live_preview", {}).get("enabled", True):
+                self.live_service.start()
+            app_inst = QApplication.instance()
+            if app_inst is not None:
+                app_inst.aboutToQuit.connect(self.live_service.stop)
         register_url_scheme()
 
         app_inst = QApplication.instance()
@@ -5267,8 +5339,22 @@ class ProofreaderApp(QMainWindow):
                 self.settings = dialog.get_settings()
                 save_runtime_settings(self.settings)
             self._update_proofread_button()
+            self._refresh_live_service()
         except Exception as e:
             print(f"Error opening local AI settings: {e}")
+
+    def _refresh_live_service(self) -> None:
+        service = getattr(self, "live_service", None)
+        if service is None:
+            return
+        service.refresh_settings(self.settings)
+        if self.settings.get("live_preview", {}).get("enabled", True):
+            service.start()
+        else:
+            service.stop()
+
+    def _on_live_preview_error(self, message: str) -> None:
+        self._show_toast(f"Live suggestions: {message}", kind="warning")
 
     def run_proofread_task(self) -> None:
         if not self._check_license_access():
@@ -6359,6 +6445,7 @@ class ProofreaderApp(QMainWindow):
                     self.activateWindow()
             
             save_runtime_settings(updated)
+            self._refresh_live_service()
             if self.keep_top_action is not None:
                 self.keep_top_action.setChecked(
                     updated.get("general", {}).get("keep_on_top", True)
