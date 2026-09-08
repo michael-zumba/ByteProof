@@ -6,6 +6,10 @@ import sys
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
+from PyQt6.QtWidgets import QApplication
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
@@ -391,3 +395,92 @@ def test_popup_rows_track_changes_styles():
     assert ("old", "teh") in rows
     assert ("new", "the") in rows
     assert ("reason", "Spelling") in rows
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _qapp():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+class _FakeEditor:
+    def __init__(self, bundle_id: str, text: str):
+        self.bundle_id = bundle_id
+        self.text = text
+
+    def frontmost_app(self):
+        return {"bundle_id": self.bundle_id, "pid": 1, "name": "FakeApp"}
+
+    def permission_status(self):
+        return True, ""
+
+    def selection_details(self, target):
+        return {
+            "text": self.text,
+            "range": (0, len(self.text)),
+            "context_before": "",
+            "context_after": "",
+        }
+
+
+def test_service_decision_flow_skips_unchanged(monkeypatch):
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {
+            "live_preview": {
+                "enabled": True,
+                "delay_ms": 900,
+                "max_chars": 1500,
+                "use_local_model": True,
+            }
+        }
+    )
+    monkeypatch.setattr(
+        service, "_editor", _FakeEditor("com.apple.TextEdit", "this is a test sentence")
+    )
+    calls = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: calls.append(a))
+    service._sample(now=1000.0)
+    assert len(calls) == 0  # debounce: selection just changed
+    service._sample(now=2000.0)
+    assert len(calls) == 1
+    service._sample(now=3000.0)
+    assert len(calls) == 1
+
+
+def test_service_applies_span_through_ax(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {
+            "live_preview": {
+                "enabled": True,
+                "delay_ms": 900,
+                "max_chars": 1500,
+                "use_local_model": True,
+            }
+        }
+    )
+    applied = []
+
+    class FakeEditor:
+        def frontmost_app(self):
+            return {
+                "bundle_id": "com.apple.TextEdit",
+                "pid": 9,
+                "name": "TextEdit",
+            }
+
+        def ax_replace_range(self, target, start, length, text):
+            applied.append((start, length, text))
+            return True, "Applied."
+
+    service._editor = FakeEditor()
+    service._selection_start = 100
+    service._apply_span(EditSpan("teh", "the", "Spelling", 0, 3))
+    assert applied == [(100, 3, "the")]
