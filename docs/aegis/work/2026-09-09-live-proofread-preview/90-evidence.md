@@ -108,6 +108,23 @@
   click-and-select; if it still fails, the next step is a live AX dump while
   the user holds a selection in Pages.
 
+## Fourth polish round (1.9.0-beta.2)
+
+- Root cause of "permanent colour in Word": app sessions killed during
+  reinstall cycles skipped cleanup, leaving 11 marked characters in the
+  user's open document. Verified by scanning the live document and cleaning
+  them (underline and colour restored).
+- Word marks are now journaled to `live_word_marks.json` with their original
+  underline/colour and document name. On the next launch (or when Word becomes
+  frontmost), ByteProof restores any leftover marks automatically, so a
+  force-quit can no longer leave traces.
+- The global event tap could treat a click landing over the popup/card as a
+  click on the underline, applying an edit and removing the popup before the
+  button's click registered. Clicks inside the popup/card are now ignored by
+  the tap and reach the buttons (unit-tested).
+- Versioning is active: `1.9.0-beta.N` increments per update and is shown in
+  Settings/About and the app bundle.
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by

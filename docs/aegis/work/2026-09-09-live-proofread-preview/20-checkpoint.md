@@ -24,6 +24,9 @@
 - [x] Third polish round: ephemeral non-tracked Word underlines with exact
       restore, pinpoint word diffs, stable non-activating popup/card,
       wider hover targets, brighter UI
+- [x] Fourth polish round (1.9.0-beta.2): popup click stealing fixed,
+      Word mark journal + self-heal on crash/kill, leftover marks cleaned
+      from the live document
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence
