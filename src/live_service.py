@@ -78,7 +78,6 @@ class LivePreviewService(QObject):
         self._fingerprint = ""
         self._marks: list[EditSpan] = []
         self._mark_target: dict[str, Any] = {}
-        self._mark_start = 0
         self._mark_is_word = False
         self._mark_rects: list[QRect] = []
         self._overlay_spans: list[OverlaySpan] = []
@@ -94,6 +93,7 @@ class LivePreviewService(QObject):
         self._tap_callback_ref: Any = None
         self._hovered: int | None = None
         self._last_hover_ts = 0.0
+        self._last_rect_refresh = 0.0
         self._overlay.apply_requested.connect(self._apply_overlay_mark)
         self._overlay.apply_all_requested.connect(self._apply_all)
 
@@ -159,6 +159,17 @@ class LivePreviewService(QObject):
         if self._marks and self._target_changed(target):
             self._clear_marks()
 
+        # Keep underlines aligned while the user scrolls or the window moves:
+        # refresh character bounds for existing marks even with no selection.
+        if (
+            self._marks
+            and not self._mark_is_word
+            and now - self._last_rect_refresh >= 0.8
+            and not self._target_changed(target)
+        ):
+            self._last_rect_refresh = now
+            self._render_generic(self._marks)
+
         if text != self._seen_text:
             self._seen_text = text
             self._changed_at = now
@@ -191,9 +202,18 @@ class LivePreviewService(QObject):
         )
         cached = self._cache.get(key)
         if cached is not None:
-            self._set_marks(cached, target, selection_start, is_word)
+            absolute = [
+                EditSpan(
+                    span.before,
+                    span.after,
+                    span.reason,
+                    selection_start + span.start,
+                    selection_start + span.end,
+                )
+                for span in cached
+            ]
+            self._set_marks(absolute, target, is_word)
             return
-        self._clear_marks()
         self._spawn_preview(target, text, details, key, selection_start, is_word)
 
     def _target_changed(self, target: dict[str, Any]) -> bool:
@@ -256,7 +276,17 @@ class LivePreviewService(QObject):
             f"provider={result.get('meta', {}).get('provider')}"
         )
         self._cache.put(key, spans)
-        self._set_marks(spans, target, selection_start, is_word)
+        absolute = [
+            EditSpan(
+                span.before,
+                span.after,
+                span.reason,
+                selection_start + span.start,
+                selection_start + span.end,
+            )
+            for span in spans
+        ]
+        self._set_marks(absolute, target, is_word)
 
     def _on_failed(self, message: str) -> None:
         self._worker = None
@@ -270,20 +300,27 @@ class LivePreviewService(QObject):
         self,
         spans: list[EditSpan],
         target: dict[str, Any],
-        selection_start: int,
         is_word: bool,
     ) -> None:
-        self._marks = spans
+        """Merge new spans into the existing marks (deduplicating)."""
+        existing = {
+            (span.start, span.end, span.before, span.after)
+            for span in self._marks
+        }
+        for span in spans:
+            key = (span.start, span.end, span.before, span.after)
+            if key not in existing:
+                self._marks.append(span)
+                existing.add(key)
         self._mark_target = target
-        self._mark_start = selection_start
         self._mark_is_word = is_word
-        if not spans:
+        if not self._marks:
             self._clear_marks()
             return
         if is_word:
-            self._render_word(spans)
+            self._render_word(self._marks)
         else:
-            self._render_generic(spans)
+            self._render_generic(self._marks)
 
     def _render_generic(self, spans: list[EditSpan]) -> None:
         overlay_spans: list[OverlaySpan] = []
@@ -291,7 +328,7 @@ class LivePreviewService(QObject):
         for index, span in enumerate(spans):
             bounds = self._editor.ax_bounds_for_range(
                 self._mark_target,
-                self._mark_start + span.start,
+                span.start,
                 span.end - span.start,
             )
             rect = self._rect_from_bounds(bounds)
@@ -315,10 +352,9 @@ class LivePreviewService(QObject):
 
         word = get_word_integration()
         try:
-            word.clear_live_underlines()
             for span in spans:
                 word.set_live_underline(
-                    self._mark_start, span.start, span.end, True
+                    0, span.start, span.end, True
                 )
         except Exception:
             pass
@@ -511,18 +547,49 @@ class LivePreviewService(QObject):
             from .word_integration import get_word_integration
 
             ok, message = get_word_integration().apply_live_edit(
-                self._mark_start, span.start, span.end, span.after
+                0, span.start, span.end, span.after
             )
         else:
             ok, message = self._editor.ax_replace_range(
                 self._mark_target,
-                self._mark_start + span.start,
+                span.start,
                 span.end - span.start,
                 span.after,
             )
         self.apply_done.emit(message)
         if ok:
+            self._rerender_after_apply(index)
+
+    def _rerender_after_apply(self, removed_index: int) -> None:
+        """Drop the applied mark, shift later marks, and keep the rest."""
+        removed = self._marks[removed_index]
+        delta = len(removed.after) - (removed.end - removed.start)
+        new_marks: list[EditSpan] = []
+        for i, span in enumerate(self._marks):
+            if i == removed_index:
+                continue
+            if span.start < removed.end and span.end > removed.start:
+                continue  # overlapping mark is stale after the edit
+            if span.start >= removed.end:
+                span = EditSpan(
+                    span.before,
+                    span.after,
+                    span.reason,
+                    span.start + delta,
+                    span.end + delta,
+                )
+            new_marks.append(span)
+        self._marks = new_marks
+        if not new_marks:
             self._clear_marks()
+            return
+        if self._mark_is_word:
+            from .word_integration import get_word_integration
+
+            get_word_integration().clear_live_underlines()
+            self._render_word(new_marks)
+        else:
+            self._render_generic(new_marks)
 
     def _apply_all(self) -> None:
         """Apply every active suggestion directly, without opening the app."""
@@ -536,18 +603,18 @@ class LivePreviewService(QObject):
             word = None
         applied = 0
         delta = 0
-        for span in list(self._marks):
+        for span in sorted(list(self._marks), key=lambda s: s.start):
             rel_start = span.start + delta
             rel_end = span.end + delta
             try:
                 if word is not None:
                     ok, _ = word.apply_live_edit(
-                        self._mark_start, rel_start, rel_end, span.after
+                        0, rel_start, rel_end, span.after
                     )
                 else:
                     ok, _ = self._editor.ax_replace_range(
                         self._mark_target,
-                        self._mark_start + rel_start,
+                        rel_start,
                         rel_end - rel_start,
                         span.after,
                     )

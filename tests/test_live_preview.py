@@ -554,10 +554,9 @@ def test_service_applies_mark_through_ax(monkeypatch):
         "pid": 9,
         "name": "TextEdit",
     }
-    service._mark_start = 100
     service._mark_is_word = False
     service._apply_mark(0)
-    assert applied == [(100, 3, "the")]
+    assert applied == [(0, 3, "the")]
 
 
 def test_service_apply_all_applies_each_mark_with_delta(monkeypatch):
@@ -583,7 +582,6 @@ def test_service_apply_all_applies_each_mark_with_delta(monkeypatch):
         "pid": 9,
         "name": "TextEdit",
     }
-    service._mark_start = 0
     service._mark_is_word = False
     service._apply_all()
     assert applied == [(0, 3, "there"), (32, 5, "was")]
@@ -844,3 +842,86 @@ def test_card_and_popup_titles_are_suggested_changes():
         if label.text() == "Suggested changes"
     ]
     assert titles
+
+
+def test_card_rebuild_leaves_exactly_one_of_each_control():
+    from PyQt6.QtWidgets import QLabel, QPushButton
+
+    from src.live_preview import EditSpan
+    from src.live_overlay import WordSuggestionCard
+
+    def walk_items(layout):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            sub = item.layout()
+            if sub is not None:
+                yield from walk_items(sub)
+            widget = item.widget()
+            if widget is not None:
+                yield widget
+                if widget.layout() is not None:
+                    yield from walk_items(widget.layout())
+
+    card = WordSuggestionCard()
+    spans = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("where", "was", "Grammar", 30, 35),
+    ]
+    for _ in range(3):
+        card.set_spans(spans)
+    widgets = list(walk_items(card.layout()))
+    buttons = [
+        button.text()
+        for button in widgets
+        if isinstance(button, QPushButton)
+    ]
+    titles = [
+        label.text()
+        for label in widgets
+        if isinstance(label, QLabel)
+        if label.text() == "Suggested changes"
+    ]
+    assert buttons.count("Apply") == 2
+    assert buttons.count("Apply all") == 1
+    assert buttons.count("×") == 1
+    assert len(titles) == 1
+
+
+def test_service_accumulates_marks_across_selections(monkeypatch):
+    from src import live_preview as lp
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _MutableEditor("com.apple.TextEdit", "teh cat sat")
+    editor.rects = [(10.0, 10.0, 30.0, 16.0)]
+    editor.ax_bounds_for_range = lambda target, start, length: [editor.rects[0]]
+    monkeypatch.setattr(service, "_editor", editor)
+    results = iter(
+        [
+            {
+                "status": "ok",
+                "edits": [lp.Edit("teh", "the", "Spelling")],
+                "meta": {"provider": "fake"},
+            },
+            {
+                "status": "ok",
+                "edits": [lp.Edit("where", "was", "Grammar")],
+                "meta": {"provider": "fake"},
+            },
+        ]
+    )
+
+    def fake_spawn(target, text, details, key, selection_start, is_word):
+        service._on_done(
+            next(results), key, text, target, selection_start, is_word
+        )
+
+    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    assert [s.before for s in service._marks] == ["teh"]
+    editor.text = "it where fine"
+    service._sample(now=3.0)
+    service._sample(now=4.0)
+    assert [s.before for s in service._marks] == ["teh", "where"]

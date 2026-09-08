@@ -354,8 +354,8 @@ class GenericTextEditor:
 
         Some apps focus a container (scroll area, canvas) while the text view
         with the selection lives one or two levels deeper. Walk a bounded
-        subtree and return the first element that exposes the selected-text
-        attribute, falling back to the focused element.
+        subtree of the focused element first, then of the focused window, and
+        return the first element that exposes a text value and selection.
         """
         AS, focused = GenericTextEditor._mac_ax_focused(pid)
         if AS is None:
@@ -363,26 +363,50 @@ class GenericTextEditor:
 
         def is_text_target(el: Any) -> bool:
             try:
-                names = AS.AXUIElementCopyAttributeNames(el, None)[1] or []
-                return "AXSelectedText" in names and "AXValue" in names
+                err, value = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXValueAttribute, None
+                )
+                if err != 0 or not isinstance(value, str):
+                    return False
+                err, _ = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXSelectedTextAttribute, None
+                )
+                return err == 0
             except Exception:
                 return False
 
-        queue: list[Any] = [focused]
-        visited = 0
-        while queue and visited < 60:
-            el = queue.pop(0)
-            visited += 1
-            if is_text_target(el):
-                return AS, el
-            try:
-                _, children = AS.AXUIElementCopyAttributeValue(
-                    el, AS.kAXChildrenAttribute, None
-                )
-                if children:
-                    queue.extend(list(children)[:24])
-            except Exception:
-                pass
+        def search(roots: list[Any], budget: int, children_cap: int) -> Any:
+            queue: list[Any] = list(roots)
+            visited = 0
+            while queue and visited < budget:
+                el = queue.pop(0)
+                visited += 1
+                if is_text_target(el):
+                    return el
+                try:
+                    _, children = AS.AXUIElementCopyAttributeValue(
+                        el, AS.kAXChildrenAttribute, None
+                    )
+                    if children:
+                        queue.extend(list(children)[:children_cap])
+                except Exception:
+                    pass
+            return None
+
+        found = search([focused], 60, 24)
+        if found is not None:
+            return AS, found
+        try:
+            app_el = AS.AXUIElementCreateApplication(pid)
+            _, window = AS.AXUIElementCopyAttributeValue(
+                app_el, AS.kAXFocusedWindowAttribute, None
+            )
+            if window is not None:
+                found = search([window], 150, 30)
+                if found is not None:
+                    return AS, found
+        except Exception:
+            pass
         return AS, focused
 
     @staticmethod

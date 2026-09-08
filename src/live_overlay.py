@@ -8,9 +8,9 @@ from PyQt6.QtGui import QColor, QPainter, QPen, QRegion
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -19,31 +19,37 @@ from PyQt6.QtWidgets import (
 
 from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
 
-CARD_SHEET = (
-    "QFrame { background: #FFFFFF; border: 1px solid #E8E4E0;"
-    " border-radius: 12px; }"
+# Google-inspired surface and typography.
+SURFACE_SHEET = (
+    "QFrame { background: #FFFFFF; border: 1px solid #DADCE0;"
+    " border-radius: 14px; }"
 )
-TITLE_SHEET = "color: #44403C; font-size: 12px; font-weight: 700;"
+TITLE_SHEET = "color: #202124; font-size: 13px; font-weight: 600;"
 OLD_SHEET = (
-    "color: #B91C1C; background: #FEF2F2; border-radius: 6px;"
-    " padding: 2px 7px; font-size: 12px;"
+    "color: #C5221F; background: #FCE8E6; border-radius: 8px;"
+    " padding: 3px 8px; font-size: 13px;"
 )
 NEW_SHEET = (
-    "color: #166534; background: #F0FDF4; border-radius: 6px;"
-    " padding: 2px 7px; font-size: 12px; font-weight: 600;"
+    "color: #137333; background: #E6F4EA; border-radius: 8px;"
+    " padding: 3px 8px; font-size: 13px; font-weight: 500;"
 )
-REASON_SHEET = "color: #78716C; font-size: 11px;"
+REASON_SHEET = "color: #5F6368; font-size: 11px;"
 PRIMARY_BUTTON = (
-    "QPushButton { background: #1A3A2A; color: #FFFFFF;"
-    " border: 1px solid #143024; border-radius: 8px; padding: 5px 14px;"
-    " font-size: 12px; font-weight: 700; }"
-    "QPushButton:hover { background: #143024; }"
+    "QPushButton { background: #1A73E8; color: #FFFFFF; border: none;"
+    " border-radius: 18px; padding: 6px 18px; font-size: 13px;"
+    " font-weight: 500; }"
+    "QPushButton:hover { background: #1765CC; }"
 )
 SECONDARY_BUTTON = (
-    "QPushButton { background: #EDF3EF; color: #143024;"
-    " border: 1px solid #A9C7B3; border-radius: 8px; padding: 5px 14px;"
-    " font-size: 12px; font-weight: 600; }"
-    "QPushButton:hover { background: #D6E4DB; }"
+    "QPushButton { background: transparent; color: #1A73E8;"
+    " border: 1px solid #DADCE0; border-radius: 18px; padding: 6px 18px;"
+    " font-size: 13px; font-weight: 500; }"
+    "QPushButton:hover { background: #F8F9FA; }"
+)
+CLOSE_BUTTON = (
+    "QPushButton { border: none; color: #5F6368; font-size: 16px;"
+    " background: transparent; border-radius: 12px; }"
+    "QPushButton:hover { background: #F1F3F4; color: #202124; }"
 )
 
 
@@ -75,12 +81,16 @@ def popup_rows(span: OverlaySpan) -> list[tuple[str, str]]:
     return rows
 
 
-def _add_shadow(widget: QWidget) -> None:
-    effect = QGraphicsDropShadowEffect(widget)
-    effect.setBlurRadius(24)
-    effect.setOffset(0, 6)
-    effect.setColor(QColor(0, 0, 0, 36))
-    widget.setGraphicsEffect(effect)
+def clear_layout(layout: QLayout) -> None:
+    """Remove every item, including nested layouts, from a layout."""
+    while layout.count():
+        item = layout.takeAt(0)
+        sub = item.layout()
+        if sub is not None:
+            clear_layout(sub)
+        widget = item.widget()
+        if widget is not None:
+            widget.deleteLater()
 
 
 def _clamp_rect(rect: QRect) -> QRect:
@@ -98,7 +108,7 @@ def _clamp_rect(rect: QRect) -> QRect:
 
 
 class _SuggestionPopup(QFrame):
-    """A compact, premium single-edit card that never steals focus."""
+    """A compact, Google-styled single-edit card."""
 
     apply_requested = pyqtSignal(int)
     apply_all_requested = pyqtSignal()
@@ -111,31 +121,25 @@ class _SuggestionPopup(QFrame):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setStyleSheet(CARD_SHEET)
-        self.setMaximumWidth(400)
-        _add_shadow(self)
+        self.setStyleSheet(SURFACE_SHEET)
+        self.setMaximumWidth(420)
 
     def set_span(self, index: int, span: OverlaySpan) -> None:
         layout = self.layout()
         if layout is None:
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(14, 12, 14, 12)
-            layout.setSpacing(6)
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+            layout.setContentsMargins(16, 14, 16, 14)
+            layout.setSpacing(8)
+        else:
+            clear_layout(layout)
 
         header = QHBoxLayout()
+        header.setSpacing(8)
         title = QLabel("Suggested changes")
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet(
-            "QPushButton { border: none; color: #A8A29E; font-size: 14px; }"
-            "QPushButton:hover { color: #44403C; }"
-        )
+        close_btn.setFixedSize(24, 24)
+        close_btn.setStyleSheet(CLOSE_BUTTON)
         close_btn.clicked.connect(self.dismissed.emit)
         header.addWidget(title)
         header.addStretch()
@@ -145,7 +149,7 @@ class _SuggestionPopup(QFrame):
         for style, text in popup_rows(span):
             label = QLabel()
             label.setWordWrap(True)
-            label.setMaximumWidth(372)
+            label.setMaximumWidth(380)
             if style == "old":
                 label.setText(f"<s>{text}</s>")
                 label.setStyleSheet(OLD_SHEET)
@@ -158,6 +162,7 @@ class _SuggestionPopup(QFrame):
             layout.addWidget(label)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         apply_btn = QPushButton("Apply")
         apply_btn.setStyleSheet(PRIMARY_BUTTON)
         apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -178,13 +183,13 @@ class _SuggestionPopup(QFrame):
         """Position below the anchor, or above it when there is no room."""
         target = QRect(
             anchor.left(),
-            anchor.bottom() + 8,
+            anchor.bottom() + 10,
             self.width(),
             self.height(),
         )
         area = _clamp_rect(target)
         if area.y() != target.y():
-            target.moveTop(max(0, anchor.top() - self.height() - 8))
+            target.moveTop(max(0, anchor.top() - self.height() - 10))
             area = _clamp_rect(target)
         self.move(area.topLeft())
 
@@ -282,12 +287,7 @@ class LiveOverlay(QWidget):
 
 
 class WordSuggestionCard(QWidget):
-    """A cursor-anchored card listing all Word edits in track-changes style.
-
-    Word exposes no character bounds through Accessibility, so it gets native
-    in-document underlines plus this card, which follows the pointer and stays
-    available while the marks persist.
-    """
+    """A cursor-anchored card listing all Word edits in track-changes style."""
 
     apply_requested = pyqtSignal(int)
     apply_all_requested = pyqtSignal()
@@ -300,31 +300,25 @@ class WordSuggestionCard(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setStyleSheet(CARD_SHEET)
-        self.setMaximumWidth(440)
-        _add_shadow(self)
+        self.setStyleSheet(SURFACE_SHEET)
+        self.setMaximumWidth(460)
 
     def set_spans(self, spans: list[EditSpan]) -> None:
         layout = self.layout()
         if layout is None:
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(14, 12, 14, 12)
-            layout.setSpacing(6)
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+            layout.setContentsMargins(16, 14, 16, 14)
+            layout.setSpacing(8)
+        else:
+            clear_layout(layout)
 
         header = QHBoxLayout()
+        header.setSpacing(8)
         title = QLabel("Suggested changes")
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setStyleSheet(
-            "QPushButton { border: none; color: #A8A29E; font-size: 14px; }"
-            "QPushButton:hover { color: #44403C; }"
-        )
+        close_btn.setFixedSize(24, 24)
+        close_btn.setStyleSheet(CLOSE_BUTTON)
         close_btn.clicked.connect(self.dismissed.emit)
         header.addWidget(title)
         header.addStretch()
@@ -334,22 +328,22 @@ class WordSuggestionCard(QWidget):
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(6)
+        body_layout.setSpacing(8)
         for index, span in enumerate(spans):
             row = QFrame()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 2, 0, 2)
-            row_layout.setSpacing(6)
+            row_layout.setSpacing(8)
             old_label = QLabel(f"<s>{span.before}</s>")
             old_label.setStyleSheet(OLD_SHEET)
             old_label.setWordWrap(True)
-            old_label.setMaximumWidth(150)
+            old_label.setMaximumWidth(160)
             arrow = QLabel("→")
-            arrow.setStyleSheet("color: #A8A29E;")
+            arrow.setStyleSheet("color: #9AA0A6;")
             new_label = QLabel(span.after)
             new_label.setStyleSheet(NEW_SHEET)
             new_label.setWordWrap(True)
-            new_label.setMaximumWidth(170)
+            new_label.setMaximumWidth(180)
             apply_btn = QPushButton("Apply")
             apply_btn.setStyleSheet(PRIMARY_BUTTON)
             apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -372,12 +366,15 @@ class WordSuggestionCard(QWidget):
             scroll.setWidgetResizable(True)
             scroll.setWidget(body)
             scroll.setMaximumHeight(360)
-            scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+            scroll.setStyleSheet(
+                "QScrollArea { border: none; background: transparent; }"
+            )
             layout.addWidget(scroll)
         else:
             layout.addWidget(body)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         apply_all_btn = QPushButton("Apply all")
         apply_all_btn.setStyleSheet(PRIMARY_BUTTON)
         apply_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -388,5 +385,7 @@ class WordSuggestionCard(QWidget):
         self.adjustSize()
 
     def place_near(self, point: QPoint) -> None:
-        target = QRect(point.x() + 14, point.y() + 14, self.width(), self.height())
+        target = QRect(
+            point.x() + 14, point.y() + 14, self.width(), self.height()
+        )
         self.move(_clamp_rect(target).topLeft())
