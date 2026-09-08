@@ -3,9 +3,11 @@
 ## Automated tests
 
 - `QT_QPA_PLATFORM=offscreen ./venv/bin/python -m pytest tests/test_live_preview.py -q`
-  → `39 passed` (parse, mapping incl. repeated occurrences, trigger decisions
+  → `44 passed` (parse, mapping incl. repeated occurrences, trigger decisions
   for every target bundle id, cache/LRU, settings schema, Word AppleScript
-  scripts, overlay render, service cycle, cache efficiency, card fallback).
+  scripts, overlay render, service cycle, cache efficiency, card fallback,
+  reselect-after-deselect, apply-all delta offsets, mark persistence,
+  "Suggested changes" titles).
 - `QT_QPA_PLATFORM=offscreen ./venv/bin/python tests/test_smoke.py`
   → `ALL_SMOKE_TESTS_PASSED` (existing behavior unchanged after the
   `_request_completion` refactor).
@@ -47,6 +49,18 @@
   rather than failing in that state.
 - Apps that expose selection but not character bounds now fall back to the
   floating suggestions card instead of showing nothing (unit-tested).
+
+## Polish round (user feedback, live)
+
+- Marks persist after the selection is cleared: overlay underlines stay
+  visible, and hovering a mark reopens the popup with no new provider call.
+- "Apply all" applied three edits directly with correct offset deltas
+  (`the cat sat on the mat and it was fine`) while TextEdit stayed frontmost;
+  the ByteProof window was not raised.
+- Browser compatibility verified in Google Chrome: the service read a web
+  textarea selection and fired a preview, covering Gmail-in-browser.
+- Popup and card redesigned (premium styling, auto-sizing, screen clamping)
+  and titled "Suggested changes".
 
 ## Efficiency
 

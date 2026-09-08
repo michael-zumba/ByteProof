@@ -14,6 +14,10 @@
 - [x] Task 9: Word/TextEdit visual runs + accuracy corpus + packaged build
       (Mail compose and Pages partially environment-blocked; see evidence)
 - [x] Task 10: full verification (suite green, installer notarized)
+- [x] Polish round from Word testing: "Suggested changes" title, premium
+      popup/card redesign with auto-sizing, direct background apply/apply-all,
+      persistent marks + hover-after-deselect, reselect fix, permissive
+      app/browser compatibility, AX descendant text search
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence
