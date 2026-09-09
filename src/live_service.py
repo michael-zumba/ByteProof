@@ -286,7 +286,13 @@ class LivePreviewService(QObject):
             text == self._previewed_text,
         )
         if decision != "run":
-            if decision not in ("unchanged", "not_stable", "empty", "self"):
+            if decision not in (
+                "unchanged",
+                "not_stable",
+                "empty",
+                "self",
+                "no_permission",
+            ):
                 _debug_log(f"LIVE SKIP: {decision} app={target.get('name')!r}")
             return
         if self._retry_not_before is not None and now < self._retry_not_before:

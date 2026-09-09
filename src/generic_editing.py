@@ -943,7 +943,10 @@ class GenericTextEditor:
 
         # 2. Select the sub-range, then write the selected-text attribute.
         #    Browsers are skipped: Chrome/Safari accept this write with a
-        #    success code but never commit it to the page.
+        #    success code but never commit it to the page. Other apps get
+        #    the write first, but it is only trusted when the document
+        #    verifiably changed — several apps (e.g. Outlook) report success
+        #    without committing either.
         if not is_browser:
             for el in elements:
                 try:
@@ -952,11 +955,20 @@ class GenericTextEditor:
                         _debug_log(f"ax_replace_range set-range err={err}")
                         continue
                     err = _set_text(el)
-                    if err == 0:
+                    if err != 0:
+                        _debug_log(
+                            f"ax_replace_range set-selected-text err={err}"
+                        )
+                        continue
+                    verdict = _verify_range_write(AS, elements, start, new_text)
+                    _log_paste_verdict(verdict, new_text)
+                    if verdict == "ok":
                         return True, "Applied."
                     _debug_log(
-                        f"ax_replace_range set-selected-text err={err}"
+                        "ax_replace_range: AX write unverified "
+                        f"({verdict}); falling back to paste"
                     )
+                    break
                 except Exception as exc:
                     _debug_log(
                         f"ax_replace_range attribute fallback error: {exc}"
@@ -991,9 +1003,9 @@ class GenericTextEditor:
             _paste()
             verdict = _verify_range_write(AS, elements, start, new_text)
             _log_paste_verdict(verdict, new_text)
-            if is_browser and verdict == "mismatch" and range_ok:
-                # Chrome can ignore process-targeted events; retry through
-                # System Events keystrokes (paste over the same range is
+            if verdict == "mismatch" and range_ok:
+                # Some apps ignore process-targeted events; retry through
+                # System Events keystrokes (pasting over the same range is
                 # idempotent, so a retry cannot duplicate text).
                 _debug_log("ax_replace_range: retrying paste via System Events")
                 _mac_system_events_key("v", target.get("name") or "")

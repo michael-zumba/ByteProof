@@ -1555,6 +1555,77 @@ def test_ax_replace_range_browser_uses_paste_not_ax_write(monkeypatch):
     assert FakeAS.kAXSelectedTextAttribute not in FakeAS.set_attr_calls
 
 
+def test_ax_replace_range_falls_back_to_paste_when_write_unverified(monkeypatch):
+    from typing import ClassVar
+
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+        value = "zzz cat sat"  # the AX write never reaches the value
+        set_attr_calls: ClassVar[list[str]] = []
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, v):
+            return v
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, v):
+            FakeAS.set_attr_calls.append(attr)
+            return 0  # writes claim success (Outlook-style)
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, FakeAS.value
+            return 0, ""
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    posted = []
+
+    def fake_post(code, pid):
+        posted.append(code)
+        FakeAS.value = "the cat sat"  # the paste lands
+
+    monkeypatch.setattr("src.generic_editing._post_mac_key", fake_post)
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "Outlook", "bundle_id": "com.microsoft.outlook"},
+        0,
+        3,
+        "the",
+        allow_direct_paste=False,
+    )
+    assert ok is True and message == "Applied."
+    assert FakeAS.kAXSelectedTextAttribute in FakeAS.set_attr_calls
+    assert posted == [9]  # verification failed -> real paste followed
+
+
 def test_ax_replace_range_pastes_when_attributes_fail(monkeypatch):
     from src.generic_editing import GenericTextEditor
 
