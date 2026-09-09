@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
+from PyQt6.QtCore import QEasingCurve, QPoint, QRect, Qt, QVariantAnimation, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QRegion
 from PyQt6.QtWidgets import (
     QApplication,
@@ -24,40 +24,46 @@ from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
 
 # Bright, Google-inspired surfaces and typography.
 SURFACE_SHEET = (
-    "QFrame { background: #FFFFFF; border: 1px solid #E8EAED;"
-    " border-radius: 16px; }"
+    "QFrame { background: #FFFFFF; border: 1px solid #E3E6EB;"
+    " border-radius: 20px; }"
 )
 TITLE_SHEET = "color: #202124; font-size: 14px; font-weight: 600;"
 DIFF_SHEET = "color: #202124; font-size: 14px;"
 REASON_SHEET = "color: #5F6368; font-size: 12px;"
+DIFF_BOX = (
+    "QFrame { background: #F7F8FA; border: 1px solid #EDF0F4;"
+    " border-radius: 12px; }"
+)
 PRIMARY_BUTTON = (
     "QPushButton { background: #1A73E8; color: #FFFFFF; border: none;"
     " border-radius: 20px; padding: 7px 20px; font-size: 14px;"
     " font-weight: 500; }"
     "QPushButton:hover { background: #1765CC; }"
+    "QPushButton:pressed { background: #1256A8; }"
 )
 SECONDARY_BUTTON = (
     "QPushButton { background: #FFFFFF; color: #1A73E8;"
     " border: 1px solid #DADCE0; border-radius: 20px; padding: 7px 20px;"
     " font-size: 14px; font-weight: 500; }"
     "QPushButton:hover { background: #F8F9FA; }"
+    "QPushButton:pressed { background: #EDF0F4; }"
 )
 CLOSE_BUTTON = (
     "QPushButton { border: none; color: #5F6368; font-size: 16px;"
-    " background: transparent; border-radius: 12px; }"
+    " background: transparent; border-radius: 13px; }"
     "QPushButton:hover { background: #F1F3F4; color: #202124; }"
+    "QPushButton:pressed { background: #E4E7EB; color: #202124; }"
 )
 
 OLD_STYLE = "color:#C5221F; background:#FCE8E6;"
 NEW_STYLE = "color:#137333; background:#E6F4EA; font-weight:500;"
 ARROW_STYLE = "color:#9AA0A6;"
 CONTEXT_STYLE = "color:#5F6368;"
-DIVIDER_SHEET = "QFrame { background: #EEF0F3; border: none; }"
+DIVIDER_SHEET = "QFrame { background: #F1F3F5; border: none; }"
 REASON_CHIP = (
     "color: #5F6368; font-size: 11px; background: #F1F3F4;"
     " border-radius: 9px; padding: 2px 8px;"
 )
-SHADOW_MARGIN = 12
 
 
 @dataclass(frozen=True)
@@ -370,11 +376,12 @@ def _hairline() -> QFrame:
 
 
 class WordSuggestionCard(QWidget):
-    """A cursor-anchored card listing all Word edits in track-changes style.
+    """A floating suggestion card that can be dragged by its header.
 
-    The window itself is a translucent margin around an opaque rounded card,
-    so a soft drop shadow can render without touching the card's composite
-    behaviour (the same pattern the toast notification uses).
+    The window stays fully opaque (translucent tool windows composite as
+    black rectangles next to normal windows on some macOS versions), so all
+    depth comes from the rounded surface, soft borders, and the pop-in
+    animation instead of a drop shadow.
     """
 
     apply_requested = pyqtSignal(int)
@@ -389,39 +396,132 @@ class WordSuggestionCard(QWidget):
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(
-            SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN
-        )
-        outer.setSpacing(0)
-        self._card = QFrame()
-        self._card.setStyleSheet(SURFACE_SHEET)
-        outer.addWidget(self._card)
-        self.setMinimumWidth(320 + 2 * SHADOW_MARGIN)
-        self.setMaximumWidth(480 + 2 * SHADOW_MARGIN)
-        try:
-            from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        self.setStyleSheet(SURFACE_SHEET)
+        self.setMinimumWidth(320)
+        self.setMaximumWidth(480)
+        self._header_widget: QWidget | None = None
+        self._dragging = False
+        self._drag_offset = QPoint()
+        self._pop_anim = None
+        self._pop_start: QRect | None = None
+        self._pop_target: QRect | None = None
 
-            shadow = QGraphicsDropShadowEffect(self._card)
-            shadow.setBlurRadius(26)
-            shadow.setOffset(0, 7)
-            shadow.setColor(QColor(10, 15, 25, 60))
-            self._card.setGraphicsEffect(shadow)
+    # --- drag-to-move (header only) ---
+
+    def _header_zone(self) -> QRect:
+        header = self._header_widget
+        if header is None:
+            return QRect()
+        return QRect(header.mapTo(self, QPoint(0, 0)), header.size())
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            zone = self._header_zone()
+            if zone.contains(pos) and not zone.isEmpty():
+                self._dragging = True
+                self._drag_offset = (
+                    event.globalPosition().toPoint()
+                    - self.frameGeometry().topLeft()
+                )
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            # Keep the manually placed panel inside the screen it sits on.
+            self.move(_clamp_rect(self.frameGeometry(), self.pos()).topLeft())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    # --- pop-in animation ---
+
+    def pop_in(self) -> None:
+        """Fade in and grow slightly from the panel's top-left corner."""
+        self.stop_pop()
+        target = self.geometry()
+        self._pop_start = QRect(
+            target.left() + int(target.width() * 0.08),
+            target.top() + int(target.height() * 0.10),
+            int(target.width() * 0.84),
+            int(target.height() * 0.80),
+        )
+        self._pop_target = target
+        try:
+            self.setWindowOpacity(0.0)
+            self.setGeometry(self._pop_start)
+            anim = QVariantAnimation(self)
+            anim.setDuration(170)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.valueChanged.connect(self._on_pop_frame)
+            anim.finished.connect(self._on_pop_finished)
+            self._pop_anim = anim
+            anim.start()
         except Exception:
-            pass  # shadow is decorative; never worth breaking the panel
+            self.setWindowOpacity(1.0)
+            self.setGeometry(target)
+
+    def stop_pop(self) -> None:
+        anim = self._pop_anim
+        if anim is not None:
+            anim.stop()
+            self._pop_anim = None
+        self._pop_start = None
+        self._pop_target = None
+        self.setWindowOpacity(1.0)
+
+    def _on_pop_frame(self, value: float) -> None:
+        start = self._pop_start
+        target = self._pop_target
+        if start is None or target is None:
+            return
+        rect = QRect(
+            round(start.x() + (target.x() - start.x()) * value),
+            round(start.y() + (target.y() - start.y()) * value),
+            round(start.width() + (target.width() - start.width()) * value),
+            round(start.height() + (target.height() - start.height()) * value),
+        )
+        self.setGeometry(rect)
+        self.setWindowOpacity(float(value))
+
+    def _on_pop_finished(self) -> None:
+        anim = self._pop_anim
+        self._pop_anim = None
+        if anim is not None:
+            anim.deleteLater()
+        target = self._pop_target
+        self._pop_start = None
+        self._pop_target = None
+        self.setWindowOpacity(1.0)
+        if target is not None:
+            self.setGeometry(target)
 
     def set_spans(self, spans: list[EditSpan]) -> None:
-        layout = self._card.layout()
+        layout = self.layout()
         if layout is None:
-            layout = QVBoxLayout(self._card)
-            layout.setContentsMargins(18, 16, 18, 16)
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(18, 14, 18, 16)
             layout.setSpacing(0)
         else:
             clear_layout(layout)
 
-        header = QHBoxLayout()
+        header_widget = QWidget()
+        header_widget.setCursor(Qt.CursorShape.OpenHandCursor)
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(0, 2, 0, 2)
         header.setSpacing(8)
         title_text = "Suggested changes"
         if len(spans) > 1:
@@ -437,9 +537,10 @@ class WordSuggestionCard(QWidget):
         header.addWidget(title)
         header.addStretch()
         header.addWidget(close_btn)
-        layout.addLayout(header)
+        self._header_widget = header_widget
+        layout.addWidget(header_widget)
         layout.addWidget(_hairline())
-        layout.addSpacing(12)
+        layout.addSpacing(10)
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -451,20 +552,25 @@ class WordSuggestionCard(QWidget):
                 body_layout.addSpacing(4)
             row = QHBoxLayout()
             row.setSpacing(10)
+            diff_box = QFrame()
+            diff_box.setStyleSheet(DIFF_BOX)
+            diff_box_layout = QVBoxLayout(diff_box)
+            diff_box_layout.setContentsMargins(10, 7, 10, 7)
             diff_label = QLabel(diff_html(span.before, span.after))
             diff_label.setStyleSheet(DIFF_SHEET)
             diff_label.setWordWrap(True)
-            diff_label.setMaximumWidth(320)
+            diff_label.setMaximumWidth(300)
             diff_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
+            diff_box_layout.addWidget(diff_label)
             apply_btn = QPushButton("Apply")
             apply_btn.setStyleSheet(PRIMARY_BUTTON)
             apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             apply_btn.clicked.connect(
                 lambda _checked=False, i=index: self.apply_requested.emit(i)
             )
-            row.addWidget(diff_label, 1)
+            row.addWidget(diff_box, 1)
             row.addWidget(apply_btn, 0, Qt.AlignmentFlag.AlignTop)
             body_layout.addLayout(row)
             if span.reason:
@@ -485,7 +591,7 @@ class WordSuggestionCard(QWidget):
         else:
             layout.addWidget(body)
 
-        layout.addSpacing(12)
+        layout.addSpacing(10)
         layout.addWidget(_hairline())
         layout.addSpacing(10)
         buttons = QHBoxLayout()

@@ -12,6 +12,7 @@ selection). The current model is deliberately simpler and non-invasive:
    formatted, underlined, or otherwise modified until the user accepts.
 """
 
+import subprocess
 import threading
 import time
 from typing import Any
@@ -39,6 +40,9 @@ from .live_preview import (
     settings_fingerprint,
     word_visible_to_doc,
 )
+
+# How often the Mail compose-window check re-runs while Mail is frontmost.
+MAIL_COMPOSE_CHECK_INTERVAL_S = 5.0
 
 
 class PreviewWorker(QThread):
@@ -132,6 +136,11 @@ class LivePreviewService(QObject):
         self._last_clipboard_text = ""
         self._last_clipboard_target: dict[str, Any] = {}
         self._last_permission_ok: bool | None = None
+        self._candidate_text = ""
+        self._candidate_count = 0
+        self._mail_composing = True  # fail-open: never break Mail editing
+        self._mail_check_at = 0.0
+        self._read_only_logged: dict[str, str] = {}
         self._escape_bridge = _EscapeBridge()
         self._escape_bridge.pressed.connect(self._on_escape_pressed)
         self._escape_token: Any = None
@@ -206,8 +215,22 @@ class LivePreviewService(QObject):
         text = details.get("text") or ""
 
         bundle = str(target.get("bundle_id", "")).lower()
+        editable = self._context_is_editable(target, details, is_word, bundle)
+        if not editable:
+            # Read-only selections (PDF text, browsed web pages) must not
+            # trigger a suggestion panel: there is nothing to edit.
+            if text.strip():
+                self._log_read_only_once(bundle, details.get("role") or "")
+            text = ""
+            details = {
+                "text": "",
+                "range": None,
+                "context_before": "",
+                "context_after": "",
+                "found": details.get("found", False),
+            }
         if not text and bundle in CLIPBOARD_FALLBACK_BUNDLE_IDS:
-            if self._clipboard_fallback_allowed(details, bundle, now):
+            if self._clipboard_fallback_allowed(details, bundle, target, now):
                 # Mail's WebKit compose view and Pages' canvas never expose
                 # the selection through AX. Fall back to a throttled Cmd+C
                 # read that preserves the user's clipboard.
@@ -241,7 +264,8 @@ class LivePreviewService(QObject):
                     self._last_clipboard_text = ""
                     self._last_clipboard_target = {}
             elif (
-                self._last_clipboard_text
+                editable
+                and self._last_clipboard_text
                 and self._last_clipboard_target.get("pid")
                 == target.get("pid")
                 and str(self._last_clipboard_target.get("bundle_id", ""))
@@ -260,14 +284,30 @@ class LivePreviewService(QObject):
             self._last_clipboard_text = ""
             self._last_clipboard_target = {}
 
-        if self._selection_target_changed(target) or text != self._seen_text:
+        if self._selection_target_changed(target):
             self._hide_panel()
         if text != self._seen_text:
-            self._seen_text = text
-            self._changed_at = now
-            self._previewed_text = ""
-            self._retry_not_before = None
-            self._fail_streak = 0
+            # Restart the debounce clock on the first read of a new value,
+            # but only commit the change once two consecutive polls agree:
+            # a single differing read is usually a transient AX/AppleScript
+            # glitch, not a real selection change.
+            if text == self._candidate_text:
+                self._candidate_count += 1
+            else:
+                self._changed_at = now
+                self._candidate_text = text
+                self._candidate_count = 1
+            if self._candidate_count >= 2:
+                self._seen_text = self._candidate_text
+                self._candidate_text = ""
+                self._candidate_count = 0
+                self._previewed_text = ""
+                self._retry_not_before = None
+                self._fail_streak = 0
+                self._hide_panel()
+        else:
+            self._candidate_text = ""
+            self._candidate_count = 0
 
         stable = now - self._changed_at >= self._delay() / 1000.0
         if self._last_permission_ok != permission_ok:
@@ -333,14 +373,17 @@ class LivePreviewService(QObject):
         )
 
     def _clipboard_fallback_allowed(
-        self, details: dict[str, Any], bundle: str, now: float
+        self,
+        details: dict[str, Any],
+        bundle: str,
+        target: dict[str, Any],
+        now: float,
     ) -> bool:
         """Gate the Cmd+C read fallback for apps without AX selection.
 
-        Throttled (with backoff while it keeps coming back empty), and for
-        canvas-style apps such as Pages it additionally requires that the AX
-        search found an editable element (i.e. a caret exists), so an
-        unrelated window never triggers repeated copy attempts.
+        Throttled (with backoff while it keeps coming back empty), and
+        additionally requires a genuinely editable context: a live canvas
+        element for Pages, an open compose window for Mail.
         """
         interval = (
             CLIPBOARD_READ_BACKOFF_S
@@ -350,8 +393,97 @@ class LivePreviewService(QObject):
         if now - self._last_clipboard_read_at < interval:
             return False
         if bundle == "com.apple.mail":
-            return True
+            return self._mail_is_composing(target)
         return bool(details.get("found"))
+
+    def _context_is_editable(
+        self,
+        target: dict[str, Any],
+        details: dict[str, Any],
+        is_word: bool,
+        bundle: str,
+    ) -> bool:
+        """Whether the current selection lives in an editable context.
+
+        Word always counts (an active document is being edited). Other apps
+        must expose a settable text element; Pages and Mail fall back to
+        their own signals because their AX trees never report settability.
+        """
+        if is_word:
+            return True
+        if details.get("editable"):
+            return True
+        if bundle in ("com.apple.pages", "com.apple.iwork.pages"):
+            # Pages' canvas exposes nothing until a real caret exists, so a
+            # found element already proves an active editing session.
+            return bool(details.get("found"))
+        if bundle == "com.apple.mail":
+            return self._mail_is_composing(target)
+        return False
+
+    def _mail_is_composing(self, target: dict[str, Any]) -> bool:
+        """Whether Mail's frontmost window is a compose window.
+
+        Mail exposes drafts as 'outgoing messages'; a viewer window is never
+        named after a draft subject. Cached briefly because the poll calls
+        this constantly, and fail-open so Mail editing never breaks.
+        """
+        now = time.monotonic()
+        if now - self._mail_check_at < MAIL_COMPOSE_CHECK_INTERVAL_S:
+            return self._mail_composing
+        self._mail_check_at = now
+        self._mail_composing = True
+        try:
+            subjects = subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    (
+                        'tell application "Mail" to get subject of every '
+                        "outgoing message"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+            front = subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    'tell application "Mail" to get name of front window',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+            draft_subjects = [
+                s.strip()
+                for s in (subjects.stdout or "").split(", ")
+                if s.strip()
+            ]
+            front_name = (front.stdout or "").strip()
+            self._mail_composing = bool(
+                front_name
+                and (
+                    front_name in draft_subjects
+                    or front_name.lower() == "new message"
+                )
+            )
+        except Exception as exc:
+            _debug_log(f"LIVE MAIL COMPOSE CHECK ERROR: {exc}")
+        if not self._mail_composing:
+            self._log_read_only_once("com.apple.mail", "viewer")
+        return self._mail_composing
+
+    def _log_read_only_once(self, bundle: str, role: str) -> None:
+        key = f"{bundle}:read_only"
+        message = f"LIVE SKIP: read_only bundle={bundle} role={role}"
+        if self._read_only_logged.get(key) != message:
+            self._read_only_logged[key] = message
+            _debug_log(message)
 
     # --- provider ---
 
@@ -388,7 +520,17 @@ class LivePreviewService(QObject):
             worker.deleteLater()
 
     def _on_done(self, result: dict[str, Any], key: str, text: str) -> None:
-        if text != self._seen_text:
+        # Drop the result when the user has moved to a different app since
+        # the preview was spawned. Comparing the polled text was unreliable:
+        # transient reads poisoned it and silently dropped good results.
+        current = self._editor.frontmost_app()
+        if (
+            not current
+            or current.get("pid") != self._selection_target.get("pid")
+            or str(current.get("bundle_id", ""))
+            != str(self._selection_target.get("bundle_id", ""))
+        ):
+            _debug_log("LIVE DONE: target no longer frontmost; dropping")
             return
         if not self._settings.get("live_preview", {}).get("enabled", True):
             return
@@ -482,21 +624,23 @@ class LivePreviewService(QObject):
         same phrase elsewhere in the meantime. Applying at the stale position
         would corrupt the document, so the current range is re-read before
         showing results or applying anything. Returns (ok, reason).
+
+        Only the previewed text is compared: the polling state can hold a
+        transiently glitched read, and failing the user's click because of
+        it produced spurious "could not verify" toasts.
         """
         state = self._read_selection_state()
         if state is None:
             return False, "selection read failed"
         text, start, end = state
-        if text != self._seen_text:
+        if text != self._selection_text:
             return (
                 False,
                 (
-                    f"selection changed: seen={self._seen_text[:30]!r} "
+                    f"selection changed: previewed={self._selection_text[:30]!r} "
                     f"now={text[:30]!r}"
                 ),
             )
-        if text != self._selection_text:
-            return False, "text differs from the previewed selection"
         self._selection_start = start
         self._selection_end = end if self._selection_is_word else 0
         return True, "ok"
@@ -538,9 +682,10 @@ class LivePreviewService(QObject):
             self._panel = panel
         was_visible = panel.isVisible()
         panel.set_spans(spans)
+        panel.show()
         if not was_visible:
             panel.place_near(self._anchor_point())
-        panel.show()
+            panel.pop_in()
         self._install_escape_monitor()
 
     def _anchor_point(self) -> QPoint:
@@ -571,6 +716,9 @@ class LivePreviewService(QObject):
         self._pending = []
         self._remove_escape_monitor()
         if self._panel is not None:
+            stop_pop = getattr(self._panel, "stop_pop", None)
+            if stop_pop is not None:
+                stop_pop()
             self._panel.hide()
 
     # --- escape key ---
@@ -719,15 +867,17 @@ class LivePreviewService(QObject):
             self._apply_full_selection()
             return
         sync_ok, sync_reason = self._sync_selection()
-        if not sync_ok:
-            # AX reads can glitch transiently; one retry before giving up.
-            time.sleep(0.15)
+        for _ in range(2):
+            if sync_ok:
+                break
+            # AX/AppleScript reads glitch transiently; retry before failing.
+            time.sleep(0.12)
             sync_ok, sync_reason = self._sync_selection()
         if not sync_ok:
             _debug_log(f"LIVE APPLY SYNC FAIL: {sync_reason}")
             self._hide_panel()
             self.apply_done.emit(
-                "Could not verify the selection — please reselect and try again."
+                "Could not verify the selection — please try again."
             )
             return
         span = self._pending[index]
@@ -787,11 +937,16 @@ class LivePreviewService(QObject):
             self._apply_full_selection()
             return
         sync_ok, sync_reason = self._sync_selection()
+        for _ in range(2):
+            if sync_ok:
+                break
+            time.sleep(0.12)
+            sync_ok, sync_reason = self._sync_selection()
         if not sync_ok:
             _debug_log(f"LIVE APPLY ALL SYNC FAIL: {sync_reason}")
             self._hide_panel()
             self.apply_done.emit(
-                "Could not verify the selection — please reselect and try again."
+                "Could not verify the selection — please try again."
             )
             return
         total = len(self._pending)

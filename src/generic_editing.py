@@ -426,6 +426,42 @@ class GenericTextEditor:
         return None, None
 
     @staticmethod
+    def _ax_editable(AS: Any, pid: int, found: Any) -> bool:
+        """Whether the selection context is editable (settable text attrs).
+
+        Read-only selections (PDF text, browsed web pages) live in static
+        elements whose value/selection attributes are not settable; editable
+        fields expose at least one settable write attribute. The found
+        element and the app's focused element are both probed because apps
+        often focus a container while the selection lives in a child.
+        """
+        try:
+            if not hasattr(AS, "AXUIElementIsAttributeSettable"):
+                return True  # older PyObjC: cannot probe, stay permissive
+        except Exception:
+            return True
+        elements: list[Any] = [found]
+        alt_as, alt_focused = GenericTextEditor._mac_ax_focused(pid)
+        if alt_as is not None and alt_focused is not None:
+            if alt_focused != found:
+                elements.append(alt_focused)
+        attributes = (
+            getattr(AS, "kAXValueAttribute", None),
+            getattr(AS, "kAXSelectedTextAttribute", None),
+            getattr(AS, "kAXSelectedTextRangeAttribute", None),
+        )
+        for el in elements:
+            for attr in attributes:
+                if attr is None:
+                    continue
+                try:
+                    if AS.AXUIElementIsAttributeSettable(el, attr):
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    @staticmethod
     def _mac_ax_text_element(pid: int) -> tuple[Any, Any]:
         """Find the element that actually owns the editable text.
 
@@ -726,13 +762,20 @@ class GenericTextEditor:
             return "", "", ""
 
     def selection_details(self, target: dict[str, Any]) -> dict[str, Any]:
-        """Read (text, absolute range, context) through AX only, no clipboard."""
+        """Read (text, absolute range, context) through AX only, no clipboard.
+
+        Also reports whether the selection lives in an *editable* context
+        (a settable text element), so read-only selections — PDF readers,
+        web pages being browsed — can be ignored by the caller.
+        """
         result: dict[str, Any] = {
             "text": "",
             "range": None,
             "context_before": "",
             "context_after": "",
             "found": False,
+            "editable": False,
+            "role": "",
         }
         if SYSTEM != "Darwin":
             return result
@@ -748,6 +791,20 @@ class GenericTextEditor:
             )
             return result
         result["found"] = True
+        try:
+            err, role = AS.AXUIElementCopyAttributeValue(
+                focused, AS.kAXRoleAttribute, None
+            )
+            if err == 0 and role:
+                result["role"] = str(role)
+        except Exception:
+            pass
+        result["editable"] = GenericTextEditor._ax_editable(AS, pid, focused)
+        _log_once(
+            f"{bundle}:editable",
+            f"AX selection_details: editable={result['editable']} "
+            f"role={result['role'] or '?'} pid={pid}",
+        )
         try:
             err, text = AS.AXUIElementCopyAttributeValue(
                 focused, AS.kAXSelectedTextAttribute, None

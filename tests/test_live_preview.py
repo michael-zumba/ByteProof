@@ -474,15 +474,62 @@ def test_diff_html_dims_unchanged_context():
     assert CONTEXT_STYLE.split(":")[1].split(";")[0].strip() in rendered
 
 
-def test_card_has_shadow_and_translucent_margin():
-    from PyQt6.QtCore import Qt
+def test_card_drags_by_header(monkeypatch):
+    from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
 
     from src.live_overlay import WordSuggestionCard
 
     card = WordSuggestionCard()
-    assert card.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-    assert card._card.graphicsEffect() is not None
-    assert card._card.layout() is None or card._card.layout().count() == 0
+    card.set_spans([EditSpan("teh", "the", "Spelling", 0, 3)])
+    card.move(100, 100)
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(40, 20),  # inside the header zone
+        QPointF(140, 120),  # global position
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    card.mousePressEvent(press)
+    assert card._dragging is True
+    move = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(40, 20),
+        QPointF(160, 140),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    card.mouseMoveEvent(move)
+    assert card.pos() == QPoint(120, 120)
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        QPointF(40, 20),
+        QPointF(160, 140),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    card.mouseReleaseEvent(release)
+    assert card._dragging is False
+
+
+def test_card_pop_in_animation_completes():
+    from PyQt6.QtTest import QTest
+
+    from src.live_overlay import WordSuggestionCard
+
+    card = WordSuggestionCard()
+    card.set_spans([EditSpan("teh", "the", "Spelling", 0, 3)])
+    card.move(200, 200)
+    card.show()
+    target = card.geometry()
+    card.pop_in()
+    assert card.windowOpacity() < 1.0  # animation started dimmed
+    QTest.qWait(350)
+    assert card.windowOpacity() == 1.0
+    assert card.geometry() == target
 
 
 def test_popup_rows_track_changes_styles():
@@ -557,6 +604,9 @@ class _FakeEditor:
             "range": (0, len(self.text)),
             "context_before": "",
             "context_after": "",
+            "found": True,
+            "editable": True,
+            "role": "AXTextArea",
         }
 
 
@@ -574,6 +624,9 @@ class _MutableEditor(_FakeEditor):
             "range": self.range,
             "context_before": "",
             "context_after": "",
+            "found": True,
+            "editable": True,
+            "role": "AXTextArea",
         }
 
     def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
@@ -964,7 +1017,9 @@ def test_service_shows_panel_on_result_and_hides_on_selection_change(
     assert service._panel.isVisible()
     editor.text = ""
     service._sample(now=3.0)
-    assert service._panel.isVisible() is False
+    assert service._panel.isVisible() is True  # one read: not yet trusted
+    service._sample(now=3.5)
+    assert service._panel.isVisible() is False  # two agreeing reads: hide
 
 
 def test_apply_one_shifts_and_keeps_remaining(monkeypatch):
@@ -1418,7 +1473,7 @@ def test_apply_one_reports_sync_failure_instead_of_silent_close(monkeypatch):
     monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
     service._apply_one(0)
     assert messages == [
-        "Could not verify the selection — please reselect and try again."
+        "Could not verify the selection — please try again."
     ]
 
 
@@ -1454,6 +1509,7 @@ def test_service_clipboard_fallback_reads_mail_selection(monkeypatch):
     editor = MailEditor("com.apple.mail", "teh cat sat on the mat")
     editor.ax_bounds_for_range = lambda *a: []
     monkeypatch.setattr(service, "_editor", editor)
+    monkeypatch.setattr(service, "_mail_is_composing", lambda target: True)
     spawns = []
     monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawns.append(a))
     service._sample(now=100.0)
@@ -1711,3 +1767,158 @@ def test_ax_replace_range_pastes_when_attributes_fail(monkeypatch):
     )
     assert ok is False
     assert posted == []  # refused to paste without a selected range
+
+
+# --- editable-context gate ---
+
+
+def test_selection_details_reports_editable_via_settable_probe(monkeypatch):
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXRoleAttribute = "role"
+        kAXValueAttribute = "value"
+        kAXSelectedTextAttribute = "seltext"
+        kAXSelectedTextRangeAttribute = "range"
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXUIElementIsAttributeSettable(el, attr):
+            return attr == FakeAS.kAXValueAttribute
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXRoleAttribute:
+                return 0, "AXTextArea"
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, "editable text"
+            if attr == FakeAS.kAXSelectedTextAttribute:
+                return 0, "some text"
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, (0, 9)
+            return 1, None
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor,
+        "_mac_ax_text_element",
+        lambda pid: (FakeAS, "el"),
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    editor = GenericTextEditor()
+    details = editor.selection_details(
+        {"pid": 9, "bundle_id": "com.apple.TextEdit"}
+    )
+    assert details["editable"] is True
+    assert details["role"] == "AXTextArea"
+
+
+def test_selection_details_reports_read_only_static_text(monkeypatch):
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXRoleAttribute = "role"
+        kAXValueAttribute = "value"
+        kAXSelectedTextAttribute = "seltext"
+        kAXSelectedTextRangeAttribute = "range"
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXUIElementIsAttributeSettable(el, attr):
+            return False  # nothing settable: read-only static text
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXRoleAttribute:
+                return 0, "AXStaticText"
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, "read only"
+            if attr == FakeAS.kAXSelectedTextAttribute:
+                return 0, "some text"
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, (0, 9)
+            return 1, None
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor,
+        "_mac_ax_text_element",
+        lambda pid: (FakeAS, "el"),
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    editor = GenericTextEditor()
+    details = editor.selection_details(
+        {"pid": 9, "bundle_id": "com.apple.Preview"}
+    )
+    assert details["editable"] is False
+    assert details["role"] == "AXStaticText"
+
+
+def test_service_skips_read_only_selection(monkeypatch):
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class ReadOnlyEditor(_FakeEditor):
+        def selection_details(self, target):
+            details = super().selection_details(target)
+            details["editable"] = False
+            details["role"] = "AXStaticText"
+            return details
+
+    editor = ReadOnlyEditor("com.apple.Preview", "a paragraph of pdf text")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    spawns = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawns.append(a))
+    for tick in (1.0, 2.0, 3.0, 4.0):
+        service._sample(now=tick)
+    assert len(spawns) == 0  # reading a PDF must never trigger a preview
+
+
+def test_mail_compose_detection_distinguishes_viewer(monkeypatch):
+    import subprocess
+
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    responses = []
+
+    class FakeResult:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        responses.append(args)
+        if "front window" in args[-1]:
+            return FakeResult(FRONT_NAME)
+        return FakeResult(DRAFT_SUBJECTS)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("src.live_service.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "src.live_service.MAIL_COMPOSE_CHECK_INTERVAL_S", 0.0
+    )
+
+    DRAFT_SUBJECTS = ""
+    FRONT_NAME = "Inbox — Personal Gmail"
+    assert service._mail_is_composing({}) is False  # viewer: read-only
+
+    DRAFT_SUBJECTS = "Meeting notes"
+    FRONT_NAME = "Meeting notes"
+    assert service._mail_is_composing({}) is True  # compose window
+
+    DRAFT_SUBJECTS = "Meeting notes"
+    FRONT_NAME = "Inbox — Personal Gmail"
+    assert service._mail_is_composing({}) is False  # draft in background

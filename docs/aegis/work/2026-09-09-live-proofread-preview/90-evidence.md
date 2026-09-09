@@ -250,6 +250,27 @@ honest messages when verification is inconclusive. The AX text-element
 search also scores candidates by who actually holds a non-empty selection,
 so Gmail's subject field can no longer steal edits meant for the body.
 
+## Ninth fix round (1.9.0-beta.11) — editable-context gate
+
+Live suggestions must only appear for editable content, not for reading:
+
+- `selection_details` now probes `AXUIElementIsAttributeSettable` for the
+  value/selected-text/range attributes on both the found element and the
+  focused element, and reports `editable` plus the element role. Read-only
+  selections (PDF text, browsed web pages) are static elements that expose
+  nothing settable, so they are skipped before any provider call.
+- Word counts as editable (active document via AppleScript). Pages counts
+  as editable when its canvas element exists (a caret proves an active
+  editing session). Mail uses AppleScript to check that the frontmost
+  window is a compose window (its title matches an outgoing draft's
+  subject) rather than the viewer, so reading a received message never
+  triggers the clipboard read.
+- Gmail keeps working because the focused compose textarea is settable,
+  while selecting plain page text in Chrome/Safari is now ignored.
+
+Tests: 79 pass (4 new covering settable probing, read-only skipping, and
+Mail viewer-vs-compose detection).
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by
