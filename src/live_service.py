@@ -123,6 +123,7 @@ class LivePreviewService(QObject):
     apply_done = pyqtSignal(str)
     apply_all_requested = pyqtSignal()
     preview_error = pyqtSignal(str)
+    live_status = pyqtSignal(str)  # "ready" | "no_permission" | "disabled"
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -199,6 +200,7 @@ class LivePreviewService(QObject):
         self._fingerprint = settings_fingerprint(settings)
         if not settings.get("live_preview", {}).get("enabled", True):
             self._hide_panel()
+            self.live_status.emit("disabled")
 
     # --- sampling ---
 
@@ -345,7 +347,10 @@ class LivePreviewService(QObject):
                 f"LIVE PERMISSION: trusted={permission_ok} "
                 f"app={target.get('name')!r}"
             )
-            if not permission_ok:
+            if permission_ok:
+                self.live_status.emit("ready")
+            else:
+                self.live_status.emit("no_permission")
                 self.preview_error.emit(
                     "Live suggestions paused — re-enable ByteProof in "
                     "System Settings > Privacy & Security > Accessibility."

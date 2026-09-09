@@ -2449,3 +2449,86 @@ def test_card_resize_reflows_heights():
     card.resize(card.width() - 80, card.height() + 40)
     # Narrower window -> the wrapped label needs more lines.
     assert label.minimumHeight() >= before
+
+
+# --- P1: onboarding & trust ---
+
+
+def test_note_launch_version_detects_updates():
+    from src import settings as settings_mod
+
+    settings = {"app_version": "1.0.0"}
+    assert settings_mod.note_launch_version(settings) is False  # first run
+    assert settings["last_run_version"] == "1.0.0"
+    assert settings_mod.note_launch_version(settings) is False  # same build
+    settings["app_version"] = "2.0.0"
+    assert settings_mod.note_launch_version(settings) is True  # updated
+    assert settings["last_run_version"] == "2.0.0"
+
+
+def test_live_status_emits_on_permission_transitions(monkeypatch):
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class FlipEditor(_FakeEditor):
+        def __init__(self):
+            super().__init__("com.apple.TextEdit", "teh cat sat")
+            self.trusted = True
+
+        def permission_status(self):
+            return self.trusted, ""
+
+    editor = FlipEditor()
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: None)
+    states = []
+    service.live_status.connect(states.append)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    assert states == ["ready"]
+    editor.trusted = False
+    service._sample(now=3.0)
+    assert states[-1] == "no_permission"
+    editor.trusted = True
+    service._sample(now=4.0)
+    assert states[-1] == "ready"
+
+
+def test_refresh_settings_emits_disabled_status():
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    states = []
+    service.live_status.connect(states.append)
+    service.refresh_settings(
+        {"live_preview": {"enabled": False, "delay_ms": 900}}
+    )
+    assert states == ["disabled"]
+
+
+def test_readiness_row_updates_per_state():
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+
+    QApplication.instance() or QApplication([])
+    loaded = settings_mod.load_runtime_settings()
+    loaded["general"]["auto_apply"] = False
+    window = ProofreaderApp(1024, loaded)
+    try:
+        window._apply_live_status("ready")
+        assert "ready" in window.live_status_label.text().lower()
+        assert window.live_action_btn.text() == "Test now"
+
+        window._apply_live_status("no_permission")
+        assert "accessibility" in window.live_status_label.text().lower()
+        assert window.live_action_btn.text() == "Open System Settings"
+
+        window._apply_live_status("disabled")
+        assert window.live_action_btn.text() == "Open Settings"
+    finally:
+        window.close()

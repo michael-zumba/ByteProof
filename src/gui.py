@@ -119,6 +119,7 @@ from .settings import (
     PRODUCT_URL,
     PROVIDERS,
     SUPPORT_EMAIL,
+    note_launch_version,
     resource_path,
     save_runtime_settings,
 )
@@ -3752,6 +3753,37 @@ class ProofreaderApp(QMainWindow):
         
         layout.addWidget(status_container)
 
+        # Live suggestions readiness row (P1): one-glance status plus a
+        # contextual action (test now / open System Settings / settings).
+        live_container = QFrame()
+        live_container.setObjectName("StatusBar")
+        live_layout = QHBoxLayout(live_container)
+        live_layout.setContentsMargins(14, 10, 14, 10)
+        self.live_dot = QLabel()
+        self.live_dot.setFixedSize(8, 8)
+        self.live_dot.setStyleSheet(
+            "background-color: #9CA3AF; border-radius: 4px;"
+        )
+        live_layout.addWidget(self.live_dot)
+        self.live_status_label = QLabel("Live suggestions: waiting…")
+        self.live_status_label.setWordWrap(True)
+        self.live_status_label.setStyleSheet(
+            "font-weight: 500; color: #57534E; font-size: 12px;"
+        )
+        live_layout.addWidget(self.live_status_label, stretch=1)
+        self.live_action_btn = QPushButton("Test now")
+        self.live_action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.live_action_btn.setStyleSheet(
+            "QPushButton { background-color: #F5F0EB; color: #57534E;"
+            " border: 1px solid #E8E4E0; border-radius: 8px;"
+            " padding: 4px 12px; font-size: 11px; font-weight: 600; }"
+            "QPushButton:hover { background-color: #EDE8E3; }"
+        )
+        self.live_action_btn.clicked.connect(self._on_live_action)
+        live_layout.addWidget(self.live_action_btn)
+        layout.addWidget(live_container)
+        self._live_status_state = ""
+
         diff_group = QFrame()
         diff_group.setObjectName("Card")
         diff_layout = QVBoxLayout(diff_group)
@@ -3865,11 +3897,36 @@ class ProofreaderApp(QMainWindow):
             self.live_service.refresh_settings(self.settings)
             self.live_service.preview_error.connect(self._on_live_preview_error)
             self.live_service.apply_done.connect(self._on_live_apply_done)
+            self.live_service.live_status.connect(self._apply_live_status)
+            self._apply_live_status(
+                "disabled"
+                if not self.settings.get("live_preview", {}).get(
+                    "enabled", True
+                )
+                else "waiting"
+            )
             if self.settings.get("live_preview", {}).get("enabled", True):
                 self.live_service.start()
             app_inst = QApplication.instance()
             if app_inst is not None:
                 app_inst.aboutToQuit.connect(self.live_service.stop)
+            # Post-update hint: a reinstall can silently revoke the
+            # Accessibility grant, so surface the re-grant path once.
+            if note_launch_version(self.settings):
+                save_runtime_settings(self.settings)
+                from .generic_editing import GenericTextEditor
+
+                permission_ok, _ = GenericTextEditor.permission_status()
+                if not permission_ok:
+                    QTimer.singleShot(
+                        2000,
+                        lambda: self._show_toast(
+                            "ByteProof updated — if live suggestions stopped, "
+                            "toggle ByteProof off and on in System Settings > "
+                            "Privacy & Security > Accessibility.",
+                            kind="warning",
+                        ),
+                    )
         register_url_scheme()
 
         app_inst = QApplication.instance()
@@ -5385,6 +5442,116 @@ class ProofreaderApp(QMainWindow):
 
     def _on_live_preview_error(self, message: str) -> None:
         self._show_toast(f"Live suggestions: {message}", kind="warning")
+
+    def _apply_live_status(self, state: str) -> None:
+        """Update the live-suggestions readiness row (P1)."""
+        if not hasattr(self, "live_status_label"):
+            return
+        self._live_status_state = state
+        if state == "ready":
+            dot = "#059669"
+            text = "Live suggestions ready"
+            action = "Test now"
+        elif state == "no_permission":
+            dot = "#D97706"
+            text = (
+                "Live suggestions need Accessibility permission — open "
+                "System Settings and toggle ByteProof off and on."
+            )
+            action = "Open System Settings"
+        elif state == "disabled":
+            dot = "#9CA3AF"
+            text = "Live suggestions are off in Settings."
+            action = "Open Settings"
+        else:
+            dot = "#9CA3AF"
+            text = "Live suggestions: waiting…"
+            action = "Test now"
+        self.live_dot.setStyleSheet(
+            f"background-color: {dot}; border-radius: 4px;"
+        )
+        self.live_status_label.setText(text)
+        self.live_action_btn.setText(action)
+
+    def _on_live_action(self) -> None:
+        if self._live_status_state == "no_permission":
+            try:
+                from PyQt6.QtCore import QUrl
+                from PyQt6.QtGui import QDesktopServices
+
+                QDesktopServices.openUrl(
+                    QUrl(
+                        "x-apple.systempreferences:com.apple.preference"
+                        ".security?Privacy_Accessibility"
+                    )
+                )
+            except Exception:
+                pass
+            self._show_toast(
+                "Toggle ByteProof off and on in the Accessibility list, "
+                "then select text again.",
+                kind="warning",
+            )
+            return
+        if self._live_status_state == "disabled":
+            self.open_settings()
+            return
+        self._test_live_now()
+
+    def _test_live_now(self) -> None:
+        service = getattr(self, "live_service", None)
+        if service is None:
+            self._show_toast(
+                "Live suggestions are unavailable on this system.",
+                kind="warning",
+            )
+            return
+        try:
+            editor = service._editor
+            target = editor.frontmost_app()
+            if not target:
+                self._show_toast(
+                    "Couldn't identify the frontmost app.", kind="warning"
+                )
+                return
+            permission_ok, _ = editor.permission_status()
+            details = editor.selection_details(target)
+            text = (details.get("text") or "").strip()
+            is_word = bool(
+                getattr(editor, "is_word", lambda _t: False)(target)
+            )
+            bundle = str(target.get("bundle_id", "")).lower()
+            editable = service._context_is_editable(
+                target, details, is_word, bundle
+            )
+            name = target.get("name") or "the frontmost app"
+            if not permission_ok:
+                message = (
+                    f"{name}: Accessibility permission is off — re-enable "
+                    "ByteProof in System Settings."
+                )
+            elif is_word and text:
+                message = f"{name}: selection read OK — suggestions should work."
+            elif not editable:
+                message = (
+                    f"{name}: the selection is in a read-only context — "
+                    "no suggestions here."
+                )
+            elif text:
+                message = (
+                    f"{name}: selection read OK ({len(text)} chars) — "
+                    "suggestions should work."
+                )
+            else:
+                message = f"{name}: no text selected right now."
+            ok_state = permission_ok and (editable or is_word) and bool(text)
+            self._show_toast(
+                message, kind="success" if ok_state else "warning"
+            )
+        except Exception as exc:
+            self._show_toast(
+                f"Live test failed: {exc}", kind="warning"
+            )
 
     def _on_live_apply_done(self, message: str) -> None:
         if not message or not message.strip():

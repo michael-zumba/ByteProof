@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "1.9.0-beta.18"
+APP_VERSION = "1.9.0-beta.19"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -292,6 +292,18 @@ def load_runtime_settings() -> dict[str, Any]:
     settings["general"]["temperature"] = max(0.0, min(2.0, settings["general"]["temperature"]))
     _stamp_version_and_save(settings)
     return settings
+
+
+def note_launch_version(settings: dict[str, Any]) -> bool:
+    """Record this launch's version; True when it follows an app update.
+
+    Used to show the post-update Accessibility re-grant hint for live
+    suggestions. Never mutates anything else in the settings dict.
+    """
+    current = str(settings.get("app_version") or "")
+    previous = str(settings.get("last_run_version") or "")
+    settings["last_run_version"] = current
+    return bool(previous) and previous != current
 
 
 def _migrate_mac_hotkeys(settings: dict[str, Any]) -> None:
