@@ -551,7 +551,7 @@ class _MutableEditor(_FakeEditor):
             "context_after": "",
         }
 
-    def ax_replace_range(self, target, start, length, new):
+    def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
         self.applied.append((start, length, new))
         return True, "Applied."
 
@@ -600,7 +600,7 @@ def test_service_applies_one_suggestion_through_ax(monkeypatch):
                 "context_after": "",
             }
 
-        def ax_replace_range(self, target, start, length, text):
+        def ax_replace_range(self, target, start, length, text, allow_direct_paste=False):
             applied.append((start, length, text))
             return True, "Applied."
 
@@ -637,7 +637,7 @@ def test_service_apply_all_applies_each_suggestion_with_delta(monkeypatch):
                 "context_after": "",
             }
 
-        def ax_replace_range(self, target, start, length, new):
+        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
             applied.append((start, length, new))
             return True, "Applied."
 
@@ -758,7 +758,7 @@ def test_service_full_cycle_with_fake_provider(monkeypatch):
     editor.applied = []
     editor.ax_bounds_for_range = lambda target, start, length: [editor.rects[0]]
 
-    def replace(target, start, length, text):
+    def replace(target, start, length, text, allow_direct_paste=False):
         editor.applied.append((start, length, text))
         return True, "Applied."
 
@@ -963,7 +963,7 @@ def test_apply_one_shifts_and_keeps_remaining(monkeypatch):
                 "context_after": "",
             }
 
-        def ax_replace_range(self, target, start, length, new):
+        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
             self.applied.append((start, length, new))
             self.text = self.text[:start] + new + self.text[start + length :]
             return True, "Applied."
@@ -1182,7 +1182,7 @@ def test_service_apply_all_reports_partial_failure(monkeypatch):
                 "context_after": "",
             }
 
-        def ax_replace_range(self, target, start, length, new):
+        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
             if self.fail_next:
                 self.fail_next = False
                 return False, "Could not apply."
@@ -1355,3 +1355,150 @@ def test_on_done_limit_reached_reports_error_and_does_not_retry(monkeypatch):
     service._sample(now=3.0)
     service._sample(now=4.0)
     assert len(spawns) == 1
+
+
+# --- fixes for non-Word apps (Pages / Mail / Gmail / Outlook) ---
+
+
+def test_apply_edits_to_text_applies_spans_right_to_left():
+    from src.live_preview import EditSpan, apply_edits_to_text
+
+    spans = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("sat", "was sitting", "Word choice", 8, 11),
+    ]
+    assert apply_edits_to_text("teh cat sat", spans) == "the cat was sitting"
+
+
+def test_service_clipboard_fallback_reads_mail_selection(monkeypatch):
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class MailEditor(_FakeEditor):
+        def selection_details(self, target):
+            return {
+                "text": "",
+                "range": None,
+                "context_before": "",
+                "context_after": "",
+                "found": False,
+            }
+
+        def _mac_copy_selection(self, pid=0, app_name="", max_attempts=3):
+            return self.text
+
+    editor = MailEditor("com.apple.mail", "teh cat sat on the mat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    spawns = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawns.append(a))
+    service._sample(now=100.0)
+    assert len(spawns) == 0  # debounce window
+    service._sample(now=101.0)
+    assert len(spawns) == 1
+    assert spawns[0][1] == "teh cat sat on the mat"
+    assert service._selection_has_range is False
+    # The throttled read must not repeat for an unchanged selection.
+    service._sample(now=102.0)
+    assert len(spawns) == 1
+
+
+def test_service_full_paste_when_no_range(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    text = "teh cat sat on the mat"
+    replaced = []
+
+    class MailEditor:
+        def get_selection_light(self, target):
+            return text
+
+        def replace_selection(self, target, new_text):
+            replaced.append(new_text)
+            return True, "Applied."
+
+    service._editor = MailEditor()
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("sat", "was sitting", "Word choice", 8, 11),
+    ]
+    service._selection_target = {
+        "bundle_id": "com.apple.mail",
+        "pid": 9,
+        "name": "Mail",
+    }
+    service._selection_text = text
+    service._seen_text = text
+    service._selection_has_range = False
+    messages = []
+    service.apply_done.connect(messages.append)
+    service._apply_one(0)
+    assert replaced == ["the cat was sitting on the mat"]
+    assert messages == ["Applied all suggestions to the selection."]
+
+
+def test_ax_replace_range_pastes_when_attributes_fail(monkeypatch):
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, value):
+            return value
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, value):
+            return 1  # every attribute write fails
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            return 1, None
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    posted = []
+    monkeypatch.setattr(
+        "src.generic_editing._post_mac_key", lambda code, pid: posted.append(code)
+    )
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "App"}, 0, 3, "the", allow_direct_paste=True
+    )
+    assert ok is True and "Applied" in message
+    assert posted == [9]  # kVK_ANSI_V
+
+    posted.clear()
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "App"}, 2, 3, "the", allow_direct_paste=False
+    )
+    assert ok is False
+    assert posted == []  # refused to paste without a selected range

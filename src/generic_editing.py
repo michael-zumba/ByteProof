@@ -38,6 +38,40 @@ def _debug_log(msg: str) -> None:
         pass
 
 
+_last_logged: dict[str, str] = {}
+
+
+def _log_once(key: str, msg: str) -> None:
+    """Log a message once per key until its content changes.
+
+    The live service polls every 350 ms, so per-attribute diagnostics must
+    be deduplicated or capture.log becomes unreadable.
+    """
+    if _last_logged.get(key) != msg:
+        _last_logged[key] = msg
+        _debug_log(msg)
+
+
+def _log_paste_result(AS: Any, elements: list[Any], expected: str) -> None:
+    """Best-effort verify a paste by reading the selection afterwards."""
+    for el in elements:
+        try:
+            err, text = AS.AXUIElementCopyAttributeValue(
+                el, AS.kAXSelectedTextAttribute, None
+            )
+            if err == 0:
+                got = str(text or "")
+                ok = bool(got) and (got == expected or expected in got)
+                _debug_log(
+                    "ax_replace_range paste verify: "
+                    f"{'ok' if ok else 'MISMATCH'} got={got[:40]!r} "
+                    f"expected={expected[:40]!r}"
+                )
+                return
+        except Exception:
+            continue
+
+
 def normalize_selection_text(text: str) -> str:
     """Normalize text for safe before/after comparisons."""
     return normalize_text(text)
@@ -355,7 +389,9 @@ class GenericTextEditor:
         Some apps focus a container (scroll area, canvas) while the text view
         with the selection lives one or two levels deeper. Walk a bounded
         subtree of the focused element first, then of the focused window, and
-        return the first element that exposes a text value and selection.
+        finally of the application element, returning the first element that
+        exposes selection state. A string AXValue is preferred but not
+        required: Pages-style canvases sometimes report only the range.
         """
         AS, focused = GenericTextEditor._mac_ax_focused(pid)
         if AS is None:
@@ -363,18 +399,20 @@ class GenericTextEditor:
 
         def is_text_target(el: Any) -> bool:
             try:
-                err, value = AS.AXUIElementCopyAttributeValue(
-                    el, AS.kAXValueAttribute, None
-                )
-                if err != 0 or not isinstance(value, str):
-                    return False
                 err_text, _ = AS.AXUIElementCopyAttributeValue(
                     el, AS.kAXSelectedTextAttribute, None
                 )
+                if err_text == 0:
+                    return True
                 err_range, _ = AS.AXUIElementCopyAttributeValue(
                     el, AS.kAXSelectedTextRangeAttribute, None
                 )
-                return err_text == 0 or err_range == 0
+                if err_range != 0:
+                    return False
+                err_value, value = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXValueAttribute, None
+                )
+                return err_value == 0 and isinstance(value, str)
             except Exception:
                 return False
 
@@ -397,20 +435,45 @@ class GenericTextEditor:
             return None
 
         found = search([focused], 60, 24)
+        if found is None:
+            try:
+                app_el = AS.AXUIElementCreateApplication(pid)
+                _, window = AS.AXUIElementCopyAttributeValue(
+                    app_el, AS.kAXFocusedWindowAttribute, None
+                )
+                if window is not None:
+                    found = search([window], 150, 30)
+            except Exception:
+                pass
+        if found is None:
+            try:
+                found = search([AS.AXUIElementCreateApplication(pid)], 250, 40)
+            except Exception:
+                pass
         if found is not None:
-            return AS, found
-        try:
-            app_el = AS.AXUIElementCreateApplication(pid)
-            _, window = AS.AXUIElementCopyAttributeValue(
-                app_el, AS.kAXFocusedWindowAttribute, None
+            GenericTextEditor._log_element_once(
+                pid, AS, found, "text-element"
             )
-            if window is not None:
-                found = search([window], 150, 30)
-                if found is not None:
-                    return AS, found
+            return AS, found
+        return AS, focused
+
+    @staticmethod
+    def _log_element_once(pid: int, AS: Any, element: Any, tag: str) -> None:
+        """Log the role/description of a found AX element once per app."""
+        try:
+            err_role, role = AS.AXUIElementCopyAttributeValue(
+                element, AS.kAXRoleAttribute, None
+            )
+            err_desc, desc = AS.AXUIElementCopyAttributeValue(
+                element, AS.kAXRoleDescriptionAttribute, None
+            )
+            _log_once(
+                f"{pid}:{tag}",
+                f"AX {tag} pid={pid} role={str(role) if err_role == 0 else '?'}"
+                f" desc={str(desc) if err_desc == 0 else '?'}",
+            )
         except Exception:
             pass
-        return AS, focused
 
     @staticmethod
     def _mac_frontmost_app() -> dict[str, Any]:
@@ -616,30 +679,54 @@ class GenericTextEditor:
             "range": None,
             "context_before": "",
             "context_after": "",
+            "found": False,
         }
         if SYSTEM != "Darwin":
             return result
         pid = target.get("pid")
         if not pid:
             return result
+        bundle = str(target.get("bundle_id", "")).lower()
         AS, focused = GenericTextEditor._mac_ax_text_element(pid)
         if AS is None:
+            _log_once(
+                f"{bundle}:no-element",
+                f"AX selection_details: no text element found for pid={pid}",
+            )
             return result
+        result["found"] = True
         try:
             err, text = AS.AXUIElementCopyAttributeValue(
                 focused, AS.kAXSelectedTextAttribute, None
             )
             if err == 0 and text:
                 result["text"] = str(text)
+            else:
+                _log_once(
+                    f"{bundle}:selected-text",
+                    f"AX selection_details: AXSelectedText err={err} "
+                    f"pid={pid}",
+                )
             err, range_val = AS.AXUIElementCopyAttributeValue(
                 focused, AS.kAXSelectedTextRangeAttribute, None
             )
             if err == 0 and range_val is not None:
                 result["range"] = _parse_ax_range(range_val)
+            else:
+                _log_once(
+                    f"{bundle}:range",
+                    f"AX selection_details: AXSelectedTextRange err={err} "
+                    f"pid={pid}",
+                )
             err, value = AS.AXUIElementCopyAttributeValue(
                 focused, AS.kAXValueAttribute, None
             )
             full = str(value) if err == 0 and isinstance(value, str) else ""
+            if not full:
+                _log_once(
+                    f"{bundle}:value",
+                    f"AX selection_details: AXValue err={err} pid={pid}",
+                )
             if not result["text"] and full and result["range"]:
                 location, length = result["range"]
                 if location is not None and length:
@@ -660,8 +747,11 @@ class GenericTextEditor:
 
                 result["context_before"] = before[-CONTEXT_CHARS:]
                 result["context_after"] = after[:CONTEXT_CHARS]
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_once(
+                f"{bundle}:exception",
+                f"AX selection_details error for pid={pid}: {exc}",
+            )
         return result
 
     def ax_bounds_for_range(
@@ -704,9 +794,24 @@ class GenericTextEditor:
         return rects
 
     def ax_replace_range(
-        self, target: dict[str, Any], start: int, length: int, new_text: str
+        self,
+        target: dict[str, Any],
+        start: int,
+        length: int,
+        new_text: str,
+        allow_direct_paste: bool = False,
     ) -> tuple[bool, str]:
-        """Replace an absolute range in the focused field without keystrokes."""
+        """Replace an absolute range in the focused field without keystrokes.
+
+        Attempts, in order:
+        1. The AXReplaceRangeWithText parameterized action (newer PyObjC).
+        2. Selecting the sub-range and writing the selected-text attribute.
+        3. A clipboard-preserving paste over the sub-range; when the sub-range
+           equals the whole selection, the existing selection is pasted over
+           directly without setting a range.
+        Every failure logs its AX error code so app-specific behaviour is
+        visible in capture.log.
+        """
         if SYSTEM != "Darwin":
             return False, "Live apply is only supported on macOS in this beta."
         try:
@@ -723,35 +828,97 @@ class GenericTextEditor:
         )
         if AS is None:
             return False, "Could not read the focused text field."
-        if hasattr(AS, "AXUIElementSetParameterizedAttributeValue") and hasattr(
-            AS, "kAXReplaceRangeWithTextParameterizedAttribute"
+
+        elements: list[Any] = [focused]
+        alt_as, alt_focused = GenericTextEditor._mac_ax_focused(
+            target.get("pid") or 0
+        )
+        if (
+            alt_as is not None
+            and alt_focused is not None
+            and alt_focused != focused
         ):
-            try:
-                param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
-                err = AS.AXUIElementSetParameterizedAttributeValue(
-                    focused,
-                    AS.kAXReplaceRangeWithTextParameterizedAttribute,
-                    param,
-                    new_text,
+            elements.append(alt_focused)
+
+        def _set_range(el: Any) -> int:
+            param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
+            return int(
+                AS.AXUIElementSetAttributeValue(
+                    el, AS.kAXSelectedTextRangeAttribute, param
                 )
+            )
+
+        def _set_text(el: Any) -> int:
+            return int(
+                AS.AXUIElementSetAttributeValue(
+                    el, AS.kAXSelectedTextAttribute, new_text
+                )
+            )
+
+        # 1. Parameterized replacement.
+        if hasattr(
+            AS, "AXUIElementSetParameterizedAttributeValue"
+        ) and hasattr(AS, "kAXReplaceRangeWithTextParameterizedAttribute"):
+            for el in elements:
+                try:
+                    param = AS.AXValueCreate(
+                        AS.kAXValueTypeCFRange, (start, length)
+                    )
+                    err = AS.AXUIElementSetParameterizedAttributeValue(
+                        el,
+                        AS.kAXReplaceRangeWithTextParameterizedAttribute,
+                        param,
+                        new_text,
+                    )
+                    if err == 0:
+                        return True, "Applied."
+                    _debug_log(
+                        f"ax_replace_range parameterized err={err} "
+                        f"pid={target.get('pid')}"
+                    )
+                except Exception as exc:
+                    _debug_log(f"ax_replace_range parameterized error: {exc}")
+
+        # 2. Select the sub-range, then write the selected-text attribute.
+        for el in elements:
+            try:
+                err = _set_range(el)
+                if err != 0:
+                    _debug_log(f"ax_replace_range set-range err={err}")
+                    continue
+                err = _set_text(el)
                 if err == 0:
                     return True, "Applied."
-                _debug_log(f"AXReplaceRangeWithText unavailable or failed: {err}")
+                _debug_log(f"ax_replace_range set-selected-text err={err}")
             except Exception as exc:
-                _debug_log(f"ax_replace_range error: {exc}")
+                _debug_log(f"ax_replace_range attribute fallback error: {exc}")
+
+        # 3. Clipboard paste over the sub-range. Only safe when the range can
+        #    be selected first, or when the span covers the whole selection.
+        range_ok = False
+        for el in elements:
+            try:
+                if _set_range(el) == 0:
+                    range_ok = True
+                    break
+            except Exception:
+                continue
+        if not range_ok and not allow_direct_paste:
+            _debug_log(
+                "ax_replace_range: cannot select sub-range and span does not "
+                "cover the selection; giving up"
+            )
+            return False, "Could not apply the edit in this app."
+        saved = _mac_clipboard_string()
         try:
-            param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
-            AS.AXUIElementSetAttributeValue(
-                focused, AS.kAXSelectedTextRangeAttribute, param
-            )
-            err = AS.AXUIElementSetAttributeValue(
-                focused, AS.kAXSelectedTextAttribute, new_text
-            )
-            if err == 0:
-                return True, "Applied."
-        except Exception as exc:
-            _debug_log(f"ax_replace_range fallback error: {exc}")
-        return False, "Could not apply the edit in this app."
+            _mac_set_clipboard(new_text)
+            GenericTextEditor._mac_activate(target)
+            _post_mac_key(9, target.get("pid") or 0)  # kVK_ANSI_V
+            time.sleep(0.35)
+            _log_paste_result(AS, elements, new_text)
+            return True, "Applied."
+        finally:
+            _mac_restore_clipboard(saved)
 
     @staticmethod
     def _mac_activate(target: dict[str, Any]) -> bool:

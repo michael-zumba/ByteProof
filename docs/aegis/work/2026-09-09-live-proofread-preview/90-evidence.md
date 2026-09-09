@@ -187,6 +187,36 @@ Smoke suite unchanged (the environment-dependent
 `test_capture_diagnostics_shape` fails the same way on the pre-pivot HEAD
 when the test process lacks Accessibility permission).
 
+## Sixth fix round (1.9.0-beta.5) — non-Word apps
+
+Live testing of beta.4 showed Word fully working while Gmail/Outlook showed
+the panel but could not apply, and Pages/Mail showed nothing.
+
+- Apply root cause: this PyObjC build does not export
+  `AXUIElementSetParameterizedAttributeValue` /
+  `kAXReplaceRangeWithTextParameterizedAttribute`, so the only remaining
+  apply path (set AXSelectedTextRange + write AXSelectedText) failed
+  silently in Chrome/Outlook and no paste fallback existed in the live path.
+  `ax_replace_range` now runs a full chain: parameterized replace (when
+  available) → range+selected-text writes → clipboard-preserving paste over
+  the sub-range, with every AX error code logged to capture.log and a
+  best-effort post-paste verification. A sub-range paste is refused unless
+  the range can be selected first (or the span covers the whole selection),
+  so a paste can never land in the wrong place.
+- Pages/Mail reading: their editors never expose AX selection. The service
+  now falls back to a throttled (2.5 s, backing off to 8 s while empty),
+  clipboard-preserving Cmd+C read for Mail compose and Pages (gated on a
+  live editable element for Pages). Apply for these selections pastes the
+  fully corrected text over the current selection (sub-ranges are impossible
+  without an absolute range) with an honest "Applied all suggestions to the
+  selection." toast.
+- Diagnostics: the AX text-element search gained an application-level tier
+  and logs the found element role; selection_details logs per-attribute
+  error codes once per app; Pages still awaiting a live pass — if it still
+  shows nothing, capture.log now says exactly which attribute is missing.
+
+Tests: 68 pass in `tests/test_live_preview.py` (4 new).
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by

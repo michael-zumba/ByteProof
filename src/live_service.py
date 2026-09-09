@@ -23,12 +23,16 @@ from PyQt6.QtWidgets import QApplication
 from .generic_editing import _debug_log, get_generic_editor
 from .live_overlay import LiveSuggestionPanel, apply_nonactivating_panel
 from .live_preview import (
+    CLIPBOARD_FALLBACK_BUNDLE_IDS,
+    CLIPBOARD_READ_BACKOFF_S,
+    CLIPBOARD_READ_INTERVAL_S,
     DEFAULT_DELAY_MS,
     POLL_INTERVAL_MS,
     RETRY_COOLDOWN_S,
     RETRY_MAX_FAILURES,
     EditSpan,
     PreviewCache,
+    apply_edits_to_text,
     evaluate_trigger,
     map_edits_to_ranges,
     preview_cache_key,
@@ -122,6 +126,11 @@ class LivePreviewService(QObject):
         self._retry_not_before: float | None = None
         self._fail_streak = 0
         self._last_now = 0.0
+        self._selection_has_range = True
+        self._last_clipboard_read_at = 0.0
+        self._clipboard_empty_streak = 0
+        self._last_clipboard_text = ""
+        self._last_clipboard_target: dict[str, Any] = {}
         self._escape_bridge = _EscapeBridge()
         self._escape_bridge.pressed.connect(self._on_escape_pressed)
         self._escape_token: Any = None
@@ -195,6 +204,61 @@ class LivePreviewService(QObject):
             details = self._editor.selection_details(target)
         text = details.get("text") or ""
 
+        bundle = str(target.get("bundle_id", "")).lower()
+        if not text and bundle in CLIPBOARD_FALLBACK_BUNDLE_IDS:
+            if self._clipboard_fallback_allowed(details, bundle, now):
+                # Mail's WebKit compose view and Pages' canvas never expose
+                # the selection through AX. Fall back to a throttled Cmd+C
+                # read that preserves the user's clipboard.
+                self._last_clipboard_read_at = now
+                try:
+                    # pyright: ignore[reportPrivateUsage]
+                    copied = self._editor._mac_copy_selection(
+                        target.get("pid") or 0,
+                        target.get("name") or "",
+                        max_attempts=1,
+                    )
+                except Exception:
+                    copied = ""
+                if copied and copied.strip():
+                    self._clipboard_empty_streak = 0
+                    self._last_clipboard_text = copied
+                    self._last_clipboard_target = target
+                    text = copied
+                    details = {
+                        "text": text,
+                        "range": None,
+                        "context_before": "",
+                        "context_after": "",
+                    }
+                    _debug_log(
+                        f"LIVE CLIPBOARD READ: app={target.get('name')!r} "
+                        f"chars={len(text)}"
+                    )
+                else:
+                    self._clipboard_empty_streak += 1
+                    self._last_clipboard_text = ""
+                    self._last_clipboard_target = {}
+            elif (
+                self._last_clipboard_text
+                and self._last_clipboard_target.get("pid")
+                == target.get("pid")
+                and str(self._last_clipboard_target.get("bundle_id", ""))
+                == str(target.get("bundle_id", ""))
+            ):
+                # Throttled: keep the previous clipboard-based selection text
+                # so the debounce and unchanged-selection logic stays stable.
+                text = self._last_clipboard_text
+                details = {
+                    "text": text,
+                    "range": None,
+                    "context_before": "",
+                    "context_after": "",
+                }
+        else:
+            self._last_clipboard_text = ""
+            self._last_clipboard_target = {}
+
         if self._selection_target_changed(target) or text != self._seen_text:
             self._hide_panel()
         if text != self._seen_text:
@@ -227,6 +291,7 @@ class LivePreviewService(QObject):
         self._selection_start = (details.get("range") or (0, 0))[0]
         self._selection_end = (details.get("range") or (0, 0))[1] if is_word else 0
         self._selection_is_word = is_word
+        self._selection_has_range = details.get("range") is not None
         key = preview_cache_key(
             str(target.get("bundle_id", "")),
             text,
@@ -253,6 +318,27 @@ class LivePreviewService(QObject):
                 "delay_ms", DEFAULT_DELAY_MS
             )
         )
+
+    def _clipboard_fallback_allowed(
+        self, details: dict[str, Any], bundle: str, now: float
+    ) -> bool:
+        """Gate the Cmd+C read fallback for apps without AX selection.
+
+        Throttled (with backoff while it keeps coming back empty), and for
+        canvas-style apps such as Pages it additionally requires that the AX
+        search found an editable element (i.e. a caret exists), so an
+        unrelated window never triggers repeated copy attempts.
+        """
+        interval = (
+            CLIPBOARD_READ_BACKOFF_S
+            if self._clipboard_empty_streak >= 3
+            else CLIPBOARD_READ_INTERVAL_S
+        )
+        if now - self._last_clipboard_read_at < interval:
+            return False
+        if bundle == "com.apple.mail":
+            return True
+        return bool(details.get("found"))
 
     # --- provider ---
 
@@ -356,6 +442,16 @@ class LivePreviewService(QObject):
             except Exception:
                 return None
             return str(text or ""), int(start or 0), int(end or 0)
+        if not self._selection_has_range:
+            # Mail/Pages selections come from a clipboard read; re-verify
+            # with the same mechanism (AX cannot see them).
+            try:
+                text = self._editor.get_selection_light(
+                    self._selection_target
+                )
+            except Exception:
+                return None
+            return (str(text or ""), 0, 0) if text else None
         try:
             details = self._editor.selection_details(self._selection_target)
             text = details.get("text") or ""
@@ -523,6 +619,9 @@ class LivePreviewService(QObject):
             self._selection_start + rel_start,
             length,
             replacement,
+            allow_direct_paste=(
+                rel_start == 0 and length == len(self._selection_text)
+            ),
         )
 
     def _word_compensated_span(
@@ -585,6 +684,11 @@ class LivePreviewService(QObject):
     def _apply_one(self, index: int) -> None:
         if not (0 <= index < len(self._pending)):
             return
+        if not self._selection_has_range:
+            # No absolute range available (Mail/Pages clipboard path): paste
+            # the fully corrected selection over the current one.
+            self._apply_full_selection()
+            return
         if not self._sync_selection():
             self._hide_panel()
             return
@@ -631,6 +735,9 @@ class LivePreviewService(QObject):
     def _apply_all(self) -> None:
         if not self._pending:
             return
+        if not self._selection_has_range:
+            self._apply_full_selection()
+            return
         if not self._sync_selection():
             self._hide_panel()
             return
@@ -651,5 +758,29 @@ class LivePreviewService(QObject):
             message = f"Applied {applied} suggestions."
         else:
             message = f"Applied {applied} of {total} suggestions."
+        self.apply_done.emit(message)
+        self._hide_panel()
+
+    def _apply_full_selection(self) -> None:
+        """Paste the fully corrected text over the current selection.
+
+        Used when the selection came from a clipboard read (Mail compose,
+        Pages) and no absolute range exists, so sub-range replacement is
+        impossible. The target app replaces its current selection on paste.
+        """
+        state = self._read_selection_state()
+        if state is None or state[0] != self._seen_text:
+            self._hide_panel()
+            self.apply_done.emit("Selection changed — could not apply.")
+            return
+        corrected = apply_edits_to_text(self._selection_text, self._pending)
+        if not corrected or corrected == self._selection_text:
+            self._hide_panel()
+            return
+        ok, message = self._editor.replace_selection(
+            self._selection_target, corrected
+        )
+        if ok:
+            message = "Applied all suggestions to the selection."
         self.apply_done.emit(message)
         self._hide_panel()

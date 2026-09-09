@@ -35,6 +35,11 @@
       (tracked deletions/fields) offset compensation, fuzzy-map span fix,
       Escape-to-dismiss, multi-display panel placement, apply-feedback
       toasts, panel keeps remaining suggestions when the selection survives
+- [x] Sixth fix round (1.9.0-beta.5): apply fixed for non-Word apps
+      (parameterized-replace probe, attribute writes, paste fallback with
+      per-step AX error logging); Pages/Mail selection via throttled
+      clipboard-preserving Cmd+C read; full-selection paste apply when no
+      absolute range exists; broader AX search + diagnostics
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence

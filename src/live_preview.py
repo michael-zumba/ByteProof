@@ -45,6 +45,16 @@ UNDERLINE_COLOR_HEX = "#E23A5B"
 RETRY_COOLDOWN_S = 5.0
 RETRY_MAX_FAILURES = 3
 
+# Apps whose editors never expose the selection through AX (Mail's WebKit
+# compose view, Pages' canvas). For these the service falls back to a
+# throttled, clipboard-preserving Cmd+C read; apply then pastes the fully
+# corrected selection because no absolute range is available.
+CLIPBOARD_FALLBACK_BUNDLE_IDS = frozenset(
+    {"com.apple.mail", "com.apple.pages", "com.apple.iwork.pages"}
+)
+CLIPBOARD_READ_INTERVAL_S = 2.5
+CLIPBOARD_READ_BACKOFF_S = 8.0
+
 _FUZZY_RATIO_FLOOR = 0.6
 
 
@@ -234,6 +244,16 @@ def map_edits_to_ranges(
         EditSpan(edit.before, edit.after, edit.reason, start, end)
         for start, end, edit in kept
     ]
+
+
+def apply_edits_to_text(original: str, spans: Sequence[EditSpan]) -> str:
+    """Apply mapped spans to the original text (right-to-left, no overlap)."""
+    text = original
+    for span in sorted(spans, key=lambda s: s.start, reverse=True):
+        if span.start < 0 or span.end < span.start or span.end > len(text):
+            continue
+        text = text[: span.start] + span.after + text[span.end :]
+    return text
 
 
 def settings_fingerprint(settings: dict[str, Any]) -> str:
