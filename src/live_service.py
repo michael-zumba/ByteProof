@@ -22,7 +22,12 @@ from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QApplication
 
 from .generic_editing import _debug_log, get_generic_editor
-from .live_overlay import LiveSuggestionPanel, apply_nonactivating_panel
+from .live_overlay import (
+    LiveSuggestionPanel,
+    LoadingPill,
+    UndoPill,
+    apply_nonactivating_panel,
+)
 from .live_preview import (
     CLIPBOARD_FALLBACK_BUNDLE_IDS,
     CLIPBOARD_READ_BACKOFF_S,
@@ -43,6 +48,9 @@ from .live_preview import (
 
 # How often the Mail compose-window check re-runs while Mail is frontmost.
 MAIL_COMPOSE_CHECK_INTERVAL_S = 5.0
+
+# How long the Undo pill stays available after an apply.
+UNDO_AVAILABLE_MS = 10000
 
 
 class PreviewWorker(QThread):
@@ -142,6 +150,11 @@ class LivePreviewService(QObject):
         self._mail_check_at = 0.0
         self._read_only_logged: dict[str, str] = {}
         self._spawned_at = 0.0
+        self._loading_pill: LoadingPill | None = None
+        self._undo_pill: UndoPill | None = None
+        self._undo_state: dict[str, Any] | None = None
+        self._undo_timer: QTimer | None = None
+        self._last_anchor: QPoint | None = None
         self._escape_bridge = _EscapeBridge()
         self._escape_bridge.pressed.connect(self._on_escape_pressed)
         self._escape_token: Any = None
@@ -170,6 +183,8 @@ class LivePreviewService(QObject):
         self._previewed_text = ""
         self._retry_not_before = None
         self._fail_streak = 0
+        self._hide_loading_pill()
+        self._hide_undo_pill()
         self._hide_panel()
 
     def refresh_settings(self, settings: dict[str, Any]) -> None:
@@ -514,6 +529,7 @@ class LivePreviewService(QObject):
         worker.cancelled.connect(self._on_cancelled)
         worker.finished.connect(self._on_worker_finished)
         worker.start()
+        self._show_loading_pill()
 
     def _on_worker_finished(self) -> None:
         worker = self._worker
@@ -522,6 +538,7 @@ class LivePreviewService(QObject):
             worker.deleteLater()
 
     def _on_done(self, result: dict[str, Any], key: str, text: str) -> None:
+        self._hide_loading_pill()
         # Drop the result when the user has moved to a different app since
         # the preview was spawned. Comparing the polled text was unreliable:
         # transient reads poisoned it and silently dropped good results.
@@ -569,6 +586,7 @@ class LivePreviewService(QObject):
         self._show_result(spans)
 
     def _on_failed(self, message: str) -> None:
+        self._hide_loading_pill()
         self._hide_panel()
         _debug_log(f"LIVE ERROR: {message}")
         if not self._settings.get("live_preview", {}).get("enabled", True):
@@ -584,6 +602,7 @@ class LivePreviewService(QObject):
         self._retry_not_before = self._last_now + RETRY_COOLDOWN_S
 
     def _on_cancelled(self) -> None:
+        self._hide_loading_pill()
         _debug_log("LIVE CANCEL: preview worker cancelled.")
 
     # --- selection state ---
@@ -687,7 +706,9 @@ class LivePreviewService(QObject):
         panel.set_spans(spans)
         panel.show()
         if not was_visible:
-            panel.place_near(self._anchor_point())
+            anchor = self._anchor_point()
+            self._last_anchor = anchor
+            panel.place_near(anchor)
             panel.pop_in()
         self._install_escape_monitor()
 
@@ -717,6 +738,7 @@ class LivePreviewService(QObject):
 
     def _hide_panel(self) -> None:
         self._pending = []
+        self._hide_loading_pill()
         self._remove_escape_monitor()
         if self._panel is not None:
             stop_pop = getattr(self._panel, "stop_pop", None)
@@ -773,11 +795,91 @@ class LivePreviewService(QObject):
     def _on_escape_pressed(self) -> None:
         self._hide_panel()
 
+    # --- loading pill ---
+
+    def _show_loading_pill(self) -> None:
+        if self._loading_pill is None:
+            self._loading_pill = LoadingPill()
+        self._loading_pill.place_near(self._anchor_point())
+        self._loading_pill.show_pulse()
+
+    def _hide_loading_pill(self) -> None:
+        if self._loading_pill is not None:
+            self._loading_pill.hide_pill()
+
+    # --- undo ---
+
+    def _arm_undo(self, state: dict[str, Any]) -> None:
+        self._undo_state = state
+        if self._undo_pill is None:
+            self._undo_pill = UndoPill()
+            self._undo_pill.undo_requested.connect(self._perform_undo)
+        anchor = self._last_anchor or self._anchor_point()
+        self._undo_pill.place_near(anchor)
+        self._undo_pill.show()
+        if self._undo_timer is None:
+            self._undo_timer = QTimer(self)
+            self._undo_timer.setSingleShot(True)
+            self._undo_timer.timeout.connect(self._hide_undo_pill)
+        self._undo_timer.start(UNDO_AVAILABLE_MS)
+
+    def _hide_undo_pill(self) -> None:
+        self._undo_state = None
+        if self._undo_timer is not None:
+            self._undo_timer.stop()
+        if self._undo_pill is not None:
+            self._undo_pill.hide()
+
+    def _perform_undo(self) -> None:
+        state = self._undo_state
+        self._hide_undo_pill()
+        if not state:
+            return
+        try:
+            if state.get("mode") == "full":
+                # The full-selection apply pasted over the current selection;
+                # undo is only safe while that selection still holds the
+                # corrected text.
+                current = self._editor.get_selection_light(
+                    state.get("target") or {}
+                )
+                if (current or "").strip() != state["corrected"].strip():
+                    self.apply_done.emit("Selection changed — could not undo.")
+                    return
+                ok, message = self._editor.replace_selection(
+                    state.get("target") or {}, state["original"]
+                )
+                self.apply_done.emit("Undone." if ok else message)
+                return
+            restored = 0
+            for abs_start, length, original in state.get("steps") or []:
+                if state.get("is_word"):
+                    from .word_integration import get_word_integration
+
+                    ok, _ = get_word_integration().apply_live_edit(
+                        0, abs_start, abs_start + length, original
+                    )
+                else:
+                    ok, _ = self._editor.ax_replace_range(
+                        state.get("target") or {},
+                        abs_start,
+                        length,
+                        original,
+                        allow_direct_paste=True,
+                    )
+                if ok:
+                    restored += 1
+            self.apply_done.emit("Undone." if restored else "Could not undo.")
+        except Exception as exc:
+            _debug_log(f"LIVE UNDO ERROR: {exc}")
+            self.apply_done.emit("Could not undo.")
+
     # --- apply ---
 
     def _apply_abs(
         self, rel_start: int, length: int, replacement: str
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str, int]:
+        """Replace a relative span; returns (ok, message, absolute start)."""
         if self._selection_is_word:
             from .word_integration import get_word_integration
 
@@ -787,16 +889,19 @@ class LivePreviewService(QObject):
             compensated = self._word_compensated_span(word, rel_start, length)
             if compensated is not None:
                 start, end = compensated
-            return word.apply_live_edit(0, start, end, replacement)
-        return self._editor.ax_replace_range(
+            ok, message = word.apply_live_edit(0, start, end, replacement)
+            return ok, message, start
+        abs_start = self._selection_start + rel_start
+        ok, message = self._editor.ax_replace_range(
             self._selection_target,
-            self._selection_start + rel_start,
+            abs_start,
             length,
             replacement,
             allow_direct_paste=(
                 rel_start == 0 and length == len(self._selection_text)
             ),
         )
+        return ok, message, abs_start
 
     def _word_compensated_span(
         self, word: Any, rel_start: int, length: int
@@ -884,7 +989,7 @@ class LivePreviewService(QObject):
             )
             return
         span = self._pending[index]
-        ok, message = self._apply_abs(
+        ok, message, abs_start = self._apply_abs(
             span.start, span.end - span.start, span.after
         )
         _debug_log(
@@ -894,6 +999,14 @@ class LivePreviewService(QObject):
         self.apply_done.emit(message)
         if not ok:
             return
+        self._arm_undo(
+            {
+                "mode": "range",
+                "target": dict(self._selection_target),
+                "is_word": self._selection_is_word,
+                "steps": [(abs_start, len(span.after), span.before)],
+            }
+        )
         delta = len(span.after) - (span.end - span.start)
         remaining: list[EditSpan] = []
         for i, other in enumerate(self._pending):
@@ -955,16 +1068,27 @@ class LivePreviewService(QObject):
         total = len(self._pending)
         applied = 0
         delta = 0
+        undo_steps: list[tuple[int, int, str]] = []
         for span in sorted(self._pending, key=lambda s: s.start):
             rel_start = span.start + delta
             rel_end = span.end + delta
-            ok, _ = self._apply_abs(
+            ok, _, abs_start = self._apply_abs(
                 rel_start, rel_end - rel_start, span.after
             )
             if ok:
                 applied += 1
                 delta += len(span.after) - (span.end - span.start)
+                undo_steps.append((abs_start, len(span.after), span.before))
         self.apply_all_requested.emit()
+        if applied:
+            self._arm_undo(
+                {
+                    "mode": "range",
+                    "target": dict(self._selection_target),
+                    "is_word": self._selection_is_word,
+                    "steps": list(reversed(undo_steps)),
+                }
+            )
         if applied == total:
             message = f"Applied {applied} suggestions."
         else:
@@ -1011,6 +1135,14 @@ class LivePreviewService(QObject):
         if not ok:
             ok, message = self._paste_via_system_events(corrected)
         if ok:
+            self._arm_undo(
+                {
+                    "mode": "full",
+                    "target": dict(self._selection_target),
+                    "original": self._selection_text,
+                    "corrected": corrected,
+                }
+            )
             message = self._verify_full_apply(corrected)
         self.apply_done.emit(message)
         self._hide_panel()

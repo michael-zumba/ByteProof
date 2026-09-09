@@ -375,6 +375,109 @@ def _hairline() -> QFrame:
     return line
 
 
+_PILL_LABEL = (
+    "QLabel { background: #202124; color: #FFFFFF; border-radius: 16px;"
+    " padding: 8px 16px; font-size: 13px; font-weight: 500; }"
+)
+_PILL_BUTTON = (
+    "QPushButton { background: #202124; color: #FFFFFF; border: none;"
+    " border-radius: 16px; padding: 8px 16px; font-size: 13px;"
+    " font-weight: 500; }"
+    "QPushButton:hover { background: #303134; }"
+    "QPushButton:pressed { background: #3C4043; }"
+)
+
+
+class LoadingPill(QWidget):
+    """A tiny click-through 'Checking…' pill shown while the AI works.
+
+    Sits exactly where the suggestion panel will appear, so the panel
+    replaces it seamlessly when the result arrives.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("Checking…")
+        label.setStyleSheet(_PILL_LABEL)
+        layout.addWidget(label)
+        self.adjustSize()
+        self._pulse: QVariantAnimation | None = None
+
+    def place_near(self, point: QPoint) -> None:
+        target = QRect(
+            point.x() + 14, point.y() + 14, self.width(), self.height()
+        )
+        self.move(_clamp_rect(target, point).topLeft())
+
+    def show_pulse(self) -> None:
+        self.show()
+        self.setWindowOpacity(1.0)
+        if self._pulse is None:
+            self._pulse = QVariantAnimation(self)
+            self._pulse.setStartValue(0.0)
+            self._pulse.setEndValue(1.0)
+            self._pulse.setDuration(900)
+            self._pulse.setLoopCount(-1)
+            self._pulse.setEasingCurve(QEasingCurve.Type.InOutSine)
+            self._pulse.valueChanged.connect(self._on_pulse)
+        self._pulse.start()
+
+    def _on_pulse(self, value: float) -> None:
+        self.setWindowOpacity(0.55 + 0.45 * float(value))
+
+    def hide_pill(self) -> None:
+        if self._pulse is not None:
+            self._pulse.stop()
+        self.hide()
+
+
+class UndoPill(QWidget):
+    """A clickable 'Undo' pill offered for a few seconds after an apply."""
+
+    undo_requested = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("Undo")
+        button.setStyleSheet(_PILL_BUTTON)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(self.undo_requested.emit)
+        layout.addWidget(button)
+        self.adjustSize()
+
+    def place_near(self, point: QPoint) -> None:
+        target = QRect(
+            point.x() + 14,
+            point.y() + 14 + 52,
+            self.width(),
+            self.height(),
+        )
+        self.move(_clamp_rect(target, point).topLeft())
+
+
 class WordSuggestionCard(QWidget):
     """A floating suggestion card that can be dragged by its header.
 

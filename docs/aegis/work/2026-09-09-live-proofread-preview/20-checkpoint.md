@@ -59,6 +59,17 @@
 - [x] Editable-context gate (1.9.0-beta.11): suggestions only in editable
       contexts — settable-attribute probing (PDF/webpage reads skipped),
       Word/Pages/Mail context rules incl. Mail compose-window detection
+- [x] Suggestion style + latency instrumentation (1.9.0-beta.13): strict vs
+      "Polish language (preserve meaning)" mode with its own prompt and a
+      Settings selector; timestamped capture.log and provider_ms logging
+- [x] UI/UX protocols spec adopted (docs/superpowers/specs/
+      2026-09-09-live-proofread-uiux-protocols.md); Step 1 done
+      (1.9.0-beta.14): loading pill while the AI works, undo pill after
+      every apply (10 s, restores at the recorded absolute range; the
+      full-selection variant verifies the selection first)
+- [ ] UI/UX Step 2: onboarding & trust readiness card
+- [ ] UI/UX Step 3: shared design tokens + diff-view reuse
+- [ ] UI/UX Step 4: reason color dots, status chip, quit flow
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence

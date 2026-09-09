@@ -1360,10 +1360,10 @@ def test_service_word_apply_compensates_hidden_characters(monkeypatch):
     service._selection_start = 100
     service._selection_end = 120
     # Visible "teh" is doc 100..103 (before the hidden span).
-    ok, _ = service._apply_abs(0, 3, "the")
+    ok, _, _ = service._apply_abs(0, 3, "the")
     assert ok is True
     # Visible "sat" (8..11) lies after the 3 hidden chars -> doc 111..114.
-    ok, _ = service._apply_abs(8, 3, "sat2")
+    ok, _, _ = service._apply_abs(8, 3, "sat2")
     assert ok is True
     assert word.applied == [(100, 103, "the"), (111, 114, "sat2")]
 
@@ -2054,3 +2054,176 @@ def test_preview_edits_once_defaults_to_strict(monkeypatch):
     )
     assert meta["style"] == "strict"
     assert fake.calls[0][0][7] == 0.1
+
+
+# --- loading pill + undo ---
+
+
+def test_loading_pill_is_click_through():
+    from PyQt6.QtCore import Qt
+
+    from src.live_overlay import LoadingPill
+
+    pill = LoadingPill()
+    assert pill.testAttribute(
+        Qt.WidgetAttribute.WA_TransparentForMouseEvents
+    )
+
+
+def test_undo_pill_emits_on_click():
+    from PyQt6.QtWidgets import QPushButton
+
+    from src.live_overlay import UndoPill
+
+    pill = UndoPill()
+    clicks = []
+    pill.undo_requested.connect(lambda: clicks.append(True))
+    buttons = pill.findChildren(QPushButton)
+    buttons[0].click()
+    assert clicks == [True]
+
+
+def test_loading_pill_shows_on_spawn_and_hides_on_done(monkeypatch):
+    from src import live_preview as lp
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _FakeEditor("com.apple.TextEdit", "teh cat sat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    shown = []
+    hidden = []
+    monkeypatch.setattr(service, "_show_loading_pill", lambda: shown.append(True))
+    monkeypatch.setattr(service, "_hide_loading_pill", lambda: hidden.append(True))
+
+    result = {
+        "status": "ok",
+        "edits": [lp.Edit("teh", "the", "Spelling")],
+        "meta": {"provider": "fake"},
+    }
+
+    class _StubSignal:
+        def connect(self, *args, **kwargs):
+            pass
+
+    class FakeWorker:
+        done = _StubSignal()
+        failed = _StubSignal()
+        cancelled = _StubSignal()
+        finished = _StubSignal()
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr("src.live_service.PreviewWorker", FakeWorker)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    assert len(shown) == 1  # pill appeared when the call started
+    service._on_done(result, "key", "teh cat sat")
+    assert len(hidden) >= 1  # pill gone when the result arrived (idempotent)
+
+
+def test_apply_one_arms_undo_and_undo_restores(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    applied = []
+
+    class FakeEditor:
+        def selection_details(self, target):
+            return {
+                "text": "teh",
+                "range": (100, 3),
+                "context_before": "",
+                "context_after": "",
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+        def ax_replace_range(
+            self, target, start, length, text, allow_direct_paste=False
+        ):
+            applied.append((start, length, text))
+            return True, "Applied."
+
+    service._editor = FakeEditor()
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_start = 100
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = "teh"
+    service._seen_text = "teh"
+    service._apply_one(0)
+    assert applied == [(100, 3, "the")]
+    assert service._undo_state is not None
+    assert service._undo_state["steps"] == [(100, 3, "teh")]
+    service._perform_undo()
+    assert applied[-1] == (100, 3, "teh")  # restored the original
+
+
+def test_full_apply_undo_requires_matching_selection(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    text = "teh cat sat on the mat"
+    replaced = []
+
+    class MailEditor:
+        def __init__(self):
+            self.current = text  # the selection still holds the original
+
+        def get_selection_light(self, target):
+            return self.current
+
+        def replace_selection(self, target, new_text):
+            replaced.append(new_text)
+            self.current = new_text
+            return True, "Applied."
+
+    editor = MailEditor()
+    service._editor = editor
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    service._selection_target = {
+        "bundle_id": "com.apple.mail",
+        "pid": 9,
+        "name": "Mail",
+    }
+    service._selection_text = text
+    service._seen_text = text
+    service._selection_has_range = False
+    service._apply_one(0)
+    assert service._undo_state is not None
+    service._perform_undo()
+    assert replaced == ["the cat sat on the mat", text]
+
+    # If the selection has moved on, undo must refuse to paste blindly.
+    replaced.clear()
+    service._undo_state = {
+        "mode": "full",
+        "target": {"bundle_id": "com.apple.mail", "pid": 9},
+        "original": text,
+        "corrected": "the cat sat on the mat",
+    }
+    editor.current = "something else now"
+    messages = []
+    service.apply_done.connect(messages.append)
+    service._perform_undo()
+    assert replaced == []
+    assert messages == ["Selection changed — could not undo."]
