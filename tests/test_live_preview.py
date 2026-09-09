@@ -1786,13 +1786,14 @@ def test_selection_details_reports_editable_via_settable_probe(monkeypatch):
             return True
 
         @staticmethod
-        def AXUIElementIsAttributeSettable(el, attr):
-            return attr == FakeAS.kAXValueAttribute
+        def AXUIElementIsAttributeSettable(el, attr, out):
+            # PyObjC signature: (error, settable) via an out-parameter.
+            return (0, attr == FakeAS.kAXValueAttribute)
 
         @staticmethod
         def AXUIElementCopyAttributeValue(el, attr, out):
             if attr == FakeAS.kAXRoleAttribute:
-                return 0, "AXTextArea"
+                return 0, "AXGroup"  # role alone does not imply editable
             if attr == FakeAS.kAXValueAttribute:
                 return 0, "editable text"
             if attr == FakeAS.kAXSelectedTextAttribute:
@@ -1815,7 +1816,52 @@ def test_selection_details_reports_editable_via_settable_probe(monkeypatch):
         {"pid": 9, "bundle_id": "com.apple.TextEdit"}
     )
     assert details["editable"] is True
-    assert details["role"] == "AXTextArea"
+    assert details["role"] == "AXGroup"
+
+
+def test_selection_details_editable_role_even_when_probe_fails(monkeypatch):
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXRoleAttribute = "role"
+        kAXValueAttribute = "value"
+        kAXSelectedTextAttribute = "seltext"
+        kAXSelectedTextRangeAttribute = "range"
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXUIElementIsAttributeSettable(el, attr, out):
+            return (0, False)  # probe says not settable
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXRoleAttribute:
+                return 0, "AXTextArea"
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, "text"
+            if attr == FakeAS.kAXSelectedTextAttribute:
+                return 0, "some text"
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, (0, 9)
+            return 1, None
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor,
+        "_mac_ax_text_element",
+        lambda pid: (FakeAS, "el"),
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    editor = GenericTextEditor()
+    details = editor.selection_details(
+        {"pid": 9, "bundle_id": "com.apple.TextEdit"}
+    )
+    assert details["editable"] is True  # editable role is enough
 
 
 def test_selection_details_reports_read_only_static_text(monkeypatch):
@@ -1832,8 +1878,8 @@ def test_selection_details_reports_read_only_static_text(monkeypatch):
             return True
 
         @staticmethod
-        def AXUIElementIsAttributeSettable(el, attr):
-            return False  # nothing settable: read-only static text
+        def AXUIElementIsAttributeSettable(el, attr, out):
+            return (0, False)  # nothing settable: read-only static text
 
         @staticmethod
         def AXUIElementCopyAttributeValue(el, attr, out):

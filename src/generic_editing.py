@@ -26,6 +26,12 @@ from .utils import normalize_text
 SYSTEM = platform.system()
 CONTEXT_CHARS = 400
 
+# AX roles that imply an editable text context. Read-only selections (PDF
+# text, browsed web pages) live in AXStaticText/AXGroup elements instead.
+EDITABLE_ROLES = frozenset(
+    {"axtextarea", "axtextfield", "axcombobox"}
+)
+
 # Browsers accept AXSelectedText writes with a success code but do not
 # actually commit them to the page (Chrome/Safari web content). For these
 # apps the live apply must go through a real paste instead.
@@ -427,19 +433,19 @@ class GenericTextEditor:
 
     @staticmethod
     def _ax_editable(AS: Any, pid: int, found: Any) -> bool:
-        """Whether the selection context is editable (settable text attrs).
+        """Whether the selection context is editable.
 
-        Read-only selections (PDF text, browsed web pages) live in static
-        elements whose value/selection attributes are not settable; editable
-        fields expose at least one settable write attribute. The found
-        element and the app's focused element are both probed because apps
-        often focus a container while the selection lives in a child.
+        Two signals, either of which is enough:
+        1. The element's AXRole is an editable text role (AXTextArea,
+           AXTextField, AXComboBox). Read-only selections (PDF text, browsed
+           web pages) live in AXStaticText/AXGroup elements.
+        2. A settable write attribute. Note the PyObjC signature: the
+           settable flag comes back as an out-parameter, so the call returns
+           (error, settable) — the plain return value is just the error code.
+        The found element and the app's focused element are both probed
+        because apps often focus a container while the selection lives in a
+        child.
         """
-        try:
-            if not hasattr(AS, "AXUIElementIsAttributeSettable"):
-                return True  # older PyObjC: cannot probe, stay permissive
-        except Exception:
-            return True
         elements: list[Any] = [found]
         alt_as, alt_focused = GenericTextEditor._mac_ax_focused(pid)
         if alt_as is not None and alt_focused is not None:
@@ -451,11 +457,26 @@ class GenericTextEditor:
             getattr(AS, "kAXSelectedTextRangeAttribute", None),
         )
         for el in elements:
+            try:
+                err, role = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXRoleAttribute, None
+                )
+                if err == 0 and str(role).lower() in EDITABLE_ROLES:
+                    return True
+            except Exception:
+                pass
+            if not hasattr(AS, "AXUIElementIsAttributeSettable"):
+                return True  # older PyObjC: cannot probe, stay permissive
             for attr in attributes:
                 if attr is None:
                     continue
                 try:
-                    if AS.AXUIElementIsAttributeSettable(el, attr):
+                    result = AS.AXUIElementIsAttributeSettable(el, attr, None)
+                    if isinstance(result, tuple):
+                        err, settable = result
+                        if err == 0 and settable:
+                            return True
+                    elif result:
                         return True
                 except Exception:
                     continue
