@@ -25,9 +25,8 @@ from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
 # Bright, Google-inspired surfaces and typography.
 SURFACE_SHEET = (
     "QFrame { background: #FFFFFF; border: 1px solid #E3E6EB;"
-    " border-radius: 24px; }"
+    " border-radius: 20px; }"
 )
-CORNER_RADIUS = 24
 PANEL_MIN_WIDTH = 340
 PANEL_MAX_WIDTH = 600
 TITLE_SHEET = "color: #202124; font-size: 14px; font-weight: 600;"
@@ -378,29 +377,6 @@ def _hairline() -> QFrame:
     return line
 
 
-def _rounded_mask_region(width: int, height: int, radius: int) -> QRegion:
-    """A rounded-rectangle region for the card window mask.
-
-    The window is opaque, so the stylesheet's rounded corners would
-    otherwise leave sharp background-coloured corners. Masking the window
-    itself makes the corners truly transparent and click-through.
-    """
-    if width <= 0 or height <= 0:
-        return QRegion(QRect(0, 0, max(width, 1), max(height, 1)))
-    radius = max(4, min(radius, min(width, height) // 2))
-    diameter = radius * 2
-    region = QRegion(QRect(0, 0, width, height))
-    for corner in (
-        QRect(0, 0, diameter, diameter),
-        QRect(width - diameter, 0, diameter, diameter),
-        QRect(0, height - diameter, diameter, diameter),
-        QRect(width - diameter, height - diameter, diameter, diameter),
-    ):
-        region -= QRegion(corner, QRegion.RegionType.Rectangle)
-        region += QRegion(corner, QRegion.RegionType.Ellipse)
-    return region
-
-
 _PILL_BUTTON = (
     "QPushButton { background: #202124; color: #FFFFFF; border: none;"
     " border-radius: 16px; padding: 8px 16px; font-size: 13px;"
@@ -478,26 +454,9 @@ class WordSuggestionCard(QWidget):
         self._pop_target: QRect | None = None
         self._diff_labels: list[QLabel] = []
 
-    # --- rounded corners ---
-
-    def _update_mask(self) -> None:
-        try:
-            self.setMask(
-                _rounded_mask_region(
-                    self.width(), self.height(), CORNER_RADIUS
-                )
-            )
-        except Exception:
-            pass
-
     def resizeEvent(self, event) -> None:
         self._refresh_diff_heights()
-        self._update_mask()
         super().resizeEvent(event)
-
-    def showEvent(self, event) -> None:
-        self._update_mask()
-        super().showEvent(event)
 
     def _refresh_diff_heights(self) -> None:
         """Recompute wrapped-label heights for the current widths.
@@ -673,7 +632,6 @@ class WordSuggestionCard(QWidget):
         layout.addSpacing(4)
         self._diff_labels = []
         self.adjustSize()
-        self._update_mask()
 
     def set_spans(self, spans: list[EditSpan]) -> None:
         layout = self.layout()
@@ -781,7 +739,6 @@ class WordSuggestionCard(QWidget):
         self.layout().activate()
         min_size = self.layout().totalMinimumSize()
         self.resize(width, max(120, min_size.height()))
-        self._update_mask()
 
     def place_near(self, point: QPoint) -> None:
         target = QRect(

@@ -2396,17 +2396,15 @@ def test_card_reshapes_to_fit_long_edit():
     assert card.width() == PANEL_MAX_WIDTH  # widened to fit the change
 
 
-def test_card_applies_rounded_mask():
+def test_card_has_no_window_mask():
+    # The rounded-corner window mask was rejected in beta.17; the card must
+    # stay a plain opaque window (the stylesheet still rounds the surface).
     from src.live_overlay import WordSuggestionCard
     from src.live_preview import EditSpan
 
     card = WordSuggestionCard()
     card.set_spans([EditSpan("teh", "the", "Spelling", 0, 3)])
-    mask = card.mask()
-    assert mask is not None and not mask.isEmpty()
-    # Mask must match the current window size.
-    assert mask.boundingRect().width() == card.width()
-    assert mask.boundingRect().height() == card.height()
+    assert card.mask() is None or card.mask().isEmpty()
 
 
 def test_card_diff_labels_get_true_wrapped_heights():
@@ -2429,7 +2427,7 @@ def test_card_diff_labels_get_true_wrapped_heights():
         assert label.minimumHeight() > label.fontMetrics().height() * 1.5
 
 
-def test_card_resize_reflows_and_updates_mask():
+def test_card_resize_reflows_heights():
     from src.live_overlay import WordSuggestionCard
     from src.live_preview import EditSpan
 
@@ -2449,7 +2447,5 @@ def test_card_resize_reflows_and_updates_mask():
     label = card._diff_labels[0]
     before = label.minimumHeight()
     card.resize(card.width() - 80, card.height() + 40)
-    assert card.mask() is not None
-    assert card.mask().boundingRect().width() == card.width()
     # Narrower window -> the wrapped label needs more lines.
     assert label.minimumHeight() >= before
