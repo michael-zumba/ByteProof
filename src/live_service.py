@@ -51,6 +51,15 @@ MAIL_COMPOSE_CHECK_INTERVAL_S = 5.0
 # How long the Undo pill stays available after an apply.
 UNDO_AVAILABLE_MS = 10000
 
+# Word's AppleScript selection read takes a few hundred milliseconds, so
+# polling Word at the full rate keeps the UI thread busy and makes the app
+# feel slow. Word polls at a relaxed cadence; every other app keeps the
+# fast poll.
+WORD_POLL_INTERVAL_MS = 800
+
+# Two Escape presses within this window cancel the in-flight preview.
+DOUBLE_ESC_WINDOW_S = 0.6
+
 
 class PreviewWorker(QThread):
     """Runs the provider call off the UI thread, cancellable on stop."""
@@ -153,6 +162,7 @@ class LivePreviewService(QObject):
         self._undo_state: dict[str, Any] | None = None
         self._undo_timer: QTimer | None = None
         self._last_anchor: QPoint | None = None
+        self._last_escape_at = 0.0
         self._escape_bridge = _EscapeBridge()
         self._escape_bridge.pressed.connect(self._on_escape_pressed)
         self._escape_token: Any = None
@@ -206,6 +216,12 @@ class LivePreviewService(QObject):
         if not target:
             return
         is_word = bool(getattr(self._editor, "is_word", lambda _t: False)(target))
+        # Word's AppleScript read is heavy: poll Word at a relaxed cadence
+        # so the UI thread stays responsive while Word is frontmost.
+        if self._timer is not None:
+            wanted = WORD_POLL_INTERVAL_MS if is_word else POLL_INTERVAL_MS
+            if self._timer.interval() != wanted:
+                self._timer.setInterval(wanted)
         permission_ok, _ = self._editor.permission_status()
         if is_word:
             from .word_integration import get_word_integration
@@ -329,6 +345,11 @@ class LivePreviewService(QObject):
                 f"LIVE PERMISSION: trusted={permission_ok} "
                 f"app={target.get('name')!r}"
             )
+            if not permission_ok:
+                self.preview_error.emit(
+                    "Live suggestions paused — re-enable ByteProof in "
+                    "System Settings > Privacy & Security > Accessibility."
+                )
         decision, _reason = evaluate_trigger(
             self._settings,
             target,
@@ -338,6 +359,32 @@ class LivePreviewService(QObject):
             self._worker is not None,
             text == self._previewed_text,
         )
+        if decision == "busy":
+            # Another selection's preview is still running; if this text was
+            # previewed before, serve the cached panel immediately so
+            # re-selecting the same text always works.
+            key = preview_cache_key(
+                bundle,
+                text,
+                details.get("context_before", ""),
+                details.get("context_after", ""),
+                self._fingerprint,
+            )
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._previewed_text = text
+                self._selection_text = text
+                self._selection_target = target
+                self._selection_start = (details.get("range") or (0, 0))[0]
+                self._selection_end = (
+                    (details.get("range") or (0, 0))[1] if is_word else 0
+                )
+                self._selection_is_word = is_word
+                self._selection_has_range = (
+                    details.get("range") is not None
+                )
+                self._show_result(cached)
+            return
         if decision != "run":
             if decision not in (
                 "unchanged",
@@ -359,7 +406,7 @@ class LivePreviewService(QObject):
         self._selection_is_word = is_word
         self._selection_has_range = details.get("range") is not None
         key = preview_cache_key(
-            str(target.get("bundle_id", "")),
+            bundle,
             text,
             details.get("context_before", ""),
             details.get("context_after", ""),
@@ -478,12 +525,12 @@ class LivePreviewService(QObject):
                 if s.strip()
             ]
             front_name = (front.stdout or "").strip()
+            # A fresh compose window has no title yet (empty name), while a
+            # viewer window is always named after its mailbox.
             self._mail_composing = bool(
-                front_name
-                and (
-                    front_name in draft_subjects
-                    or front_name.lower() == "new message"
-                )
+                front_name in draft_subjects
+                or front_name.lower() == "new message"
+                or not front_name
             )
         except Exception as exc:
             _debug_log(f"LIVE MAIL COMPOSE CHECK ERROR: {exc}")
@@ -788,6 +835,13 @@ class LivePreviewService(QObject):
             pass
 
     def _on_escape_pressed(self) -> None:
+        now = time.monotonic()
+        double = now - self._last_escape_at < DOUBLE_ESC_WINDOW_S
+        self._last_escape_at = now
+        if double and self._worker is not None:
+            _debug_log("LIVE CANCEL: double-Esc cancelling the preview")
+            self._cancel_event.set()
+            self.apply_done.emit("Preview cancelled.")
         self._hide_panel()
 
     # --- checking panel ---

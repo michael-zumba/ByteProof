@@ -222,32 +222,91 @@ def word_visible_to_doc(
     return selection_start + rel + extra
 
 
+def _split_span_word_level(
+    original: str, start: int, edit: Edit, max_parts: int = 8
+) -> list[tuple[int, int, str, str]]:
+    """Split a large edit into word-level sub-edits aligned to the text.
+
+    Uses a token diff between the edit's before/after text and maps each
+    changed fragment back to its exact character offset inside the original
+    span. Returns [] when the alignment cannot be verified — the caller then
+    drops the span entirely, so a whole-text rewrite can never apply.
+    """
+    before_tokens = re.findall(r"\S+|\s+", edit.before)
+    after_tokens = re.findall(r"\S+|\s+", edit.after)
+    if not before_tokens or not after_tokens:
+        return []
+    matcher = difflib.SequenceMatcher(None, before_tokens, after_tokens)
+    offsets: list[int] = []
+    total = 0
+    for token in before_tokens:
+        offsets.append(total)
+        total += len(token)
+    subs: list[tuple[int, int, str, str]] = []
+    span_end = start + len(edit.before)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        old_text = "".join(before_tokens[i1:i2])
+        new_text = "".join(after_tokens[j1:j2])
+        if not old_text.strip() or not new_text.strip() or old_text == new_text:
+            continue
+        sub_start = start + offsets[i1]
+        sub_end = sub_start + len(old_text)
+        if sub_end > span_end or sub_start >= sub_end:
+            return []
+        if original[sub_start:sub_end] != old_text:
+            return []
+        subs.append((sub_start, sub_end, old_text, new_text))
+    if not subs or len(subs) > max_parts:
+        return []
+    return subs
+
+
 def map_edits_to_ranges(
     original: str, edits: Sequence[Edit]
 ) -> list[EditSpan]:
     """Map edits to character offsets.
 
     Each edit is assigned a distinct occurrence of its "before" text. When
-    spans overlap, the longest span wins and the loser is dropped.
+    spans overlap, the longest span wins and the loser is dropped. Spans
+    larger than the granularity cap are split into word-level sub-edits;
+    if a split cannot be verified it is dropped, so a whole-text rewrite
+    never reaches the document.
     """
-    candidates: list[tuple[int, Edit, int, int]] = []
+    max_span = max(
+        MIN_EDIT_SPAN_CHARS, int(len(original) * MAX_EDIT_SPAN_FRACTION)
+    )
+    candidates: list[tuple[bool, int, Edit, int, int]] = []
     for edit_index, edit in enumerate(edits):
         for located in _locate_all(original, edit.before):
             start, end = located
-            candidates.append((edit_index, edit, start, end))
-    # Guard against whole-selection rewrites: apply must stay granular.
-    max_span = max(MIN_EDIT_SPAN_CHARS, int(len(original) * MAX_EDIT_SPAN_FRACTION))
-    candidates = [c for c in candidates if c[3] - c[2] <= max_span]
-    candidates.sort(key=lambda c: (c[3] - c[2], -c[2]), reverse=True)
+            if end - start <= max_span:
+                candidates.append((True, edit_index, edit, start, end))
+            else:
+                for sub in _split_span_word_level(original, start, edit):
+                    sub_start, sub_end, sub_before, sub_after = sub
+                    if sub_end - sub_start <= max_span:
+                        candidates.append(
+                            (
+                                False,
+                                edit_index,
+                                Edit(sub_before, sub_after, edit.reason),
+                                sub_start,
+                                sub_end,
+                            )
+                        )
+    candidates.sort(key=lambda c: (c[4] - c[3], -c[3]), reverse=True)
     used_edits: set[int] = set()
     kept: list[tuple[int, int, Edit]] = []
-    for edit_index, edit, start, end in candidates:
-        if edit_index in used_edits:
+    for is_whole, edit_index, edit, start, end in candidates:
+        if is_whole and edit_index in used_edits:
             continue
         if any(start < k_end and end > k_start for k_start, k_end, _ in kept):
             continue
         kept.append((start, end, edit))
-        used_edits.add(edit_index)
+        if is_whole:
+            used_edits.add(edit_index)
     kept.sort(key=lambda k: k[0])
     return [
         EditSpan(edit.before, edit.after, edit.reason, start, end)

@@ -384,7 +384,13 @@ class MacOSWordIntegration(WordIntegration):
     def apply_live_edit(
         self, selection_start: int, rel_start: int, rel_end: int, replacement: str
     ) -> tuple[bool, str]:
-        """Replace one mapped sub-range of the current selection (tracked)."""
+        """Replace one mapped sub-range of the current selection.
+
+        Live editing must be instant and invisible: Track Changes is
+        temporarily suspended around the replacement (best-effort — the
+        replace still works if the property is unavailable) so the edit
+        never records a revision or slows the document down.
+        """
         from .generic_editing import _mac_set_clipboard
 
         start = selection_start + rel_start
@@ -392,8 +398,18 @@ class MacOSWordIntegration(WordIntegration):
         _mac_set_clipboard(replacement)
         script = f"""
         tell application "Microsoft Word"
+            set oldTrack to missing value
+            try
+                set oldTrack to track revisions of active document
+                set track revisions of active document to false
+            end try
             set r to create range active document start {start} end {end}
             set content of r to (the clipboard as text)
+            try
+                if oldTrack is not missing value then
+                    set track revisions of active document to oldTrack
+                end if
+            end try
         end tell
         """
         try:

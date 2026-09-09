@@ -766,6 +766,7 @@ def test_word_apply_live_edit_builds_subrange_script(monkeypatch):
     script = captured[-1].decode("utf-8")
     assert "start 510 end 513" in script
     assert "clipboard as text" in script
+    assert "track revisions of active document to false" in script
 
 
 def test_word_set_live_underline_builds_dotted_script(monkeypatch):
@@ -2252,3 +2253,127 @@ def test_word_selection_info_maps_missing_value_to_empty(monkeypatch):
     text, start, end, _before, _after = integration.get_selection_info()
     assert text == ""  # collapsed selection, not the literal string
     assert (start, end) == (10, 10)
+
+
+# --- word-level splits, double-Esc, busy-cache, Word poll ---
+
+
+def test_map_edits_splits_large_span_into_word_edits():
+    original = (
+        "the quik brown fox jumps over the lazy dog while sleeping soundly "
+        "under the tree near the river"
+    )
+    fixed = original.replace("quik", "quick").replace("soundly", "deeply")
+    spans = map_edits_to_ranges(
+        original, [Edit(original, fixed, "Rewrite")]
+    )
+    assert [(s.before, s.after) for s in spans] == [
+        ("quik", "quick"),
+        ("soundly", "deeply"),
+    ]
+    for span in spans:
+        assert original[span.start : span.end] == span.before
+
+
+def test_double_escape_cancels_inflight_preview():
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._worker = object()  # marks a preview as in flight
+    messages = []
+    service.apply_done.connect(messages.append)
+    service._on_escape_pressed()
+    assert not service._cancel_event.is_set()  # first Esc: just dismiss
+    service._on_escape_pressed()
+    assert service._cancel_event.is_set()  # second Esc: cancel the call
+    assert messages == ["Preview cancelled."]
+
+
+def test_busy_decision_serves_cached_result(monkeypatch):
+    from src import live_preview as lp
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _FakeEditor("com.apple.TextEdit", "teh cat sat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    service._worker = object()  # another preview is still in flight
+    spans = [lp.EditSpan("teh", "the", "Spelling", 0, 3)]
+    key = lp.preview_cache_key(
+        "com.apple.textedit", "teh cat sat", "", "", service._fingerprint
+    )
+    service._cache.put(key, spans)
+    service._seen_text = "teh cat sat"
+    service._changed_at = 0.0
+    service._sample(now=5.0)
+    assert service._pending == spans
+    assert service._panel is not None and service._panel.isVisible()
+    service._worker = None
+
+
+def test_word_poll_interval_relaxes(monkeypatch):
+    from src import live_service as ls
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class WordEditor:
+        @staticmethod
+        def frontmost_app():
+            return {
+                "bundle_id": "com.microsoft.word",
+                "pid": 7,
+                "name": "Microsoft Word",
+            }
+
+        @staticmethod
+        def is_word(target):
+            return True
+
+        @staticmethod
+        def permission_status():
+            return True, ""
+
+    monkeypatch.setattr(service, "_editor", WordEditor())
+
+    class FakeWord:
+        def get_selection_info(self):
+            return "teh cat sat", 100, 111, "", ""
+
+    monkeypatch.setattr(
+        "src.word_integration.get_word_integration", lambda: FakeWord()
+    )
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: None)
+    service.start()
+    try:
+        assert service._timer.interval() == ls.POLL_INTERVAL_MS
+        service._sample(now=1.0)
+        assert service._timer.interval() == ls.WORD_POLL_INTERVAL_MS
+    finally:
+        service.stop()
+
+
+def test_mail_compose_detection_empty_subject_counts_as_composing(monkeypatch):
+    import subprocess
+
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+
+    class FakeResult:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(args, **kwargs):
+        if "front window" in args[-1]:
+            return FakeResult("")  # a fresh compose window has no title
+        return FakeResult("")  # and no drafts carry subjects yet
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "src.live_service.MAIL_COMPOSE_CHECK_INTERVAL_S", 0.0
+    )
+    assert service._mail_is_composing({}) is True
