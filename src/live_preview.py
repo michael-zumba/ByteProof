@@ -39,6 +39,12 @@ POLL_INTERVAL_MS = 350
 CACHE_MAX = 64
 UNDERLINE_COLOR_HEX = "#E23A5B"
 
+# Failed previews retry silently a few times so a transient provider or
+# local-model error does not require the user to reselect; after that the
+# burst gives up until the selection changes.
+RETRY_COOLDOWN_S = 5.0
+RETRY_MAX_FAILURES = 3
+
 _FUZZY_RATIO_FLOOR = 0.6
 
 
@@ -104,32 +110,38 @@ def parse_preview_response(raw: str) -> list[Edit]:
     return edits
 
 
-def _fuzzy_locate(text: str, needle: str) -> int | None:
-    """Return the best word-boundary match for needle, or None below floor."""
+def _fuzzy_locate(text: str, needle: str) -> tuple[int, int] | None:
+    """Return the real span of the best same-length word-boundary match.
+
+    Fuzzy matching only runs when the exact "before" text is absent, so it
+    must stay conservative: candidates whose words total a different length
+    than the needle are ignored (otherwise a lookalike such as "go" could be
+    matched for "goes" and apply would replace the wrong span), and the
+    matched words' actual extents are used rather than the needle's length.
+    """
     needle_words = re.findall(r"\w+", needle)
     if not needle_words:
         return None
-    words = re.findall(r"\w+", text)
+    word_matches = list(re.finditer(r"\w+", text))
+    if not word_matches:
+        return None
+    needle_joined = " ".join(needle_words)
     best_ratio = _FUZZY_RATIO_FLOOR
     best: int | None = None
-    for i in range(len(words) - len(needle_words) + 1):
-        candidate = " ".join(words[i : i + len(needle_words)])
-        ratio = difflib.SequenceMatcher(
-            None, " ".join(needle_words), candidate
-        ).ratio()
+    for i in range(len(word_matches) - len(needle_words) + 1):
+        group = word_matches[i : i + len(needle_words)]
+        candidate = " ".join(match.group(0) for match in group)
+        if len(candidate) != len(needle_joined):
+            continue
+        ratio = difflib.SequenceMatcher(None, needle_joined, candidate).ratio()
         if ratio > best_ratio:
             best_ratio = ratio
             best = i
     if best is None:
         return None
-    prefix = " ".join(words[:best])
-    if prefix:
-        prefix += " "
-    index = text.find(prefix)
-    if index >= 0:
-        return len(prefix)
-    found = text.find(words[best])
-    return found if found >= 0 else None
+    start = word_matches[best].start()
+    end = word_matches[best + len(needle_words) - 1].end()
+    return start, end
 
 
 def _locate_all(text: str, needle: str) -> list[tuple[int, int]]:
@@ -147,7 +159,51 @@ def _locate_all(text: str, needle: str) -> list[tuple[int, int]]:
     fuzzy = _fuzzy_locate(text, needle)
     if fuzzy is None:
         return []
-    return [(fuzzy, max(fuzzy + 1, fuzzy + len(needle)))]
+    return [fuzzy]
+
+
+def word_visible_to_doc(
+    rel: int,
+    selection_start: int,
+    selection_end: int,
+    hidden_spans: Sequence[tuple[int, int]],
+    field_spans: Sequence[tuple[int, int, str]],
+) -> int | None:
+    """Map a visible-text offset to an absolute Word document position.
+
+    Word's ``content`` string omits tracked deletions and field-code
+    characters, but document positions count them, so a visible offset after
+    such a span must be shifted by ``doc_len - visible_len``. Spans are
+    walked in document order; every span before the offset contributes its
+    extra characters. Returns None when the offset lands inside a span's
+    visible text, where the mapping is unreliable.
+    """
+    items: list[tuple[int, int, int]] = []
+    for start, end in hidden_spans:
+        if start >= end:
+            continue
+        start = max(start, selection_start)
+        end = min(end, selection_end)
+        if end <= start:
+            continue
+        items.append((start, end, 0))
+    for start, end, text in field_spans:
+        if start >= end:
+            continue
+        start = max(start, selection_start)
+        end = min(end, selection_end)
+        if end <= start:
+            continue
+        items.append((start, end, len(text)))
+    extra = 0
+    for start, end, visible_len in sorted(items, key=lambda item: item[0]):
+        visible_start = (start - selection_start) - extra
+        if rel < visible_start:
+            break
+        if rel < visible_start + visible_len:
+            return None
+        extra += (end - start) - visible_len
+    return selection_start + rel + extra
 
 
 def map_edits_to_ranges(
@@ -201,9 +257,7 @@ def preview_cache_key(
     context_after: str,
     fingerprint: str,
 ) -> str:
-    payload = "\x1f".join(
-        [bundle_id, text, context_before, context_after, fingerprint]
-    )
+    payload = f"{bundle_id}\x1f{text}\x1f{context_before}\x1f{context_after}\x1f{fingerprint}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 

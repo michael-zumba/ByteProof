@@ -1390,9 +1390,10 @@ class SettingsDialog(QDialog):
             self.settings.get("live_preview", {}).get("enabled", True)
         )
         self.chk_live_preview.setToolTip(
-            "Underline suggested changes as soon as you select text in Word, "
-            "Pages, Mail, or Outlook. Hover a suggestion to preview it and "
-            "click to apply."
+            "Show a 'Suggested changes' panel when you select text in Word, "
+            "Pages, Mail, Outlook, or any app that exposes the selection. "
+            "Click Apply to fix one suggestion, Apply all for the whole "
+            "selection, or press Escape to dismiss the panel."
         )
         live_layout.addWidget(self.chk_live_preview)
 
@@ -3835,6 +3836,7 @@ class ProofreaderApp(QMainWindow):
             self.live_service = LivePreviewService(self)
             self.live_service.refresh_settings(self.settings)
             self.live_service.preview_error.connect(self._on_live_preview_error)
+            self.live_service.apply_done.connect(self._on_live_apply_done)
             if self.settings.get("live_preview", {}).get("enabled", True):
                 self.live_service.start()
             app_inst = QApplication.instance()
@@ -5355,6 +5357,12 @@ class ProofreaderApp(QMainWindow):
 
     def _on_live_preview_error(self, message: str) -> None:
         self._show_toast(f"Live suggestions: {message}", kind="warning")
+
+    def _on_live_apply_done(self, message: str) -> None:
+        if not message or not message.strip():
+            return
+        kind = "success" if "applied" in message.lower() else "warning"
+        self._show_toast(message, kind=kind)
 
     def run_proofread_task(self) -> None:
         if not self._check_license_access():

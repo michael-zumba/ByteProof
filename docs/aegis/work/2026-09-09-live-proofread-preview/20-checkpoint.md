@@ -29,6 +29,12 @@
       from the live document
 - [x] Design pivot (1.9.0-beta.3): selection-triggered suggestion panel only;
       no in-place marks, no Word formatting, no overlay tracking
+- [x] Fifth polish round (1.9.0-beta.4): worker cancellation restored,
+      safe thread lifecycle, selection re-verification before show/apply,
+      bounded retry after transient provider failures, Word hidden-char
+      (tracked deletions/fields) offset compensation, fuzzy-map span fix,
+      Escape-to-dismiss, multi-display panel placement, apply-feedback
+      toasts, panel keeps remaining suggestions when the selection survives
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence

@@ -148,6 +148,45 @@ Tests: 51 pass (panel show/hide on selection change, per-edit apply with
 offset shifting, apply-all with deltas, cache behaviour, diff rendering,
 widget layout invariants). Full smoke suite passes.
 
+## Fifth polish round (1.9.0-beta.4)
+
+Review of the pivot found and fixed accuracy, lifecycle, and UX gaps:
+
+- Cancellation restored: the preview worker again receives a cancel event,
+  so toggling the feature off or quitting aborts an in-flight provider call
+  (previously it burned tokens for up to 120 s and could outlive the app).
+  Worker teardown now goes through `finished` + `deleteLater` (no
+  "QThread destroyed while running" risk), and cancelled runs stay silent.
+- Stale-apply protection: the provider call takes seconds, so the service
+  re-reads the selection range before showing results and before every
+  apply. Re-selecting the same phrase elsewhere now applies at the new
+  position instead of corrupting the old one.
+- Panel survival after Apply: after a single apply the selection is
+  re-read; when the document still holds the expected post-edit text, the
+  panel stays open with the remaining suggestions (offsets shifted),
+  otherwise it closes deterministically.
+- Transient failures retry silently (5 s cooldown, 3 attempts per burst,
+  one toast per burst); free-limit and missing-API-key results now show a
+  real message instead of a silently vanishing panel.
+- Fuzzy mapping is conservative again: candidates must match the needle's
+  length (a "goes" lookalike can no longer match "go" and eat the next
+  word) and spans use the matched words' real extents.
+- Word apply compensates tracked deletions and field codes: when the
+  selection range length proves hidden characters exist, edits after them
+  are shifted to the correct absolute positions (unit-tested), including
+  mid-Apply-all state changes; clean documents skip the scan entirely.
+- UX: Escape dismisses the panel (observe-only global key monitor, active
+  only while the panel is visible), the panel clamps to the screen the
+  selection lives on (multi-display), Apply/Apply-all show a toast
+  ("Applied." / "Applied N of M suggestions." / the failure reason), the
+  panel header shows the suggestion count, and the Settings tooltip no
+  longer describes the retired underline model.
+
+Tests: 64 pass in `tests/test_live_preview.py` (13 new covering the above).
+Smoke suite unchanged (the environment-dependent
+`test_capture_diagnostics_shape` fails the same way on the pre-pivot HEAD
+when the test process lacks Accessibility permission).
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by

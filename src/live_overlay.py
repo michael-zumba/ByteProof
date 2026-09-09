@@ -123,12 +123,35 @@ def clear_layout(layout: QLayout) -> None:
             widget.deleteLater()
 
 
-def _clamp_rect(rect: QRect) -> QRect:
-    """Keep a window inside the primary screen's available geometry."""
+def _screen_at(point: QPoint):
+    """Return the QScreen containing point (best effort), else None."""
+    try:
+        from PyQt6.QtGui import QGuiApplication
+
+        app = QGuiApplication.instance()
+        if app is None:
+            return None
+        for screen in app.screens():
+            if screen.geometry().contains(point):
+                return screen
+        return app.screenAt(point)
+    except Exception:
+        return None
+
+
+def _clamp_rect(rect: QRect, anchor: QPoint | None = None) -> QRect:
+    """Keep a window inside the screen that owns the anchor point.
+
+    The suggestion panel must follow the display the user is working on, not
+    jump to the primary screen when the selection lives on a secondary one.
+    """
     app = QApplication.instance()
     if app is None:
         return rect
-    screen = QApplication.primaryScreen()
+    point = anchor if anchor is not None else rect.center()
+    screen = _screen_at(point)
+    if screen is None:
+        screen = QApplication.primaryScreen()
     if screen is None:
         return rect
     area = screen.availableGeometry()
@@ -218,10 +241,10 @@ class _SuggestionPopup(QFrame):
             self.width(),
             self.height(),
         )
-        area = _clamp_rect(target)
+        area = _clamp_rect(target, anchor.topLeft())
         if area.y() != target.y():
             target.moveTop(max(0, anchor.top() - self.height() - 10))
-            area = _clamp_rect(target)
+            area = _clamp_rect(target, anchor.topLeft())
         self.move(area.topLeft())
 
 
@@ -294,7 +317,7 @@ class LiveOverlay(QWidget):
             return False
         return self._popup.geometry().adjusted(-16, -28, 16, 28).contains(pos)
 
-    def paintEvent(self, event) -> None:  # noqa: N802
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         pen = QPen(QColor(UNDERLINE_COLOR_HEX))
         pen.setWidth(2)
@@ -360,7 +383,10 @@ class WordSuggestionCard(QWidget):
 
         header = QHBoxLayout()
         header.setSpacing(8)
-        title = QLabel("Suggested changes")
+        title_text = "Suggested changes"
+        if len(spans) > 1:
+            title_text = f"Suggested changes ({len(spans)})"
+        title = QLabel(title_text)
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
         close_btn.setFixedSize(26, 26)
@@ -427,7 +453,7 @@ class WordSuggestionCard(QWidget):
         target = QRect(
             point.x() + 14, point.y() + 14, self.width(), self.height()
         )
-        self.move(_clamp_rect(target).topLeft())
+        self.move(_clamp_rect(target, point).topLeft())
 
 
 LiveSuggestionPanel = WordSuggestionCard
@@ -439,7 +465,6 @@ def apply_nonactivating_panel(widget: QWidget) -> None:
         app = QApplication.instance()
         if app is None or "offscreen" in app.platformName():
             return
-        from ctypes import c_void_p
 
         import AppKit
         import objc

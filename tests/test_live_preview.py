@@ -3,17 +3,17 @@
 import json
 import os
 import sys
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-
 from PyQt6.QtWidgets import QApplication
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.live_preview import (  # noqa: E402
+from src.live_preview import (
     Edit,
     EditSpan,
     PreviewCache,
@@ -536,7 +536,24 @@ class _FakeEditor:
 
 
 class _MutableEditor(_FakeEditor):
-    """Like _FakeEditor, but the selected text can change between samples."""
+    """Like _FakeEditor, but the selected text and range can change."""
+
+    def __init__(self, bundle_id: str, text: str):
+        super().__init__(bundle_id, text)
+        self.range = (0, len(text))
+        self.applied: list[tuple[int, int, str]] = []
+
+    def selection_details(self, target):
+        return {
+            "text": self.text,
+            "range": self.range,
+            "context_before": "",
+            "context_after": "",
+        }
+
+    def ax_replace_range(self, target, start, length, new):
+        self.applied.append((start, length, new))
+        return True, "Applied."
 
 
 def test_service_decision_flow_skips_unchanged(monkeypatch):
@@ -575,6 +592,14 @@ def test_service_applies_one_suggestion_through_ax(monkeypatch):
     applied = []
 
     class FakeEditor:
+        def selection_details(self, target):
+            return {
+                "text": "teh",
+                "range": (100, 3),
+                "context_before": "",
+                "context_after": "",
+            }
+
         def ax_replace_range(self, target, start, length, text):
             applied.append((start, length, text))
             return True, "Applied."
@@ -588,6 +613,8 @@ def test_service_applies_one_suggestion_through_ax(monkeypatch):
     }
     service._selection_start = 100
     service._selection_is_word = False
+    service._selection_text = "teh"
+    service._seen_text = "teh"
     service._apply_one(0)
     assert applied == [(100, 3, "the")]
 
@@ -598,17 +625,26 @@ def test_service_apply_all_applies_each_suggestion_with_delta(monkeypatch):
 
     service = LivePreviewService()
     service.refresh_settings(_live_settings())
+    text = "teh quick brown fox jumps over where"
     applied = []
 
     class FakeEditor:
-        def ax_replace_range(self, target, start, length, text):
-            applied.append((start, length, text))
+        def selection_details(self, target):
+            return {
+                "text": text,
+                "range": (0, len(text)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def ax_replace_range(self, target, start, length, new):
+            applied.append((start, length, new))
             return True, "Applied."
 
     service._editor = FakeEditor()
     service._pending = [
         EditSpan("teh", "there", "Spelling", 0, 3),
-        EditSpan("where", "was", "Grammar", 30, 35),
+        EditSpan("where", "was", "Grammar", 31, 36),
     ]
     service._selection_target = {
         "bundle_id": "com.apple.TextEdit",
@@ -617,8 +653,10 @@ def test_service_apply_all_applies_each_suggestion_with_delta(monkeypatch):
     }
     service._selection_start = 0
     service._selection_is_word = False
+    service._selection_text = text
+    service._seen_text = text
     service._apply_all()
-    assert applied == [(0, 3, "there"), (32, 5, "was")]
+    assert applied == [(0, 3, "there"), (33, 5, "was")]
 
 
 def _fake_subprocess_run(stdout: bytes = b"OK"):
@@ -838,8 +876,8 @@ def test_service_repreviews_same_selection_after_deselect(monkeypatch):
 def test_card_and_popup_titles_are_suggested_changes():
     from PyQt6.QtWidgets import QLabel
 
-    from src.live_preview import EditSpan
     from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
 
     card = WordSuggestionCard()
     card.set_spans([EditSpan("teh", "the", "Spelling", 0, 3)])
@@ -862,8 +900,8 @@ class _FakeCursor:
 def test_word_card_keeps_position_across_refresh(monkeypatch):
     from PyQt6.QtCore import QPoint
 
-    from src.live_preview import EditSpan
     from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
 
     spans = [EditSpan("teh", "the", "Spelling", 0, 3)]
     card = WordSuggestionCard()
@@ -910,18 +948,28 @@ def test_apply_one_shifts_and_keeps_remaining(monkeypatch):
 
     service = LivePreviewService()
     service.refresh_settings(_live_settings())
-    applied = []
+    text = "teh quick brown fox jumps over where"
 
     class FakeEditor:
-        def ax_replace_range(self, target, start, length, text):
-            applied.append((start, length, text))
+        def __init__(self):
+            self.text = text
+            self.applied = []
+
+        def selection_details(self, target):
+            return {
+                "text": self.text,
+                "range": (0, len(self.text)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def ax_replace_range(self, target, start, length, new):
+            self.applied.append((start, length, new))
+            self.text = self.text[:start] + new + self.text[start + length :]
             return True, "Applied."
 
-    service._editor = FakeEditor()
-    service._pending = [
-        EditSpan("teh", "there", "Spelling", 0, 3),
-        EditSpan("where", "was", "Grammar", 30, 35),
-    ]
+    editor = FakeEditor()
+    service._editor = editor
     service._selection_target = {
         "bundle_id": "com.apple.TextEdit",
         "pid": 9,
@@ -929,18 +977,30 @@ def test_apply_one_shifts_and_keeps_remaining(monkeypatch):
     }
     service._selection_start = 0
     service._selection_is_word = False
+    service._selection_text = text
+    service._seen_text = text
+    service._show_result(
+        [
+            EditSpan("teh", "there", "Spelling", 0, 3),
+            EditSpan("where", "was", "Grammar", 31, 36),
+        ]
+    )
     service._apply_one(0)
-    assert applied == [(0, 3, "there")]
+    assert editor.applied == [(0, 3, "there")]
+    # The document now holds the expected post-edit text under the same
+    # selection, so the panel stays open with the remaining suggestion
+    # shifted by the length delta (len("there") - len("teh") == 2).
     assert [(s.before, s.start, s.end) for s in service._pending] == [
-        ("where", 32, 37)
+        ("where", 33, 38)
     ]
+    assert service._panel is not None and service._panel.isVisible()
 
 
 def test_card_rebuild_leaves_exactly_one_of_each_control():
     from PyQt6.QtWidgets import QLabel, QPushButton
 
-    from src.live_preview import EditSpan
     from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
 
     def walk_items(layout):
         for i in range(layout.count()):
@@ -971,9 +1031,327 @@ def test_card_rebuild_leaves_exactly_one_of_each_control():
         label.text()
         for label in widgets
         if isinstance(label, QLabel)
-        if label.text() == "Suggested changes"
+        if label.text() and label.text().startswith("Suggested changes")
     ]
     assert buttons.count("Apply") == 2
     assert buttons.count("Apply all") == 1
     assert buttons.count("×") == 1
     assert len(titles) == 1
+    assert titles[0] == "Suggested changes (2)"
+
+
+# --- fixes after the 1.9.0-beta.3 suggestion-panel pivot ---
+
+
+def test_word_visible_to_doc_without_spans_is_identity():
+    from src.live_preview import word_visible_to_doc
+
+    assert word_visible_to_doc(5, 100, 200, [], []) == 105
+
+
+def test_word_visible_to_doc_shifts_past_hidden_deletion():
+    from src.live_preview import word_visible_to_doc
+
+    # 3 tracked-deleted characters at doc 110..113 (visible length 0).
+    assert word_visible_to_doc(5, 100, 200, [(110, 113)], []) == 105
+    assert word_visible_to_doc(12, 100, 200, [(110, 113)], []) == 115
+
+
+def test_word_visible_to_doc_accounts_for_field_codes():
+    from src.live_preview import word_visible_to_doc
+
+    # Field doc 110..118 whose visible result is "c1" (2 of 8 chars visible).
+    assert word_visible_to_doc(12, 100, 200, [], [(110, 118, "c1")]) == 118
+    assert word_visible_to_doc(11, 100, 200, [], [(110, 118, "c1")]) is None
+
+
+def test_word_visible_to_doc_combines_hidden_and_fields():
+    from src.live_preview import word_visible_to_doc
+
+    hidden = [(105, 107)]  # 2 hidden chars
+    fields = [(110, 118, "x")]  # 7 extra chars
+    assert word_visible_to_doc(20, 100, 200, hidden, fields) == 129
+    assert word_visible_to_doc(5, 100, 200, hidden, fields) == 107
+
+
+def test_word_visible_to_doc_clamps_spans_to_selection():
+    from src.live_preview import word_visible_to_doc
+
+    assert word_visible_to_doc(5, 100, 120, [(90, 110)], [(120, 140, "x")]) == 115
+
+
+def test_map_fuzzy_rejects_length_mismatched_lookalikes():
+    # "goes" must not fuzzy-match the shorter word "go": replacing the
+    # needle-length span would eat the following word ("go t" -> "goes").
+    spans = map_edits_to_ranges(
+        "He go to school", [Edit("goes", "go", "Grammar")]
+    )
+    assert spans == []
+
+
+def test_service_retries_after_failure_then_gives_up(monkeypatch):
+    from src import live_service as ls
+    from src.live_preview import RETRY_COOLDOWN_S
+
+    service = ls.LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _FakeEditor("com.apple.TextEdit", "teh cat sat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    spawns = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawns.append(a))
+
+    errors = []
+    service.preview_error.connect(errors.append)
+    service._sample(now=1.0)  # records the selection (debounce window)
+    service._sample(now=2.0)  # spawn #1
+    assert len(spawns) == 1
+
+    service._on_failed("boom")
+    assert len(errors) == 1  # burst-start toast only
+    service._sample(now=2.5)  # still cooling down
+    assert len(spawns) == 1
+    service._sample(now=2.0 + RETRY_COOLDOWN_S + 0.1)
+    assert len(spawns) == 2
+
+    service._on_failed("boom")
+    service._sample(now=2.0 + 2 * (RETRY_COOLDOWN_S + 0.1))
+    assert len(spawns) == 3
+
+    service._on_failed("boom")  # RETRY_MAX_FAILURES reached -> give up
+    service._sample(now=2.0 + 3 * (RETRY_COOLDOWN_S + 0.1))
+    assert len(spawns) == 3
+    assert len(errors) == 1  # no toast spam across retries
+
+    editor.text = "a brand new selection"
+    service._sample(now=100.0)  # selection change resets the burst
+    service._sample(now=101.0)
+    assert len(spawns) == 4
+
+
+def test_service_reanchors_when_selection_moved_during_preview(monkeypatch):
+    from src import live_preview as lp
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _MutableEditor("com.apple.TextEdit", "teh cat sat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    spawns = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawns.append(a))
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    assert len(spawns) == 1
+    # While the provider call runs, the user re-selects the same phrase at a
+    # different position in the document. Applying at the stale position
+    # would corrupt the document.
+    editor.range = (500, 11)
+    _target, text, _details, key = spawns[0]
+    service._on_done(
+        {
+            "status": "ok",
+            "edits": [lp.Edit("teh", "the", "Spelling")],
+            "meta": {},
+        },
+        key,
+        text,
+    )
+    assert service._selection_start == 500
+    service._apply_one(0)
+    assert editor.applied == [(500, 3, "the")]
+
+
+def test_service_apply_all_reports_partial_failure(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    text = "teh cat sat"
+
+    class FakeEditor:
+        def __init__(self):
+            self.fail_next = False
+
+        def selection_details(self, target):
+            return {
+                "text": text,
+                "range": (0, len(text)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def ax_replace_range(self, target, start, length, new):
+            if self.fail_next:
+                self.fail_next = False
+                return False, "Could not apply."
+            return True, "Applied."
+
+    editor = FakeEditor()
+    editor.fail_next = True
+    service._editor = editor
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("cat", "dog", "Word choice", 4, 7),
+    ]
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_text = text
+    service._seen_text = text
+    messages = []
+    service.apply_done.connect(messages.append)
+    service._apply_all()
+    assert messages == ["Applied 1 of 2 suggestions."]
+
+
+def test_preview_worker_cancel_event_aborts_and_signals(monkeypatch):
+    from src import live_service as ls
+    from src.logic import TaskCancelledError
+
+    cancel = threading.Event()
+    cancel.set()
+    captured = {}
+
+    def fake_preview(settings, target, selected, before, after, cancel_event=None):
+        captured["cancel_event"] = cancel_event
+        raise TaskCancelledError()
+
+    monkeypatch.setattr("src.logic.preview_edits_once", fake_preview)
+    worker = ls.PreviewWorker({}, {}, "hello world", "", "", cancel)
+    outcomes = []
+    worker.done.connect(lambda result: outcomes.append(("done", result)))
+    worker.failed.connect(lambda msg: outcomes.append(("failed", msg)))
+    worker.cancelled.connect(lambda: outcomes.append(("cancelled", None)))
+    worker.run()  # synchronous: direct connections deliver immediately
+    assert outcomes == [("cancelled", None)]
+    assert captured["cancel_event"] is cancel
+
+
+def test_service_word_apply_compensates_hidden_characters(monkeypatch):
+    from src import word_integration as wi
+    from src.live_service import LivePreviewService
+
+    class FakeWord:
+        def __init__(self):
+            self.applied = []
+            self.text = "teh cat sat"
+            self.start = 100
+            self.end = 120
+            self.hidden_calls = 0
+
+        def get_selection_info(self):
+            return self.text, self.start, self.end, "", ""
+
+        def selection_has_fields(self):
+            return False
+
+        def get_selection_field_spans(self):
+            return []
+
+        def get_selection_hidden_spans(
+            self, start, end, exclude_spans=None, max_hidden=0
+        ):
+            self.hidden_calls += 1
+            return [(104, 107)]
+
+        def apply_live_edit(self, selection_start, rel_start, rel_end, replacement):
+            self.applied.append((rel_start, rel_end, replacement))
+            return True, "Applied."
+
+    word = FakeWord()
+    monkeypatch.setattr(wi, "get_word_integration", lambda: word)
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._selection_is_word = True
+    service._selection_target = {
+        "bundle_id": "com.microsoft.Word",
+        "pid": 9,
+        "name": "Microsoft Word",
+    }
+    service._selection_text = "teh cat sat"
+    service._seen_text = "teh cat sat"
+    service._selection_start = 100
+    service._selection_end = 120
+    # Visible "teh" is doc 100..103 (before the hidden span).
+    ok, _ = service._apply_abs(0, 3, "the")
+    assert ok is True
+    # Visible "sat" (8..11) lies after the 3 hidden chars -> doc 111..114.
+    ok, _ = service._apply_abs(8, 3, "sat2")
+    assert ok is True
+    assert word.applied == [(100, 103, "the"), (111, 114, "sat2")]
+
+
+def test_service_word_apply_skips_compensation_without_evidence(monkeypatch):
+    from src import word_integration as wi
+    from src.live_service import LivePreviewService
+
+    class FakeWord:
+        def __init__(self):
+            self.applied = []
+            self.text = "teh cat sat"
+            self.start = 100
+            self.end = 111  # exactly start + len(text): nothing hidden
+            self.hidden_calls = 0
+
+        def get_selection_info(self):
+            return self.text, self.start, self.end, "", ""
+
+        def selection_has_fields(self):
+            return False
+
+        def get_selection_hidden_spans(
+            self, start, end, exclude_spans=None, max_hidden=0
+        ):
+            self.hidden_calls += 1
+            return []
+
+        def apply_live_edit(self, selection_start, rel_start, rel_end, replacement):
+            self.applied.append((rel_start, rel_end, replacement))
+            return True, "Applied."
+
+    word = FakeWord()
+    monkeypatch.setattr(wi, "get_word_integration", lambda: word)
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._selection_is_word = True
+    service._selection_target = {"bundle_id": "com.microsoft.Word", "pid": 9}
+    service._selection_text = "teh cat sat"
+    service._seen_text = "teh cat sat"
+    service._selection_start = 100
+    service._selection_end = 111
+    service._apply_abs(0, 3, "the")
+    assert word.applied == [(100, 103, "the")]
+    assert word.hidden_calls == 0  # fast path: no expensive scan
+
+
+def test_on_done_limit_reached_reports_error_and_does_not_retry(monkeypatch):
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _FakeEditor("com.apple.TextEdit", "teh cat sat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    spawns = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawns.append(a))
+    errors = []
+    service.preview_error.connect(errors.append)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    assert len(spawns) == 1
+    _target, text, _details, key = spawns[0]
+    service._on_done(
+        {"status": "limit_reached", "edits": [], "meta": {}}, key, text
+    )
+    assert errors and "free proofreads" in errors[0]
+    assert service._panel is None or not service._panel.isVisible()
+    # The same selection must not hammer the provider with retries.
+    service._sample(now=3.0)
+    service._sample(now=4.0)
+    assert len(spawns) == 1

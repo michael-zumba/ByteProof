@@ -61,7 +61,7 @@ def main() -> int:
     target = {"bundle_id": "com.apple.mail", "name": "Mail", "pid": 0}
     failures = 0
     for text, must_fix in CORPUS:
-        status, edits, meta = logic.preview_edits_once(
+        _status, edits, meta = logic.preview_edits_once(
             settings, target, text, "", ""
         )
         corrected = apply_edits(text, edits)
