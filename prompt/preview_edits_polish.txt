@@ -15,6 +15,7 @@ Return ONLY one JSON object in this exact shape, with no Markdown fences and no 
 Rules for the edits list:
 - "before" must be an exact substring of the selected text.
 - "after" must differ from "before".
+- Each edit must be the smallest meaningful fragment — a single word, a short phrase, or a clause. Never return the whole selection as one edit; split a large rewrite into its smallest independent fragments so each change can be applied on its own.
 - List at most 12 edits, ordered by how confident and important each change is.
 - If the text needs no changes, return {"edits":[]}.
 - Never output conversational replies, explanations, or the full rewritten text.

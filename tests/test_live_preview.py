@@ -2059,17 +2059,6 @@ def test_preview_edits_once_defaults_to_strict(monkeypatch):
 # --- loading pill + undo ---
 
 
-def test_loading_pill_is_click_through():
-    from PyQt6.QtCore import Qt
-
-    from src.live_overlay import LoadingPill
-
-    pill = LoadingPill()
-    assert pill.testAttribute(
-        Qt.WidgetAttribute.WA_TransparentForMouseEvents
-    )
-
-
 def test_undo_pill_emits_on_click():
     from PyQt6.QtWidgets import QPushButton
 
@@ -2083,7 +2072,7 @@ def test_undo_pill_emits_on_click():
     assert clicks == [True]
 
 
-def test_loading_pill_shows_on_spawn_and_hides_on_done(monkeypatch):
+def test_checking_panel_shows_on_spawn_and_updates_on_done(monkeypatch):
     from src import live_preview as lp
     from src.live_service import LivePreviewService
 
@@ -2092,10 +2081,6 @@ def test_loading_pill_shows_on_spawn_and_hides_on_done(monkeypatch):
     editor = _FakeEditor("com.apple.TextEdit", "teh cat sat")
     editor.ax_bounds_for_range = lambda *a: []
     monkeypatch.setattr(service, "_editor", editor)
-    shown = []
-    hidden = []
-    monkeypatch.setattr(service, "_show_loading_pill", lambda: shown.append(True))
-    monkeypatch.setattr(service, "_hide_loading_pill", lambda: hidden.append(True))
 
     result = {
         "status": "ok",
@@ -2125,9 +2110,11 @@ def test_loading_pill_shows_on_spawn_and_hides_on_done(monkeypatch):
     monkeypatch.setattr("src.live_service.PreviewWorker", FakeWorker)
     service._sample(now=1.0)
     service._sample(now=2.0)
-    assert len(shown) == 1  # pill appeared when the call started
+    assert service._panel is not None
+    assert service._panel.isVisible()  # checking state visible immediately
+    assert service._pending == []  # no suggestions yet
     service._on_done(result, "key", "teh cat sat")
-    assert len(hidden) >= 1  # pill gone when the result arrived (idempotent)
+    assert service._pending[0].before == "teh"  # rebuilt with real results
 
 
 def test_apply_one_arms_undo_and_undo_restores(monkeypatch):
@@ -2227,3 +2214,41 @@ def test_full_apply_undo_requires_matching_selection(monkeypatch):
     service._perform_undo()
     assert replaced == []
     assert messages == ["Selection changed — could not undo."]
+
+
+# --- granular edits + Word missing-value ---
+
+
+def test_map_edits_drops_whole_selection_span():
+    long_text = "x" * 229
+    spans = map_edits_to_ranges(
+        long_text,
+        [Edit(long_text, "y" * 229, "Rewrite")],
+    )
+    assert spans == []  # a whole-selection rewrite must never apply
+
+    # A short selection may legitimately be one edit.
+    spans = map_edits_to_ranges("teh cat", [Edit("teh cat", "the cat", "Grammar")])
+    assert [(s.start, s.end) for s in spans] == [(0, 7)]
+
+
+def test_word_selection_info_maps_missing_value_to_empty(monkeypatch):
+    import subprocess
+
+    from src import word_integration as wi
+
+    def fake_run(args, **kwargs):
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = (
+            b"10###PROOF_SEP###missing value###PROOF_SEP###10"
+            b"###PROOF_SEP######PROOF_SEP###"
+        )
+        completed.stderr = b""
+        return completed
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    integration = wi.MacOSWordIntegration()
+    text, start, end, _before, _after = integration.get_selection_info()
+    assert text == ""  # collapsed selection, not the literal string
+    assert (start, end) == (10, 10)

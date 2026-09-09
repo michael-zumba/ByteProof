@@ -375,10 +375,6 @@ def _hairline() -> QFrame:
     return line
 
 
-_PILL_LABEL = (
-    "QLabel { background: #202124; color: #FFFFFF; border-radius: 16px;"
-    " padding: 8px 16px; font-size: 13px; font-weight: 500; }"
-)
 _PILL_BUTTON = (
     "QPushButton { background: #202124; color: #FFFFFF; border: none;"
     " border-radius: 16px; padding: 8px 16px; font-size: 13px;"
@@ -386,61 +382,6 @@ _PILL_BUTTON = (
     "QPushButton:hover { background: #303134; }"
     "QPushButton:pressed { background: #3C4043; }"
 )
-
-
-class LoadingPill(QWidget):
-    """A tiny click-through 'Checking…' pill shown while the AI works.
-
-    Sits exactly where the suggestion panel will appear, so the panel
-    replaces it seamlessly when the result arrives.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(
-            None,
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowDoesNotAcceptFocus,
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        label = QLabel("Checking…")
-        label.setStyleSheet(_PILL_LABEL)
-        layout.addWidget(label)
-        self.adjustSize()
-        self._pulse: QVariantAnimation | None = None
-
-    def place_near(self, point: QPoint) -> None:
-        target = QRect(
-            point.x() + 14, point.y() + 14, self.width(), self.height()
-        )
-        self.move(_clamp_rect(target, point).topLeft())
-
-    def show_pulse(self) -> None:
-        self.show()
-        self.setWindowOpacity(1.0)
-        if self._pulse is None:
-            self._pulse = QVariantAnimation(self)
-            self._pulse.setStartValue(0.0)
-            self._pulse.setEndValue(1.0)
-            self._pulse.setDuration(900)
-            self._pulse.setLoopCount(-1)
-            self._pulse.setEasingCurve(QEasingCurve.Type.InOutSine)
-            self._pulse.valueChanged.connect(self._on_pulse)
-        self._pulse.start()
-
-    def _on_pulse(self, value: float) -> None:
-        self.setWindowOpacity(0.55 + 0.45 * float(value))
-
-    def hide_pill(self) -> None:
-        if self._pulse is not None:
-            self._pulse.stop()
-        self.hide()
 
 
 class UndoPill(QWidget):
@@ -611,6 +552,49 @@ class WordSuggestionCard(QWidget):
         self.setWindowOpacity(1.0)
         if target is not None:
             self.setGeometry(target)
+
+    def set_checking(self) -> None:
+        """Show the card in a 'Checking…' state while the AI works.
+
+        Reuses the opaque, proven card surface so the user gets immediate
+        feedback without relying on translucent tool-window compositing.
+        """
+        layout = self.layout()
+        if layout is None:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(18, 14, 18, 16)
+            layout.setSpacing(0)
+        else:
+            clear_layout(layout)
+
+        header_widget = QWidget()
+        header_widget.setCursor(Qt.CursorShape.OpenHandCursor)
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(0, 2, 0, 2)
+        header.setSpacing(8)
+        title = QLabel("Suggested changes")
+        title.setStyleSheet(TITLE_SHEET)
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(26, 26)
+        close_btn.setStyleSheet(CLOSE_BUTTON)
+        close_btn.setToolTip("Close (Esc)")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.dismissed.emit)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(close_btn)
+        self._header_widget = header_widget
+        layout.addWidget(header_widget)
+        layout.addWidget(_hairline())
+        layout.addSpacing(14)
+
+        checking = QLabel("Checking…")
+        checking.setStyleSheet(
+            "color: #5F6368; font-size: 13px; padding: 4px 0px;"
+        )
+        layout.addWidget(checking)
+        layout.addSpacing(4)
+        self.adjustSize()
 
     def set_spans(self, spans: list[EditSpan]) -> None:
         layout = self.layout()

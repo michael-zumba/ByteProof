@@ -617,7 +617,13 @@ class MacOSWordIntegration(WordIntegration):
             if "###PROOF_SEP###" in result:
                 parts = result.split("###PROOF_SEP###")
                 if len(parts) >= 5:
-                    return parts[1], int(parts[0]), int(parts[2]), parts[3], parts[4]
+                    text = parts[1]
+                    # A collapsed selection comes back as the literal string
+                    # "missing value" from AppleScript; treat it as empty so
+                    # the live service never previews it.
+                    if str(text).strip().lower() == "missing value":
+                        text = ""
+                    return text, int(parts[0]), int(parts[2]), parts[3], parts[4]
                 if len(parts) >= 4:
                     return parts[1], int(parts[0]), 0, parts[2], parts[3]
                 if len(parts) >= 2:

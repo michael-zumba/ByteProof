@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import QApplication
 from .generic_editing import _debug_log, get_generic_editor
 from .live_overlay import (
     LiveSuggestionPanel,
-    LoadingPill,
     UndoPill,
     apply_nonactivating_panel,
 )
@@ -150,7 +149,6 @@ class LivePreviewService(QObject):
         self._mail_check_at = 0.0
         self._read_only_logged: dict[str, str] = {}
         self._spawned_at = 0.0
-        self._loading_pill: LoadingPill | None = None
         self._undo_pill: UndoPill | None = None
         self._undo_state: dict[str, Any] | None = None
         self._undo_timer: QTimer | None = None
@@ -183,7 +181,6 @@ class LivePreviewService(QObject):
         self._previewed_text = ""
         self._retry_not_before = None
         self._fail_streak = 0
-        self._hide_loading_pill()
         self._hide_undo_pill()
         self._hide_panel()
 
@@ -529,7 +526,7 @@ class LivePreviewService(QObject):
         worker.cancelled.connect(self._on_cancelled)
         worker.finished.connect(self._on_worker_finished)
         worker.start()
-        self._show_loading_pill()
+        self._show_checking_panel()
 
     def _on_worker_finished(self) -> None:
         worker = self._worker
@@ -538,7 +535,6 @@ class LivePreviewService(QObject):
             worker.deleteLater()
 
     def _on_done(self, result: dict[str, Any], key: str, text: str) -> None:
-        self._hide_loading_pill()
         # Drop the result when the user has moved to a different app since
         # the preview was spawned. Comparing the polled text was unreliable:
         # transient reads poisoned it and silently dropped good results.
@@ -550,6 +546,7 @@ class LivePreviewService(QObject):
             != str(self._selection_target.get("bundle_id", ""))
         ):
             _debug_log("LIVE DONE: target no longer frontmost; dropping")
+            self._hide_panel()
             return
         if not self._settings.get("live_preview", {}).get("enabled", True):
             return
@@ -586,7 +583,6 @@ class LivePreviewService(QObject):
         self._show_result(spans)
 
     def _on_failed(self, message: str) -> None:
-        self._hide_loading_pill()
         self._hide_panel()
         _debug_log(f"LIVE ERROR: {message}")
         if not self._settings.get("live_preview", {}).get("enabled", True):
@@ -602,7 +598,7 @@ class LivePreviewService(QObject):
         self._retry_not_before = self._last_now + RETRY_COOLDOWN_S
 
     def _on_cancelled(self) -> None:
-        self._hide_loading_pill()
+        self._hide_panel()
         _debug_log("LIVE CANCEL: preview worker cancelled.")
 
     # --- selection state ---
@@ -738,7 +734,6 @@ class LivePreviewService(QObject):
 
     def _hide_panel(self) -> None:
         self._pending = []
-        self._hide_loading_pill()
         self._remove_escape_monitor()
         if self._panel is not None:
             stop_pop = getattr(self._panel, "stop_pop", None)
@@ -795,17 +790,32 @@ class LivePreviewService(QObject):
     def _on_escape_pressed(self) -> None:
         self._hide_panel()
 
-    # --- loading pill ---
+    # --- checking panel ---
 
-    def _show_loading_pill(self) -> None:
-        if self._loading_pill is None:
-            self._loading_pill = LoadingPill()
-        self._loading_pill.place_near(self._anchor_point())
-        self._loading_pill.show_pulse()
+    def _show_checking_panel(self) -> None:
+        """Show the suggestion panel in a 'Checking…' state immediately.
 
-    def _hide_loading_pill(self) -> None:
-        if self._loading_pill is not None:
-            self._loading_pill.hide_pill()
+        The opaque card renders reliably everywhere, so the user gets
+        instant feedback the moment the provider call starts; the panel is
+        rebuilt with the real suggestions when the result arrives.
+        """
+        panel = self._panel
+        if panel is None:
+            panel = LiveSuggestionPanel()
+            panel.apply_requested.connect(self._apply_one)
+            panel.apply_all_requested.connect(self._apply_all)
+            panel.dismissed.connect(self._hide_panel)
+            apply_nonactivating_panel(panel)
+            self._panel = panel
+        if panel.isVisible():
+            return
+        panel.set_checking()
+        panel.show()
+        anchor = self._anchor_point()
+        self._last_anchor = anchor
+        panel.place_near(anchor)
+        panel.pop_in()
+        self._install_escape_monitor()
 
     # --- undo ---
 

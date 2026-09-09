@@ -57,6 +57,12 @@ CLIPBOARD_READ_BACKOFF_S = 8.0
 
 _FUZZY_RATIO_FLOOR = 0.6
 
+# A single edit may never swallow the whole selection: spans larger than
+# 70% of the selection (or 80 chars, whichever is larger) are whole-text
+# rewrites in disguise and are dropped, so apply stays word/phrase-level.
+MAX_EDIT_SPAN_FRACTION = 0.7
+MIN_EDIT_SPAN_CHARS = 80
+
 
 @dataclass(frozen=True)
 class Edit:
@@ -229,6 +235,9 @@ def map_edits_to_ranges(
         for located in _locate_all(original, edit.before):
             start, end = located
             candidates.append((edit_index, edit, start, end))
+    # Guard against whole-selection rewrites: apply must stay granular.
+    max_span = max(MIN_EDIT_SPAN_CHARS, int(len(original) * MAX_EDIT_SPAN_FRACTION))
+    candidates = [c for c in candidates if c[3] - c[2] <= max_span]
     candidates.sort(key=lambda c: (c[3] - c[2], -c[2]), reverse=True)
     used_edits: set[int] = set()
     kept: list[tuple[int, int, Edit]] = []
