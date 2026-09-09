@@ -2377,3 +2377,79 @@ def test_mail_compose_detection_empty_subject_counts_as_composing(monkeypatch):
         "src.live_service.MAIL_COMPOSE_CHECK_INTERVAL_S", 0.0
     )
     assert service._mail_is_composing({}) is True
+
+
+# --- panel display polish ---
+
+
+def test_card_reshapes_to_fit_long_edit():
+    from src.live_overlay import PANEL_MAX_WIDTH, PANEL_MIN_WIDTH, WordSuggestionCard
+    from src.live_preview import EditSpan
+
+    card = WordSuggestionCard()
+    card.set_spans([EditSpan("teh", "the", "Spelling", 0, 3)])
+    assert PANEL_MIN_WIDTH <= card.width() <= PANEL_MAX_WIDTH
+
+    long_before = "the " + "word " * 40  # ~200 chars of changed text
+    long_after = "the " + "phrase " * 40
+    card.set_spans([EditSpan(long_before, long_after, "Rewrite", 0, 1)])
+    assert card.width() == PANEL_MAX_WIDTH  # widened to fit the change
+
+
+def test_card_applies_rounded_mask():
+    from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
+
+    card = WordSuggestionCard()
+    card.set_spans([EditSpan("teh", "the", "Spelling", 0, 3)])
+    mask = card.mask()
+    assert mask is not None and not mask.isEmpty()
+    # Mask must match the current window size.
+    assert mask.boundingRect().width() == card.width()
+    assert mask.boundingRect().height() == card.height()
+
+
+def test_card_diff_labels_get_true_wrapped_heights():
+    from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
+
+    card = WordSuggestionCard()
+    card.set_spans(
+        [
+            EditSpan(
+                "a sentence with " + "many words " * 30 + "to fix",
+                "a sentence with " + "several words " * 30 + "improved",
+                "Clarity",
+                0,
+                1,
+            )
+        ]
+    )
+    for label in card._diff_labels:
+        assert label.minimumHeight() > label.fontMetrics().height() * 1.5
+
+
+def test_card_resize_reflows_and_updates_mask():
+    from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
+
+    card = WordSuggestionCard()
+    card.set_spans(
+        [
+            EditSpan(
+                "some words " * 40,
+                "some other words " * 40,
+                "Rewrite",
+                0,
+                1,
+            )
+        ]
+    )
+    card.show()
+    label = card._diff_labels[0]
+    before = label.minimumHeight()
+    card.resize(card.width() - 80, card.height() + 40)
+    assert card.mask() is not None
+    assert card.mask().boundingRect().width() == card.width()
+    # Narrower window -> the wrapped label needs more lines.
+    assert label.minimumHeight() >= before

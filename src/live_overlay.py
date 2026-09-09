@@ -25,8 +25,11 @@ from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
 # Bright, Google-inspired surfaces and typography.
 SURFACE_SHEET = (
     "QFrame { background: #FFFFFF; border: 1px solid #E3E6EB;"
-    " border-radius: 20px; }"
+    " border-radius: 24px; }"
 )
+CORNER_RADIUS = 24
+PANEL_MIN_WIDTH = 340
+PANEL_MAX_WIDTH = 600
 TITLE_SHEET = "color: #202124; font-size: 14px; font-weight: 600;"
 DIFF_SHEET = "color: #202124; font-size: 14px;"
 REASON_SHEET = "color: #5F6368; font-size: 12px;"
@@ -375,6 +378,29 @@ def _hairline() -> QFrame:
     return line
 
 
+def _rounded_mask_region(width: int, height: int, radius: int) -> QRegion:
+    """A rounded-rectangle region for the card window mask.
+
+    The window is opaque, so the stylesheet's rounded corners would
+    otherwise leave sharp background-coloured corners. Masking the window
+    itself makes the corners truly transparent and click-through.
+    """
+    if width <= 0 or height <= 0:
+        return QRegion(QRect(0, 0, max(width, 1), max(height, 1)))
+    radius = max(4, min(radius, min(width, height) // 2))
+    diameter = radius * 2
+    region = QRegion(QRect(0, 0, width, height))
+    for corner in (
+        QRect(0, 0, diameter, diameter),
+        QRect(width - diameter, 0, diameter, diameter),
+        QRect(0, height - diameter, diameter, diameter),
+        QRect(width - diameter, height - diameter, diameter, diameter),
+    ):
+        region -= QRegion(corner, QRegion.RegionType.Rectangle)
+        region += QRegion(corner, QRegion.RegionType.Ellipse)
+    return region
+
+
 _PILL_BUTTON = (
     "QPushButton { background: #202124; color: #FFFFFF; border: none;"
     " border-radius: 16px; padding: 8px 16px; font-size: 13px;"
@@ -442,14 +468,65 @@ class WordSuggestionCard(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(SURFACE_SHEET)
-        self.setMinimumWidth(320)
-        self.setMaximumWidth(480)
+        self.setMinimumWidth(PANEL_MIN_WIDTH)
+        self.setMaximumWidth(PANEL_MAX_WIDTH)
         self._header_widget: QWidget | None = None
         self._dragging = False
         self._drag_offset = QPoint()
         self._pop_anim = None
         self._pop_start: QRect | None = None
         self._pop_target: QRect | None = None
+        self._diff_labels: list[QLabel] = []
+
+    # --- rounded corners ---
+
+    def _update_mask(self) -> None:
+        try:
+            self.setMask(
+                _rounded_mask_region(
+                    self.width(), self.height(), CORNER_RADIUS
+                )
+            )
+        except Exception:
+            pass
+
+    def resizeEvent(self, event) -> None:
+        self._refresh_diff_heights()
+        self._update_mask()
+        super().resizeEvent(event)
+
+    def showEvent(self, event) -> None:
+        self._update_mask()
+        super().showEvent(event)
+
+    def _refresh_diff_heights(self) -> None:
+        """Recompute wrapped-label heights for the current widths.
+
+        Qt's word-wrapped QLabel reports a single-line sizeHint, which
+        clips long diffs; heightForWidth gives the true wrapped height.
+        """
+        for label in self._diff_labels:
+            try:
+                if label.wordWrap() and label.width() > 0:
+                    label.setMinimumHeight(
+                        label.heightForWidth(label.width())
+                    )
+            except Exception:
+                continue
+
+    def _preferred_width(self, spans: list[EditSpan]) -> int:
+        """Width that fits each changed fragment plus the Apply button."""
+        try:
+            metrics = self.fontMetrics()
+            widest = 0
+            for span in spans:
+                core = f"{span.before} → {span.after}"
+                widest = max(widest, metrics.horizontalAdvance(core))
+            return max(
+                PANEL_MIN_WIDTH, min(PANEL_MAX_WIDTH, widest + 170)
+            )
+        except Exception:
+            return PANEL_MIN_WIDTH + 60
 
     # --- drag-to-move (header only) ---
 
@@ -594,7 +671,9 @@ class WordSuggestionCard(QWidget):
         )
         layout.addWidget(checking)
         layout.addSpacing(4)
+        self._diff_labels = []
         self.adjustSize()
+        self._update_mask()
 
     def set_spans(self, spans: list[EditSpan]) -> None:
         layout = self.layout()
@@ -604,6 +683,7 @@ class WordSuggestionCard(QWidget):
             layout.setSpacing(0)
         else:
             clear_layout(layout)
+        self._diff_labels = []
 
         header_widget = QWidget()
         header_widget.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -646,11 +726,11 @@ class WordSuggestionCard(QWidget):
             diff_label = QLabel(diff_html(span.before, span.after))
             diff_label.setStyleSheet(DIFF_SHEET)
             diff_label.setWordWrap(True)
-            diff_label.setMaximumWidth(300)
             diff_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
             diff_box_layout.addWidget(diff_label)
+            self._diff_labels.append(diff_label)
             apply_btn = QPushButton("Apply")
             apply_btn.setStyleSheet(PRIMARY_BUTTON)
             apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -670,7 +750,8 @@ class WordSuggestionCard(QWidget):
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setWidget(body)
-            scroll.setMaximumHeight(360)
+            scroll.setMinimumHeight(200)
+            scroll.setMaximumHeight(520)
             scroll.setStyleSheet(
                 "QScrollArea { border: none; background: transparent; }"
             )
@@ -690,7 +771,17 @@ class WordSuggestionCard(QWidget):
         buttons.addWidget(apply_all_btn)
         buttons.addStretch()
         layout.addLayout(buttons)
-        self.adjustSize()
+        # Shape the window around the content: widen automatically so the
+        # changed fragments fit, then compute the true wrapped heights
+        # (QLabel word-wrap sizeHints are single-line and would clip text)
+        # and size the window to the layout's real minimum.
+        width = self._preferred_width(spans)
+        self.resize(width, self.minimumHeight())
+        self._refresh_diff_heights()
+        self.layout().activate()
+        min_size = self.layout().totalMinimumSize()
+        self.resize(width, max(120, min_size.height()))
+        self._update_mask()
 
     def place_near(self, point: QPoint) -> None:
         target = QRect(
