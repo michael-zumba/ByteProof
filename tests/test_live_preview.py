@@ -566,7 +566,7 @@ def test_service_decision_flow_skips_unchanged(monkeypatch):
     assert len(calls) == 1
 
 
-def test_service_applies_mark_through_ax(monkeypatch):
+def test_service_applies_one_suggestion_through_ax(monkeypatch):
     from src.live_preview import EditSpan
     from src.live_service import LivePreviewService
 
@@ -575,30 +575,24 @@ def test_service_applies_mark_through_ax(monkeypatch):
     applied = []
 
     class FakeEditor:
-        def frontmost_app(self):
-            return {
-                "bundle_id": "com.apple.TextEdit",
-                "pid": 9,
-                "name": "TextEdit",
-            }
-
         def ax_replace_range(self, target, start, length, text):
             applied.append((start, length, text))
             return True, "Applied."
 
     service._editor = FakeEditor()
-    service._marks = [EditSpan("teh", "the", "Spelling", 0, 3)]
-    service._mark_target = {
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    service._selection_target = {
         "bundle_id": "com.apple.TextEdit",
         "pid": 9,
         "name": "TextEdit",
     }
-    service._mark_is_word = False
-    service._apply_mark(0)
-    assert applied == [(0, 3, "the")]
+    service._selection_start = 100
+    service._selection_is_word = False
+    service._apply_one(0)
+    assert applied == [(100, 3, "the")]
 
 
-def test_service_apply_all_applies_each_mark_with_delta(monkeypatch):
+def test_service_apply_all_applies_each_suggestion_with_delta(monkeypatch):
     from src.live_preview import EditSpan
     from src.live_service import LivePreviewService
 
@@ -612,16 +606,17 @@ def test_service_apply_all_applies_each_mark_with_delta(monkeypatch):
             return True, "Applied."
 
     service._editor = FakeEditor()
-    service._marks = [
+    service._pending = [
         EditSpan("teh", "there", "Spelling", 0, 3),
         EditSpan("where", "was", "Grammar", 30, 35),
     ]
-    service._mark_target = {
+    service._selection_target = {
         "bundle_id": "com.apple.TextEdit",
         "pid": 9,
         "name": "TextEdit",
     }
-    service._mark_is_word = False
+    service._selection_start = 0
+    service._selection_is_word = False
     service._apply_all()
     assert applied == [(0, 3, "there"), (32, 5, "was")]
 
@@ -737,14 +732,14 @@ def test_service_full_cycle_with_fake_provider(monkeypatch):
         "meta": {"provider": "fake"},
     }
 
-    def fake_spawn(target, text, details, key, selection_start, is_word):
-        service._on_done(result, key, text, target, selection_start, is_word)
+    def fake_spawn(target, text, details, key):
+        service._on_done(result, key, text)
 
     monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
     service._sample(now=10.0)
     service._sample(now=11.0)
-    assert service._marks and service._marks[0].before == "teh"
-    service._apply_mark(0)
+    assert service._pending and service._pending[0].before == "teh"
+    service._apply_one(0)
     assert editor.applied == [(0, 3, "the")]
 
 
@@ -764,9 +759,9 @@ def test_preview_cache_prevents_duplicate_provider_calls(monkeypatch):
         "meta": {"provider": "fake"},
     }
 
-    def fake_spawn(target, text, details, key, selection_start, is_word):
+    def fake_spawn(target, text, details, key):
         calls.append(text)
-        service._on_done(result, key, text, target, selection_start, is_word)
+        service._on_done(result, key, text)
 
     monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
     service._sample(now=1.0)
@@ -796,14 +791,14 @@ def test_service_renders_card_when_bounds_unavailable(monkeypatch):
         "meta": {"provider": "fake"},
     }
 
-    def fake_spawn(target, text, details, key, selection_start, is_word):
-        service._on_done(result, key, text, target, selection_start, is_word)
+    def fake_spawn(target, text, details, key):
+        service._on_done(result, key, text)
 
     monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
     service._sample(now=1.0)
     service._sample(now=2.0)
-    assert service._word_card is not None
-    assert len(service._marks) == 1
+    assert service._panel is not None
+    assert len(service._pending) == 1
 
 
 def test_service_repreviews_same_selection_after_deselect(monkeypatch):
@@ -822,9 +817,9 @@ def test_service_repreviews_same_selection_after_deselect(monkeypatch):
         "meta": {"provider": "fake"},
     }
 
-    def fake_spawn(target, text, details, key, selection_start, is_word):
+    def fake_spawn(target, text, details, key):
         calls.append(text)
-        service._on_done(result, key, text, target, selection_start, is_word)
+        service._on_done(result, key, text)
 
     monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
     service._sample(now=1.0)
@@ -837,162 +832,7 @@ def test_service_repreviews_same_selection_after_deselect(monkeypatch):
     service._sample(now=5.0)
     service._sample(now=6.0)
     assert len(calls) == 1  # cache, not a new provider call
-    assert service._marks and service._marks[0].before == "teh"
-
-
-def test_service_keeps_marks_after_deselect(monkeypatch):
-    from src import live_preview as lp
-    from src.live_service import LivePreviewService
-
-    service = LivePreviewService()
-    service.refresh_settings(_live_settings())
-    editor = _MutableEditor("com.apple.TextEdit", "teh cat sat")
-    editor.rects = [(10.0, 10.0, 30.0, 16.0)]
-    editor.ax_bounds_for_range = lambda target, start, length: [editor.rects[0]]
-    monkeypatch.setattr(service, "_editor", editor)
-    result = {
-        "status": "ok",
-        "edits": [lp.Edit("teh", "the", "Spelling")],
-        "meta": {"provider": "fake"},
-    }
-
-    def fake_spawn(target, text, details, key, selection_start, is_word):
-        service._on_done(result, key, text, target, selection_start, is_word)
-
-    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
-    service._sample(now=1.0)
-    service._sample(now=2.0)
-    assert service._marks and service._overlay._spans
-    editor.text = ""
-    service._sample(now=3.0)
-    assert service._marks
-    assert service._overlay._spans
-
-
-def test_popup_stays_open_while_cursor_moves_to_buttons(monkeypatch):
-    from PyQt6.QtCore import QRect
-
-    from src.live_overlay import OverlaySpan
-    from src.live_service import LivePreviewService
-
-    class FakeOverlay:
-        def __init__(self):
-            self.hidden = False
-            self._spans = [OverlaySpan("a", "b", "x", QRect(100, 100, 60, 20))]
-
-        def popup_contains(self, pos):
-            return QRect(80, 130, 90, 50).contains(pos)
-
-        def hide_popup(self):
-            self.hidden = True
-
-        def show_popup(self, index):
-            self.hidden = False
-
-    service = LivePreviewService()
-    service.refresh_settings(_live_settings())
-    fake = FakeOverlay()
-    service._overlay = fake
-    service._overlay_spans = fake._spans
-    service._last_hover_ts = 0.0
-    service._on_pointer_event(5, 110, 110)
-    assert service._hovered == 0 and fake.hidden is False
-    service._last_hover_ts = 0.0
-    service._on_pointer_event(5, 110, 140)  # over the popup card
-    assert service._hovered == 0 and fake.hidden is False
-    service._last_hover_ts = 0.0
-    service._on_pointer_event(5, 500, 500)  # far away -> delayed hide
-    assert service._popup_hide_timer is not None
-    service._finish_popup_hide()
-    assert fake.hidden is True
-
-
-def test_tap_does_not_steal_clicks_over_popup(monkeypatch):
-    from PyQt6.QtCore import QRect
-
-    from src.live_overlay import OverlaySpan
-    from src.live_service import LivePreviewService
-
-    class FakeOverlay:
-        def __init__(self):
-            self.popup_open = True
-
-        def popup_contains(self, pos):
-            return self.popup_open
-
-        def hide_popup(self):
-            pass
-
-        def hide_overlay(self):
-            pass
-
-    applied = []
-
-    class FakeEditor:
-        def ax_replace_range(self, target, start, length, text):
-            applied.append((start, length, text))
-            return True, "Applied."
-
-    service = LivePreviewService()
-    service.refresh_settings(_live_settings())
-    overlay = FakeOverlay()
-    service._overlay = overlay
-    service._overlay_spans = [
-        OverlaySpan("teh", "the", "S", QRect(100, 100, 60, 20))
-    ]
-    service._overlay_indices = [0]
-    service._marks = [EditSpan("teh", "the", "S", 0, 3)]
-    service._mark_target = {"bundle_id": "com.apple.TextEdit", "pid": 9}
-    service._mark_is_word = False
-    service._editor = FakeEditor()
-    service._on_pointer_event(1, 110, 110)  # over the popup -> no steal
-    assert applied == []
-    overlay.popup_open = False
-    service._on_pointer_event(1, 110, 110)  # directly on the mark -> apply
-    assert applied == [(0, 3, "the")]
-
-
-def test_word_journal_round_trip_and_heal(monkeypatch, tmp_path):
-    import json
-
-    from src import live_service as ls
-    from src.live_service import LivePreviewService
-
-    class FakeWord:
-        def active_document_name(self):
-            return "Doc1"
-
-        def live_marks(self):
-            return [
-                {
-                    "start": 0,
-                    "end": 3,
-                    "underline": "underline none",
-                    "color": [0, 0, 0],
-                }
-            ]
-
-    restored = []
-
-    def restore(self, start, end, original):
-        restored.append((start, end, original))
-
-    FakeWord.restore_live_mark = restore
-    monkeypatch.setattr(
-        "src.word_integration.get_word_integration", lambda: FakeWord()
-    )
-    service = LivePreviewService()
-    service._journal_path = str(tmp_path / "journal.json")
-    service._write_word_journal()
-    payload = json.loads((tmp_path / "journal.json").read_text())
-    assert payload["document"] == "Doc1"
-    assert len(payload["ranges"]) == 1
-    service._heal_word_marks()
-    assert restored == [
-        (0, 3, {"underline": "underline none", "color": (0, 0, 0)})
-    ]
-    payload = json.loads((tmp_path / "journal.json").read_text())
-    assert payload["ranges"] == []
+    assert service._pending and service._pending[0].before == "teh"
 
 
 def test_card_and_popup_titles_are_suggested_changes():
@@ -1022,20 +862,78 @@ class _FakeCursor:
 def test_word_card_keeps_position_across_refresh(monkeypatch):
     from PyQt6.QtCore import QPoint
 
-    from src import live_service as ls
+    from src.live_preview import EditSpan
+    from src.live_overlay import WordSuggestionCard
+
+    spans = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    card = WordSuggestionCard()
+    card.set_spans(spans)
+    card.place_near(QPoint(100, 100))
+    first_position = card.pos()
+    card.set_spans(spans)
+    assert card.pos() == first_position
+
+
+def test_service_shows_panel_on_result_and_hides_on_selection_change(
+    monkeypatch,
+):
+    from src import live_preview as lp
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _MutableEditor("com.apple.TextEdit", "teh cat sat")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    result = {
+        "status": "ok",
+        "edits": [lp.Edit("teh", "the", "Spelling")],
+        "meta": {"provider": "fake"},
+    }
+
+    def fake_spawn(target, text, details, key):
+        service._on_done(result, key, text)
+
+    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    assert service._panel is not None
+    assert service._panel.isVisible()
+    editor.text = ""
+    service._sample(now=3.0)
+    assert service._panel.isVisible() is False
+
+
+def test_apply_one_shifts_and_keeps_remaining(monkeypatch):
     from src.live_preview import EditSpan
     from src.live_service import LivePreviewService
 
     service = LivePreviewService()
     service.refresh_settings(_live_settings())
-    fake = _FakeCursor(QPoint(100, 100))
-    monkeypatch.setattr(ls, "QCursor", fake)
-    spans = [EditSpan("teh", "the", "Spelling", 0, 3)]
-    service._show_card(spans)
-    first_position = service._word_card.pos()
-    fake.p = QPoint(700, 700)
-    service._show_card(spans)
-    assert service._word_card.pos() == first_position
+    applied = []
+
+    class FakeEditor:
+        def ax_replace_range(self, target, start, length, text):
+            applied.append((start, length, text))
+            return True, "Applied."
+
+    service._editor = FakeEditor()
+    service._pending = [
+        EditSpan("teh", "there", "Spelling", 0, 3),
+        EditSpan("where", "was", "Grammar", 30, 35),
+    ]
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._apply_one(0)
+    assert applied == [(0, 3, "there")]
+    assert [(s.before, s.start, s.end) for s in service._pending] == [
+        ("where", 32, 37)
+    ]
 
 
 def test_card_rebuild_leaves_exactly_one_of_each_control():
@@ -1079,43 +977,3 @@ def test_card_rebuild_leaves_exactly_one_of_each_control():
     assert buttons.count("Apply all") == 1
     assert buttons.count("×") == 1
     assert len(titles) == 1
-
-
-def test_service_accumulates_marks_across_selections(monkeypatch):
-    from src import live_preview as lp
-    from src.live_service import LivePreviewService
-
-    service = LivePreviewService()
-    service.refresh_settings(_live_settings())
-    editor = _MutableEditor("com.apple.TextEdit", "teh cat sat")
-    editor.rects = [(10.0, 10.0, 30.0, 16.0)]
-    editor.ax_bounds_for_range = lambda target, start, length: [editor.rects[0]]
-    monkeypatch.setattr(service, "_editor", editor)
-    results = iter(
-        [
-            {
-                "status": "ok",
-                "edits": [lp.Edit("teh", "the", "Spelling")],
-                "meta": {"provider": "fake"},
-            },
-            {
-                "status": "ok",
-                "edits": [lp.Edit("where", "was", "Grammar")],
-                "meta": {"provider": "fake"},
-            },
-        ]
-    )
-
-    def fake_spawn(target, text, details, key, selection_start, is_word):
-        service._on_done(
-            next(results), key, text, target, selection_start, is_word
-        )
-
-    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
-    service._sample(now=1.0)
-    service._sample(now=2.0)
-    assert [s.before for s in service._marks] == ["teh"]
-    editor.text = "it where fine"
-    service._sample(now=3.0)
-    service._sample(now=4.0)
-    assert [s.before for s in service._marks] == ["teh", "where"]

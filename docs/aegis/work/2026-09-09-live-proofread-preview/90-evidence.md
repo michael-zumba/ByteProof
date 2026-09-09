@@ -125,6 +125,29 @@
 - Versioning is active: `1.9.0-beta.N` increments per update and is shown in
   Settings/About and the app bundle.
 
+## Design pivot (1.9.0-beta.3)
+
+Native in-document marks and overlay underlines were the source of repeated
+platform conflicts (Word formatting traces, Chrome/Gmail flicker, Mail/Pages
+AX gaps). The live preview now uses the simpler model the user approved:
+
+- Selecting text in any app that exposes a selection debounces and asks the AI
+  for a cached compact edit list.
+- A single non-activating "Suggested changes" panel appears near the selection
+  with pinpoint word diffs, per-edit Apply rows, Apply all, and a close button.
+- Nothing in the source document is ever formatted, underlined, or modified
+  until the user clicks an edit. Applying replaces only the exact range
+  (Word: content replacement with the user's existing Track Changes state).
+- The panel is a true macOS non-activating panel (`Qt.Tool` +
+  `WindowDoesNotAcceptFocus` + AppKit nonactivating mask), so clicking it
+  never raises the ByteProof main window.
+- The event tap, underline overlay, Word formatting/journal/heal code paths
+  are no longer used by the live service.
+
+Tests: 51 pass (panel show/hide on selection change, per-edit apply with
+offset shifting, apply-all with deltas, cache behaviour, diff rendering,
+widget layout invariants). Full smoke suite passes.
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by

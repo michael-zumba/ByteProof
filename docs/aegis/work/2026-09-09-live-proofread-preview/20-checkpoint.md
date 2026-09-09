@@ -27,6 +27,8 @@
 - [x] Fourth polish round (1.9.0-beta.2): popup click stealing fixed,
       Word mark journal + self-heal on crash/kill, leftover marks cleaned
       from the live document
+- [x] Design pivot (1.9.0-beta.3): selection-triggered suggestion panel only;
+      no in-place marks, no Word formatting, no overlay tracking
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence

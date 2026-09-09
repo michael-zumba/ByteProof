@@ -341,6 +341,7 @@ class WordSuggestionCard(QWidget):
             None,
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
             | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -427,3 +428,36 @@ class WordSuggestionCard(QWidget):
             point.x() + 14, point.y() + 14, self.width(), self.height()
         )
         self.move(_clamp_rect(target).topLeft())
+
+
+LiveSuggestionPanel = WordSuggestionCard
+
+
+def apply_nonactivating_panel(widget: QWidget) -> None:
+    """Best-effort: make a Qt window a true non-activating macOS panel."""
+    try:
+        app = QApplication.instance()
+        if app is None or "offscreen" in app.platformName():
+            return
+        from ctypes import c_void_p
+
+        import AppKit
+        import objc
+
+        view = widget.winId()
+        nsview = objc.objc_object(c_void_p=int(view))
+        window = nsview.window()
+        if window is None:
+            return
+        mask = int(window.styleMask())
+        window.setStyleMask_(
+            mask | int(AppKit.NSWindowStyleMaskNonactivatingPanel)
+        )
+        window.setHidesOnDeactivate_(False)
+        window.setLevel_(int(AppKit.NSFloatingWindowLevel))
+        behavior = int(window.collectionBehavior())
+        window.setCollectionBehavior_(
+            behavior | int(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces)
+        )
+    except Exception:
+        pass
