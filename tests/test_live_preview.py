@@ -460,6 +460,31 @@ def test_diff_html_replacement_and_escape():
     assert "&lt;x&gt;" in rendered
 
 
+def test_diff_html_replacement_shows_arrow():
+    from src.live_overlay import diff_html
+
+    rendered = diff_html("teh cat", "the cat")
+    assert "→" in rendered
+
+
+def test_diff_html_dims_unchanged_context():
+    from src.live_overlay import CONTEXT_STYLE, diff_html
+
+    rendered = diff_html("the cat sat", "the cat sat")
+    assert CONTEXT_STYLE.split(":")[1].split(";")[0].strip() in rendered
+
+
+def test_card_has_shadow_and_translucent_margin():
+    from PyQt6.QtCore import Qt
+
+    from src.live_overlay import WordSuggestionCard
+
+    card = WordSuggestionCard()
+    assert card.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert card._card.graphicsEffect() is not None
+    assert card._card.layout() is None or card._card.layout().count() == 0
+
+
 def test_popup_rows_track_changes_styles():
     from PyQt6.QtCore import QRect
 

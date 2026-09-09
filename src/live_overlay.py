@@ -50,6 +50,14 @@ CLOSE_BUTTON = (
 
 OLD_STYLE = "color:#C5221F; background:#FCE8E6;"
 NEW_STYLE = "color:#137333; background:#E6F4EA; font-weight:500;"
+ARROW_STYLE = "color:#9AA0A6;"
+CONTEXT_STYLE = "color:#5F6368;"
+DIVIDER_SHEET = "QFrame { background: #EEF0F3; border: none; }"
+REASON_CHIP = (
+    "color: #5F6368; font-size: 11px; background: #F1F3F4;"
+    " border-radius: 9px; padding: 2px 8px;"
+)
+SHADOW_MARGIN = 12
 
 
 @dataclass(frozen=True)
@@ -99,7 +107,7 @@ def diff_html(before: str, after: str, context: int = 24) -> str:
                 segment = segment[:context] + "…" + segment[-context:]
             if segment:
                 parts.append(
-                    f"<span style='color:#202124'>{segment}</span>"
+                    f"<span style='{CONTEXT_STYLE}'>{segment}</span>"
                 )
         elif tag == "delete":
             parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
@@ -107,6 +115,7 @@ def diff_html(before: str, after: str, context: int = 24) -> str:
             parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
         elif tag == "replace":
             parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
+            parts.append(f"<span style='{ARROW_STYLE}'> → </span>")
             parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
     return "".join(parts) or escape(after)
 
@@ -352,8 +361,21 @@ class LiveOverlay(QWidget):
             self._popup = None
 
 
+def _hairline() -> QFrame:
+    """A 1px divider matching the card's border colour."""
+    line = QFrame()
+    line.setFixedHeight(1)
+    line.setStyleSheet(DIVIDER_SHEET)
+    return line
+
+
 class WordSuggestionCard(QWidget):
-    """A cursor-anchored card listing all Word edits in track-changes style."""
+    """A cursor-anchored card listing all Word edits in track-changes style.
+
+    The window itself is a translucent margin around an opaque rounded card,
+    so a soft drop shadow can render without touching the card's composite
+    behaviour (the same pattern the toast notification uses).
+    """
 
     apply_requested = pyqtSignal(int)
     apply_all_requested = pyqtSignal()
@@ -367,17 +389,35 @@ class WordSuggestionCard(QWidget):
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setStyleSheet(SURFACE_SHEET)
-        self.setMinimumWidth(320)
-        self.setMaximumWidth(480)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(
+            SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN
+        )
+        outer.setSpacing(0)
+        self._card = QFrame()
+        self._card.setStyleSheet(SURFACE_SHEET)
+        outer.addWidget(self._card)
+        self.setMinimumWidth(320 + 2 * SHADOW_MARGIN)
+        self.setMaximumWidth(480 + 2 * SHADOW_MARGIN)
+        try:
+            from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+
+            shadow = QGraphicsDropShadowEffect(self._card)
+            shadow.setBlurRadius(26)
+            shadow.setOffset(0, 7)
+            shadow.setColor(QColor(10, 15, 25, 60))
+            self._card.setGraphicsEffect(shadow)
+        except Exception:
+            pass  # shadow is decorative; never worth breaking the panel
 
     def set_spans(self, spans: list[EditSpan]) -> None:
-        layout = self.layout()
+        layout = self._card.layout()
         if layout is None:
-            layout = QVBoxLayout(self)
+            layout = QVBoxLayout(self._card)
             layout.setContentsMargins(18, 16, 18, 16)
-            layout.setSpacing(10)
+            layout.setSpacing(0)
         else:
             clear_layout(layout)
 
@@ -391,17 +431,24 @@ class WordSuggestionCard(QWidget):
         close_btn = QPushButton("×")
         close_btn.setFixedSize(26, 26)
         close_btn.setStyleSheet(CLOSE_BUTTON)
+        close_btn.setToolTip("Close (Esc)")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.clicked.connect(self.dismissed.emit)
         header.addWidget(title)
         header.addStretch()
         header.addWidget(close_btn)
         layout.addLayout(header)
+        layout.addWidget(_hairline())
+        layout.addSpacing(12)
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(10)
+        body_layout.setSpacing(8)
         for index, span in enumerate(spans):
+            if index:
+                body_layout.addWidget(_hairline())
+                body_layout.addSpacing(4)
             row = QHBoxLayout()
             row.setSpacing(10)
             diff_label = QLabel(diff_html(span.before, span.after))
@@ -422,7 +469,7 @@ class WordSuggestionCard(QWidget):
             body_layout.addLayout(row)
             if span.reason:
                 reason = QLabel(span.reason)
-                reason.setStyleSheet(REASON_SHEET)
+                reason.setStyleSheet(REASON_CHIP)
                 reason.setWordWrap(True)
                 body_layout.addWidget(reason)
 
@@ -438,6 +485,9 @@ class WordSuggestionCard(QWidget):
         else:
             layout.addWidget(body)
 
+        layout.addSpacing(12)
+        layout.addWidget(_hairline())
+        layout.addSpacing(10)
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         apply_all_btn = QPushButton("Apply all")
