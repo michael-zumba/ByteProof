@@ -271,6 +271,23 @@ Live suggestions must only appear for editable content, not for reading:
 Tests: 79 pass (4 new covering settable probing, read-only skipping, and
 Mail viewer-vs-compose detection).
 
+## Interaction round (1.9.0-beta.10)
+
+- The translucent shadow margin from beta.9 rendered as a black box on the
+  test machine (the known Tool + translucent compositing problem), so the
+  card is fully opaque again; depth now comes from the 20px radius, soft
+  borders, hairline dividers, the inset diff wells, and button press states.
+- The card is draggable by its header (open-hand cursor, clamped to the
+  screen on release) and pops in with a 170 ms fade + grow animation.
+- Spurious "could not verify the selection" toasts fixed: selection changes
+  are only committed after two agreeing polls (single glitch reads can no
+  longer hide the panel or poison the seen text), the apply-time sync
+  compares against the previewed text only, stale preview results are
+  dropped by frontmost-app check instead of the glitchy text compare, and
+  the sync retries three times before failing.
+
+Tests: 75 pass (drag, pop-in completion, updated hide timing).
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by

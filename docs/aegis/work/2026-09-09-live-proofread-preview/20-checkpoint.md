@@ -40,6 +40,25 @@
       per-step AX error logging); Pages/Mail selection via throttled
       clipboard-preserving Cmd+C read; full-selection paste apply when no
       absolute range exists; broader AX search + diagnostics
+- [x] Seventh fix round (1.9.0-beta.6): apply instrumentation (entry/sync/
+      result logging, sync retry + honest toasts, System Events paste
+      fallback + read-back verification, permission-transition logging)
+- [x] Eighth fix round (1.9.0-beta.7): browsers apply via real paste with
+      positional verification (Chrome's AX writes fake success); selection-
+      scoring element search
+- [x] Ninth fix round (1.9.0-beta.8): every AX write verified positionally
+      with paste fallback (Outlook's fake-success writes); no_permission
+      log spam silenced
+- [x] Aesthetic round (1.9.0-beta.9): shadowed card, dividers, reason
+      chips, diff arrows, dimmed context
+- [x] Interaction round (1.9.0-beta.10): black-box shadow removed (opaque
+      card), drag-to-move by header, pop-in fade/grow animation, softer
+      borders/buttons/diff wells; spurious "could not verify" fixed
+      (two-poll glitch debounce, sync compares the previewed text only,
+      frontmost-target check for stale results, 3× sync retry)
+- [x] Editable-context gate (1.9.0-beta.11): suggestions only in editable
+      contexts — settable-attribute probing (PDF/webpage reads skipped),
+      Word/Pages/Mail context rules incl. Mail compose-window detection
 - [ ] Integrate branch (user decision: merge / PR / keep)
 
 ## Completed evidence
