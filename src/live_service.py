@@ -131,6 +131,7 @@ class LivePreviewService(QObject):
         self._clipboard_empty_streak = 0
         self._last_clipboard_text = ""
         self._last_clipboard_target: dict[str, Any] = {}
+        self._last_permission_ok: bool | None = None
         self._escape_bridge = _EscapeBridge()
         self._escape_bridge.pressed.connect(self._on_escape_pressed)
         self._escape_token: Any = None
@@ -269,6 +270,12 @@ class LivePreviewService(QObject):
             self._fail_streak = 0
 
         stable = now - self._changed_at >= self._delay() / 1000.0
+        if self._last_permission_ok != permission_ok:
+            self._last_permission_ok = permission_ok
+            _debug_log(
+                f"LIVE PERMISSION: trusted={permission_ok} "
+                f"app={target.get('name')!r}"
+            )
         decision, _reason = evaluate_trigger(
             self._settings,
             target,
@@ -403,7 +410,9 @@ class LivePreviewService(QObject):
             f"provider={result.get('meta', {}).get('provider')}"
         )
         self._cache.put(key, spans)
-        if not self._sync_selection():
+        sync_ok, sync_reason = self._sync_selection()
+        if not sync_ok:
+            _debug_log(f"LIVE DONE SYNC FAIL: {sync_reason}")
             self._hide_panel()
             return
         self._show_result(spans)
@@ -460,23 +469,31 @@ class LivePreviewService(QObject):
         except Exception:
             return None
 
-    def _sync_selection(self) -> bool:
+    def _sync_selection(self) -> tuple[bool, str]:
         """Verify the previewed selection still holds and re-anchor to it.
 
         The provider call takes seconds; the user may have re-selected the
         same phrase elsewhere in the meantime. Applying at the stale position
         would corrupt the document, so the current range is re-read before
-        showing results or applying anything.
+        showing results or applying anything. Returns (ok, reason).
         """
         state = self._read_selection_state()
         if state is None:
-            return False
+            return False, "selection read failed"
         text, start, end = state
-        if text != self._seen_text or text != self._selection_text:
-            return False
+        if text != self._seen_text:
+            return (
+                False,
+                (
+                    f"selection changed: seen={self._seen_text[:30]!r} "
+                    f"now={text[:30]!r}"
+                ),
+            )
+        if text != self._selection_text:
+            return False, "text differs from the previewed selection"
         self._selection_start = start
         self._selection_end = end if self._selection_is_word else 0
-        return True
+        return True, "ok"
 
     def _sync_after_apply(self, expected: str) -> bool:
         """After an apply, keep state only when the selection still covers
@@ -684,17 +701,36 @@ class LivePreviewService(QObject):
     def _apply_one(self, index: int) -> None:
         if not (0 <= index < len(self._pending)):
             return
+        _debug_log(
+            f"LIVE APPLY ONE: index={index} "
+            f"app={self._selection_target.get('name')!r} "
+            f"has_range={self._selection_has_range} "
+            f"is_word={self._selection_is_word}"
+        )
         if not self._selection_has_range:
             # No absolute range available (Mail/Pages clipboard path): paste
             # the fully corrected selection over the current one.
             self._apply_full_selection()
             return
-        if not self._sync_selection():
+        sync_ok, sync_reason = self._sync_selection()
+        if not sync_ok:
+            # AX reads can glitch transiently; one retry before giving up.
+            time.sleep(0.15)
+            sync_ok, sync_reason = self._sync_selection()
+        if not sync_ok:
+            _debug_log(f"LIVE APPLY SYNC FAIL: {sync_reason}")
             self._hide_panel()
+            self.apply_done.emit(
+                "Could not verify the selection — please reselect and try again."
+            )
             return
         span = self._pending[index]
         ok, message = self._apply_abs(
             span.start, span.end - span.start, span.after
+        )
+        _debug_log(
+            f"LIVE APPLY ONE RESULT: ok={ok} message={message!r} "
+            f"rel=({span.start},{span.end})"
         )
         self.apply_done.emit(message)
         if not ok:
@@ -725,6 +761,7 @@ class LivePreviewService(QObject):
             + self._selection_text[span.end :]
         )
         if not self._sync_after_apply(expected):
+            _debug_log("LIVE APPLY ONE: post-apply selection drifted; closing")
             self._hide_panel()
             return
         panel = self._panel
@@ -735,11 +772,21 @@ class LivePreviewService(QObject):
     def _apply_all(self) -> None:
         if not self._pending:
             return
+        _debug_log(
+            f"LIVE APPLY ALL: app={self._selection_target.get('name')!r} "
+            f"has_range={self._selection_has_range} "
+            f"count={len(self._pending)}"
+        )
         if not self._selection_has_range:
             self._apply_full_selection()
             return
-        if not self._sync_selection():
+        sync_ok, sync_reason = self._sync_selection()
+        if not sync_ok:
+            _debug_log(f"LIVE APPLY ALL SYNC FAIL: {sync_reason}")
             self._hide_panel()
+            self.apply_done.emit(
+                "Could not verify the selection — please reselect and try again."
+            )
             return
         total = len(self._pending)
         applied = 0
@@ -768,19 +815,80 @@ class LivePreviewService(QObject):
         Pages) and no absolute range exists, so sub-range replacement is
         impossible. The target app replaces its current selection on paste.
         """
+        _debug_log(
+            f"LIVE FULL APPLY: app={self._selection_target.get('name')!r} "
+            f"count={len(self._pending)}"
+        )
         state = self._read_selection_state()
-        if state is None or state[0] != self._seen_text:
+        if state is None:
+            _debug_log("LIVE FULL APPLY: selection read failed")
+            self._hide_panel()
+            self.apply_done.emit(
+                "Could not verify the selection — please try again."
+            )
+            return
+        if state[0] != self._seen_text:
+            _debug_log(
+                "LIVE FULL APPLY: selection changed "
+                f"seen={self._seen_text[:30]!r} now={state[0][:30]!r}"
+            )
             self._hide_panel()
             self.apply_done.emit("Selection changed — could not apply.")
             return
         corrected = apply_edits_to_text(self._selection_text, self._pending)
         if not corrected or corrected == self._selection_text:
+            _debug_log("LIVE FULL APPLY: nothing to apply")
             self._hide_panel()
             return
         ok, message = self._editor.replace_selection(
             self._selection_target, corrected
         )
+        _debug_log(f"LIVE FULL APPLY: replace ok={ok} message={message!r}")
+        if not ok:
+            ok, message = self._paste_via_system_events(corrected)
         if ok:
-            message = "Applied all suggestions to the selection."
+            message = self._verify_full_apply(corrected)
         self.apply_done.emit(message)
         self._hide_panel()
+
+    def _paste_via_system_events(self, corrected: str) -> tuple[bool, str]:
+        """Second paste attempt through System Events keystrokes."""
+        from .generic_editing import (
+            _mac_activate,
+            _mac_clipboard_string,
+            _mac_restore_clipboard,
+            _mac_set_clipboard,
+            _mac_system_events_key,
+        )
+
+        try:
+            saved = _mac_clipboard_string()
+            _mac_set_clipboard(corrected)
+            _mac_activate(self._selection_target)
+            _mac_system_events_key(
+                "v", self._selection_target.get("name") or ""
+            )
+            time.sleep(0.4)
+            _mac_restore_clipboard(saved)
+            _debug_log("LIVE FULL APPLY: system-events paste sent")
+            return True, "Applied via system paste."
+        except Exception as exc:
+            _debug_log(f"LIVE FULL APPLY: system-events fallback error: {exc}")
+            return False, "Could not apply the edit in this app."
+
+    def _verify_full_apply(self, corrected: str) -> str:
+        """Read the selection back and report honestly."""
+        try:
+            time.sleep(0.2)
+            got = self._editor.get_selection_light(self._selection_target)
+            if got and got.strip() == corrected.strip():
+                _debug_log("LIVE FULL APPLY: verified")
+                return "Applied all suggestions to the selection."
+            _debug_log(
+                "LIVE FULL APPLY: verify mismatch "
+                f"got={got[:40]!r} want={corrected[:40]!r}"
+            )
+            return "Applied — please check the document."
+        except Exception as exc:
+            _debug_log(f"LIVE FULL APPLY: verify error: {exc}")
+            return "Applied — please check the document."

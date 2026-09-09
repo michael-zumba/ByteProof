@@ -814,10 +814,16 @@ class GenericTextEditor:
         """
         if SYSTEM != "Darwin":
             return False, "Live apply is only supported on macOS in this beta."
+        _debug_log(
+            f"ax_replace_range: pid={target.get('pid')} start={start} "
+            f"length={length} direct_paste={allow_direct_paste} "
+            f"text={new_text[:40]!r}"
+        )
         try:
             import ApplicationServices as AS
 
             if not AS.AXIsProcessTrusted():
+                _debug_log("ax_replace_range: AX not trusted")
                 return False, (
                     "Accessibility permission is required to apply edits."
                 )

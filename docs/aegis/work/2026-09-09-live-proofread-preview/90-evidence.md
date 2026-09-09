@@ -217,6 +217,27 @@ the panel but could not apply, and Pages/Mail showed nothing.
 
 Tests: 68 pass in `tests/test_live_preview.py` (4 new).
 
+## Seventh fix round (1.9.0-beta.6) — apply instrumentation
+
+Live beta.5 testing: panels appear in Pages/Mail/Gmail/Outlook but Apply still
+changed nothing, and capture.log showed no apply-path entries at all — the
+clicks were failing silently before the apply code ran. Beta.6 makes every
+step visible and resilient:
+
+- Every Apply/Apply-all logs its entry, the sync verdict (with the seen vs
+  current text snippets), the apply result, and the post-apply state.
+- Selection re-verification retries once after 150 ms (AX reads glitch
+  transiently) and reports "Could not verify the selection — please reselect
+  and try again." instead of closing the panel silently.
+- The full-selection paste path (Pages/Mail) logs each step, retries through
+  a System Events keystroke when the process-targeted paste fails, and
+  verifies by reading the selection back (honest "please check the document"
+  message when verification is inconclusive).
+- AX trust transitions are logged ("LIVE PERMISSION: trusted=…"), replacing
+  the per-poll no_permission spam and exposing the intermittent trust flips
+  seen during testing.
+- ax_replace_range logs its entry parameters and the not-trusted bail.
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by

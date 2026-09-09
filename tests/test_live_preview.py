@@ -1360,6 +1360,43 @@ def test_on_done_limit_reached_reports_error_and_does_not_retry(monkeypatch):
 # --- fixes for non-Word apps (Pages / Mail / Gmail / Outlook) ---
 
 
+def test_apply_one_reports_sync_failure_instead_of_silent_close(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class DriftEditor:
+        def selection_details(self, target):
+            return {
+                "text": "something else entirely",
+                "range": (0, 20),
+                "context_before": "",
+                "context_after": "",
+                "found": True,
+            }
+
+    service._editor = DriftEditor()
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_text = "teh cat sat"
+    service._seen_text = "teh cat sat"
+    service._selection_start = 0
+    service._selection_has_range = True
+    messages = []
+    service.apply_done.connect(messages.append)
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    service._apply_one(0)
+    assert messages == [
+        "Could not verify the selection — please reselect and try again."
+    ]
+
+
 def test_apply_edits_to_text_applies_spans_right_to_left():
     from src.live_preview import EditSpan, apply_edits_to_text
 
@@ -1415,11 +1452,15 @@ def test_service_full_paste_when_no_range(monkeypatch):
     replaced = []
 
     class MailEditor:
+        def __init__(self):
+            self.text = text
+
         def get_selection_light(self, target):
-            return text
+            return self.text
 
         def replace_selection(self, target, new_text):
             replaced.append(new_text)
+            self.text = new_text
             return True, "Applied."
 
     service._editor = MailEditor()
