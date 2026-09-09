@@ -1422,6 +1422,30 @@ class SettingsDialog(QDialog):
         )
         live_layout.addWidget(self.chk_live_local)
 
+        style_row = QHBoxLayout()
+        style_label = QLabel("Suggestion style")
+        self.live_style_combo = QComboBox()
+        self.live_style_combo.addItem(
+            "Corrections only", "strict"
+        )
+        self.live_style_combo.addItem(
+            "Polish language (preserve meaning)", "polish"
+        )
+        style_value = self.settings.get("live_preview", {}).get(
+            "style", "strict"
+        )
+        index = self.live_style_combo.findData(style_value)
+        self.live_style_combo.setCurrentIndex(max(0, index))
+        self.live_style_combo.setToolTip(
+            "'Corrections only' fixes grammar, spelling, and obvious errors. "
+            "'Polish language' also improves flow, word choice, and "
+            "conciseness while retaining the original meaning and tone."
+        )
+        style_row.addWidget(style_label)
+        style_row.addWidget(self.live_style_combo)
+        style_row.addStretch()
+        live_layout.addLayout(style_row)
+
         layout.addWidget(live_group)
 
         hotkey_group = QGroupBox("Hotkeys")
@@ -3492,6 +3516,10 @@ class SettingsDialog(QDialog):
         )
         self.settings["live_preview"]["use_local_model"] = (
             self.chk_live_local.isChecked()
+        )
+        style_value = self.live_style_combo.currentData()
+        self.settings["live_preview"]["style"] = (
+            str(style_value) if style_value else "strict"
         )
         
         open_seq = self.open_hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)

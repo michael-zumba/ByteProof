@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "1.9.0-beta.12"
+APP_VERSION = "1.9.0-beta.13"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -210,6 +210,7 @@ def load_runtime_settings() -> dict[str, Any]:
             "delay_ms": 900,
             "max_chars": 1500,
             "use_local_model": True,
+            "style": "strict",
         },
     }
     

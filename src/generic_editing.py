@@ -49,12 +49,13 @@ BROWSER_BUNDLE_IDS = frozenset(
 
 
 def _debug_log(msg: str) -> None:
-    """Append to a capture debug log for diagnosing selection issues."""
+    """Append a timestamped line to a capture debug log."""
     try:
         path = os.path.join(get_app_support_dir(), "capture.log")
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        stamp = time.strftime("%H:%M:%S")
         with open(path, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
+            f.write(f"[{stamp}] {msg}\n")
     except Exception:
         pass
 

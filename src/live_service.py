@@ -141,6 +141,7 @@ class LivePreviewService(QObject):
         self._mail_composing = True  # fail-open: never break Mail editing
         self._mail_check_at = 0.0
         self._read_only_logged: dict[str, str] = {}
+        self._spawned_at = 0.0
         self._escape_bridge = _EscapeBridge()
         self._escape_bridge.pressed.connect(self._on_escape_pressed)
         self._escape_token: Any = None
@@ -496,6 +497,7 @@ class LivePreviewService(QObject):
     ) -> None:
         _debug_log(f"LIVE PREVIEW: app={target.get('name')!r} chars={len(text)}")
         self._retry_not_before = None
+        self._spawned_at = time.monotonic()
         worker = PreviewWorker(
             self._settings,
             target,
@@ -553,8 +555,9 @@ class LivePreviewService(QObject):
             return
         self._fail_streak = 0
         spans = map_edits_to_ranges(text, result.get("edits") or [])
+        provider_ms = int((time.monotonic() - self._spawned_at) * 1000)
         _debug_log(
-            f"LIVE DONE: edits={len(spans)} "
+            f"LIVE DONE: edits={len(spans)} provider_ms={provider_ms} "
             f"provider={result.get('meta', {}).get('provider')}"
         )
         self._cache.put(key, spans)

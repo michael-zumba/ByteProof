@@ -264,6 +264,7 @@ def settings_fingerprint(settings: dict[str, Any]) -> str:
             "delay_ms": live.get("delay_ms", DEFAULT_DELAY_MS),
             "max_chars": live.get("max_chars", DEFAULT_MAX_CHARS),
             "use_local_model": live.get("use_local_model", True),
+            "style": live.get("style", "strict"),
         },
         sort_keys=True,
     )

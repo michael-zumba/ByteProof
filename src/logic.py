@@ -2050,8 +2050,14 @@ def polish_selection_once(
         return f"Error: {e!s}", None, None, None, 0
 
 
-def load_preview_prompt() -> str:
-    content = PROMPT_FILES.get("preview_edits.txt")
+def load_preview_prompt(style: str = "strict") -> str:
+    """Return the live-preview system prompt for the requested style.
+
+    "strict" only corrects real errors; "polish" also improves flow, word
+    choice, and conciseness while retaining meaning and tone.
+    """
+    key = "preview_edits_polish.txt" if style == "polish" else "preview_edits.txt"
+    content = PROMPT_FILES.get(key)
     if content:
         return content
     return (
@@ -2089,7 +2095,10 @@ def preview_edits_once(
             return "no_api_key", [], {"provider": provider_name}
 
     spelling = settings.get("general", {}).get("spelling", "UK/AU/NZ")
-    system_prompt = load_preview_prompt()
+    style = str(live.get("style", "strict"))
+    if style != "polish":
+        style = "strict"
+    system_prompt = load_preview_prompt(style)
     if spelling == "UK/AU/NZ":
         system_prompt += "\n\nUse British/Australian/New Zealand spelling."
     elif spelling == "US English":
@@ -2108,6 +2117,7 @@ def preview_edits_once(
 
     if cancel_event is not None and cancel_event.is_set():
         raise TaskCancelledError()
+    temperature = 0.2 if style == "polish" else 0.1
     raw = _request_completion(
         system_prompt,
         user_content,
@@ -2116,10 +2126,14 @@ def preview_edits_once(
         base_url,
         model,
         provider_name,
-        0.1,
+        temperature,
         cancel_event,
     )
     if cancel_event is not None and cancel_event.is_set():
         raise TaskCancelledError()
     edits = parse_preview_response(raw)
-    return "ok", edits, {"provider": provider_name, "raw": raw}
+    return "ok", edits, {
+        "provider": provider_name,
+        "style": style,
+        "raw": raw,
+    }

@@ -800,6 +800,7 @@ def test_load_runtime_settings_includes_live_preview_defaults(monkeypatch, tmp_p
         "delay_ms": 900,
         "max_chars": 1500,
         "use_local_model": True,
+        "style": "strict",
     }
 
 
@@ -1968,3 +1969,88 @@ def test_mail_compose_detection_distinguishes_viewer(monkeypatch):
     DRAFT_SUBJECTS = "Meeting notes"
     FRONT_NAME = "Inbox — Personal Gmail"
     assert service._mail_is_composing({}) is False  # draft in background
+
+
+# --- suggestion style (strict vs polish) ---
+
+
+def test_load_preview_prompt_variants():
+    from src import logic
+
+    strict = logic.load_preview_prompt("strict")
+    polish = logic.load_preview_prompt("polish")
+    assert "conservative and minimal" in strict
+    assert "polish the language" in polish
+    assert '"edits"' in polish and '"before"' in polish
+
+
+def test_preview_edits_once_uses_polish_style_and_temperature(monkeypatch):
+    from src import logic
+
+    fake = _mock_completion('{"edits":[]}')
+    monkeypatch.setattr(logic, "_request_completion", fake)
+    monkeypatch.setattr(
+        logic,
+        "resolve_provider_connection",
+        lambda settings: (
+            logic.LOCAL_MODEL_PROVIDER,
+            "",
+            "http://x/v1",
+            "m",
+        ),
+    )
+    settings = {
+        "general": {"spelling": "UK/AU/NZ", "context": "General Editing"},
+        "live_preview": {
+            "enabled": True,
+            "use_local_model": True,
+            "max_chars": 1500,
+            "style": "polish",
+        },
+    }
+    status, _edits, meta = logic.preview_edits_once(
+        settings,
+        {"bundle_id": "com.apple.TextEdit"},
+        "this sentence could be nicer",
+        "",
+        "",
+    )
+    assert status == "ok"
+    assert meta["style"] == "polish"
+    system_prompt = fake.calls[0][0][0]
+    assert "polish the language" in system_prompt
+    assert fake.calls[0][0][7] == 0.2  # temperature argument
+
+
+def test_preview_edits_once_defaults_to_strict(monkeypatch):
+    from src import logic
+
+    fake = _mock_completion('{"edits":[]}')
+    monkeypatch.setattr(logic, "_request_completion", fake)
+    monkeypatch.setattr(
+        logic,
+        "resolve_provider_connection",
+        lambda settings: (
+            logic.LOCAL_MODEL_PROVIDER,
+            "",
+            "http://x/v1",
+            "m",
+        ),
+    )
+    settings = {
+        "general": {"spelling": "UK/AU/NZ", "context": "General Editing"},
+        "live_preview": {
+            "enabled": True,
+            "use_local_model": True,
+            "max_chars": 1500,
+        },
+    }
+    _status, _edits, meta = logic.preview_edits_once(
+        settings,
+        {"bundle_id": "com.apple.TextEdit"},
+        "hello world",
+        "",
+        "",
+    )
+    assert meta["style"] == "strict"
+    assert fake.calls[0][0][7] == 0.1
