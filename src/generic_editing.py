@@ -26,6 +26,21 @@ from .utils import normalize_text
 SYSTEM = platform.system()
 CONTEXT_CHARS = 400
 
+# Browsers accept AXSelectedText writes with a success code but do not
+# actually commit them to the page (Chrome/Safari web content). For these
+# apps the live apply must go through a real paste instead.
+BROWSER_BUNDLE_IDS = frozenset(
+    {
+        "com.google.chrome",
+        "com.apple.safari",
+        "com.brave.browser",
+        "com.microsoft.edgemac",
+        "company.thebrowser.browser",
+        "com.operasoftware.opera",
+        "com.vivaldi.vivaldi",
+    }
+)
+
 
 def _debug_log(msg: str) -> None:
     """Append to a capture debug log for diagnosing selection issues."""
@@ -52,24 +67,52 @@ def _log_once(key: str, msg: str) -> None:
         _debug_log(msg)
 
 
-def _log_paste_result(AS: Any, elements: list[Any], expected: str) -> None:
-    """Best-effort verify a paste by reading the selection afterwards."""
+def _verify_range_write(
+    AS: Any, elements: list[Any], start: int, new_text: str
+) -> str:
+    """Verify the range now holds new_text: 'ok', 'mismatch', 'unreadable'."""
+    value_readable = False
+    for el in elements:
+        try:
+            err, value = AS.AXUIElementCopyAttributeValue(
+                el, AS.kAXValueAttribute, None
+            )
+            if err == 0 and isinstance(value, str):
+                value_readable = True
+                if (
+                    0 <= start
+                    and value[start : start + len(new_text)] == new_text
+                ):
+                    return "ok"
+        except Exception:
+            continue
+    selection_readable = False
     for el in elements:
         try:
             err, text = AS.AXUIElementCopyAttributeValue(
                 el, AS.kAXSelectedTextAttribute, None
             )
             if err == 0:
+                selection_readable = True
                 got = str(text or "")
-                ok = bool(got) and (got == expected or expected in got)
-                _debug_log(
-                    "ax_replace_range paste verify: "
-                    f"{'ok' if ok else 'MISMATCH'} got={got[:40]!r} "
-                    f"expected={expected[:40]!r}"
-                )
-                return
+                if got == new_text or new_text in got:
+                    return "ok"
+                if got:
+                    return "mismatch"
         except Exception:
             continue
+    # A collapsed selection after a successful paste is ambiguous; a readable
+    # value whose slice still mismatches is strong evidence of failure.
+    if value_readable or selection_readable:
+        return "mismatch"
+    return "unreadable"
+
+
+def _log_paste_verdict(verdict: str, new_text: str) -> None:
+    _debug_log(
+        "ax_replace_range paste verify: "
+        f"{verdict} expected={new_text[:40]!r}"
+    )
 
 
 def normalize_selection_text(text: str) -> str:
@@ -397,33 +440,43 @@ class GenericTextEditor:
         if AS is None:
             return None, None
 
-        def is_text_target(el: Any) -> bool:
+        def element_score(el: Any) -> int:
             try:
-                err_text, _ = AS.AXUIElementCopyAttributeValue(
+                err_text, text = AS.AXUIElementCopyAttributeValue(
                     el, AS.kAXSelectedTextAttribute, None
                 )
-                if err_text == 0:
-                    return True
+                if err_text == 0 and text:
+                    return 3  # holds the actual non-empty selection
                 err_range, _ = AS.AXUIElementCopyAttributeValue(
                     el, AS.kAXSelectedTextRangeAttribute, None
                 )
-                if err_range != 0:
-                    return False
-                err_value, value = AS.AXUIElementCopyAttributeValue(
-                    el, AS.kAXValueAttribute, None
-                )
-                return err_value == 0 and isinstance(value, str)
+                if err_range == 0:
+                    return 2
+                if err_text == 0:
+                    return 1  # supports selection, currently empty
             except Exception:
-                return False
+                pass
+            return -1
 
         def search(roots: list[Any], budget: int, children_cap: int) -> Any:
+            """Return the element that actually owns the selection.
+
+            Apps like Gmail expose several editable fields (subject, body);
+            the first field in tree order is often the wrong one. Score
+            every candidate and prefer the element holding a non-empty
+            selection.
+            """
             queue: list[Any] = list(roots)
             visited = 0
+            best: tuple[int, Any] = (-1, None)
             while queue and visited < budget:
                 el = queue.pop(0)
                 visited += 1
-                if is_text_target(el):
-                    return el
+                score = element_score(el)
+                if score > best[0]:
+                    best = (score, el)
+                    if score == 3:
+                        return el  # non-empty selection: this is the one
                 try:
                     _, children = AS.AXUIElementCopyAttributeValue(
                         el, AS.kAXChildrenAttribute, None
@@ -432,7 +485,7 @@ class GenericTextEditor:
                         queue.extend(list(children)[:children_cap])
                 except Exception:
                     pass
-            return None
+            return best[1] if best[0] >= 0 else None
 
         found = search([focused], 60, 24)
         if found is None:
@@ -885,22 +938,33 @@ class GenericTextEditor:
                 except Exception as exc:
                     _debug_log(f"ax_replace_range parameterized error: {exc}")
 
+        bundle = str(target.get("bundle_id", "")).lower()
+        is_browser = bundle in BROWSER_BUNDLE_IDS
+
         # 2. Select the sub-range, then write the selected-text attribute.
-        for el in elements:
-            try:
-                err = _set_range(el)
-                if err != 0:
-                    _debug_log(f"ax_replace_range set-range err={err}")
-                    continue
-                err = _set_text(el)
-                if err == 0:
-                    return True, "Applied."
-                _debug_log(f"ax_replace_range set-selected-text err={err}")
-            except Exception as exc:
-                _debug_log(f"ax_replace_range attribute fallback error: {exc}")
+        #    Browsers are skipped: Chrome/Safari accept this write with a
+        #    success code but never commit it to the page.
+        if not is_browser:
+            for el in elements:
+                try:
+                    err = _set_range(el)
+                    if err != 0:
+                        _debug_log(f"ax_replace_range set-range err={err}")
+                        continue
+                    err = _set_text(el)
+                    if err == 0:
+                        return True, "Applied."
+                    _debug_log(
+                        f"ax_replace_range set-selected-text err={err}"
+                    )
+                except Exception as exc:
+                    _debug_log(
+                        f"ax_replace_range attribute fallback error: {exc}"
+                    )
 
         # 3. Clipboard paste over the sub-range. Only safe when the range can
         #    be selected first, or when the span covers the whole selection.
+        #    For browsers this is the primary (and only reliable) route.
         range_ok = False
         for el in elements:
             try:
@@ -915,14 +979,32 @@ class GenericTextEditor:
                 "cover the selection; giving up"
             )
             return False, "Could not apply the edit in this app."
-        saved = _mac_clipboard_string()
-        try:
+
+        def _paste() -> None:
             _mac_set_clipboard(new_text)
             GenericTextEditor._mac_activate(target)
             _post_mac_key(9, target.get("pid") or 0)  # kVK_ANSI_V
             time.sleep(0.35)
-            _log_paste_result(AS, elements, new_text)
-            return True, "Applied."
+
+        saved = _mac_clipboard_string()
+        try:
+            _paste()
+            verdict = _verify_range_write(AS, elements, start, new_text)
+            _log_paste_verdict(verdict, new_text)
+            if is_browser and verdict == "mismatch" and range_ok:
+                # Chrome can ignore process-targeted events; retry through
+                # System Events keystrokes (paste over the same range is
+                # idempotent, so a retry cannot duplicate text).
+                _debug_log("ax_replace_range: retrying paste via System Events")
+                _mac_system_events_key("v", target.get("name") or "")
+                time.sleep(0.4)
+                verdict = _verify_range_write(AS, elements, start, new_text)
+                _log_paste_verdict(verdict, new_text)
+            if verdict == "ok":
+                return True, "Applied."
+            if verdict == "unreadable":
+                return True, "Applied — please check the document."
+            return False, "Could not apply the edit in this app."
         finally:
             _mac_restore_clipboard(saved)
 

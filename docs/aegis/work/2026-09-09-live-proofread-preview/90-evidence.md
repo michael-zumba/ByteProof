@@ -238,6 +238,18 @@ step visible and resilient:
   seen during testing.
 - ax_replace_range logs its entry parameters and the not-trusted bail.
 
+## Eighth fix round (1.9.0-beta.7) — browser apply
+
+Beta.6 traces showed Chrome accepting the AXSelectedText/Range writes with a
+success code while never committing them to the page (the toast said
+"Applied." and the Gmail draft was untouched). Browsers now skip the AX
+attribute write entirely and use a real paste: select the sub-range via AX,
+Cmd+V (process-targeted, then a System Events keystroke retry), then verify
+positionally by slicing the element's AXValue at the edited range — with
+honest messages when verification is inconclusive. The AX text-element
+search also scores candidates by who actually holds a non-empty selection,
+so Gmail's subject field can no longer steal edits meant for the body.
+
 ## Efficiency
 
 - Unchanged selection: no provider call (asserted by

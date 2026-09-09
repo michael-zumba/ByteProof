@@ -1483,6 +1483,78 @@ def test_service_full_paste_when_no_range(monkeypatch):
     assert messages == ["Applied all suggestions to the selection."]
 
 
+def test_ax_replace_range_browser_uses_paste_not_ax_write(monkeypatch):
+    from typing import ClassVar
+
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+        value = "the cat sat"
+        set_attr_calls: ClassVar[list[str]] = []
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, v):
+            return v
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, v):
+            FakeAS.set_attr_calls.append(attr)
+            return 0
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, FakeAS.value
+            return 0, ""
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    posted = []
+    monkeypatch.setattr(
+        "src.generic_editing._post_mac_key", lambda code, pid: posted.append(code)
+    )
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, message = editor.ax_replace_range(
+        {
+            "pid": 9,
+            "name": "Google Chrome",
+            "bundle_id": "com.google.chrome",
+        },
+        0,
+        3,
+        "the",
+        allow_direct_paste=False,
+    )
+    assert ok is True and message == "Applied."
+    assert posted == [9]  # real paste, not the fake-success AX text write
+    assert FakeAS.kAXSelectedTextAttribute not in FakeAS.set_attr_calls
+
+
 def test_ax_replace_range_pastes_when_attributes_fail(monkeypatch):
     from src.generic_editing import GenericTextEditor
 
