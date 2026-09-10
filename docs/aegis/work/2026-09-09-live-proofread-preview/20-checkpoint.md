@@ -406,3 +406,33 @@ selection was just made.
 floor, so a stray word or two never pings the model. The threshold is
 configurable in Settings -> Live Suggestions (1-10 words) and stored as
 `live_preview.min_words`.
+
+## Checkpoint (2.0.2-beta.9) — Mail keystroke storm stopped
+
+Follow-up: Mail still lagged, beeped and flashed its Edit menu. The log showed
+why - a burst of copy keystrokes right after clicking Apply:
+
+```
+[07:32:18] copy attempt 'process' -> <len=0>
+[07:32:18] copy attempt 'process' -> <len=0>
+[07:32:18] copy attempt 'system'  -> <len=0>
+[07:32:19] copy attempt 'system_events' -> <len=0>
+[07:32:22] LIVE FULL APPLY: selection read failed
+```
+
+Each attempt posts Command-C: it beeps when there is nothing to copy, flashes
+the Edit menu, and blocks the UI thread while waiting - the three symptoms at
+once.
+
+1. **The apply read a background window.** A copy of a non-active window
+   returns nothing (and beeps), and the previous retry logic multiplied one
+   miss into three strategies by three rounds. The full-selection apply now
+   brings the captured app forward first (the AX path already did) and retries
+   at most once, spaced past the copy rate limit - three keystrokes instead of
+   ten.
+2. **Any mouse-up armed a read**, so clicking anywhere in Mail posted a copy
+   with no selection. The gate now needs a recent *drag* (a click is not a
+   selection); the once-after-idle path still covers keyboard selections.
+3. **Hard guard:** `MIN_COPY_INTERVAL_S` (0.5 s) between any two copy
+   keystrokes in `generic_editing`, whatever code path asks. Per-attempt wait
+   reduced from 0.4 s to 0.25 s.
