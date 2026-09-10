@@ -1156,3 +1156,145 @@ def test_sidebar_shows_a_pending_update() -> None:
     assert "2.0.3" in dialog.sidebar.item(5).toolTip()
     assert dialog.sidebar.item(5).text().startswith("Updates")
     _dispose(dialog, owner, app)
+
+
+# --- Safari after clicking the panel: no selection, document intact ---------
+
+
+def _lost_selection_service(
+    *,
+    field_text: str,
+    frontmost: bool = True,
+    selection_readable: bool = False,
+    activation_restores_selection: bool = False,
+):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    applied: list[tuple[int, int, str]] = []
+    state = {"activated": 0}
+    previewed = "Also check the log. sometimes "
+
+    class SafariEditor:
+        def is_frontmost(self, target):
+            return frontmost or state["activated"] > 0
+
+        def activate(self, target):
+            state["activated"] += 1
+            return True
+
+        def frontmost_app(self):
+            return {"bundle_id": "nz.co.bytemind.byteproof", "pid": 1, "name": "ByteProof"}
+
+        def selection_details(self, target):
+            # WebKit: nothing at all while the window is not key.
+            readable = selection_readable or (
+                activation_restores_selection and state["activated"] > 0
+            )
+            if not readable:
+                return {
+                    "text": "",
+                    "range": None,
+                    "context_before": "",
+                    "context_after": "",
+                    "found": True,
+                    "editable": True,
+                    "role": "AXTextArea",
+                }
+            return {
+                "text": previewed,
+                "range": (0, len(previewed)),
+                "context_before": "",
+                "context_after": "",
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+        def get_selection_by_copy(self, target, attempts=2):
+            return ""  # Safari ignores the posted Command-C while inactive
+
+        def field_text_at(self, target, start, length):
+            return field_text[start : start + length]
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            applied.append((start, length, new))
+            return True, "Applied."
+
+    service._editor = SafariEditor()
+    service._pending = [EditSpan("sometimes", "sometimes,", "Punctuation", 8, 9)]
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 22297,
+        "name": "Safari",
+    }
+    service._selection_text = previewed
+    service._seen_text = previewed
+    service._selection_start = 0
+    service._selection_has_range = True
+    service._selection_is_word = False
+    return service, applied, state
+
+
+def test_apply_succeeds_when_the_selection_is_lost_but_the_document_matches(
+    monkeypatch,
+):
+    """The reported Safari case: AX and copy empty, range still intact."""
+    service, applied, _state = _lost_selection_service(
+        field_text="Also check the log. sometimes and more text"
+    )
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_one(0)
+
+    assert applied == [(8, 1, "sometimes,")]  # the edit went through
+    assert messages == ["Applied."]
+    service.stop()
+
+
+def test_apply_refuses_when_the_document_at_the_range_differs(monkeypatch):
+    service, applied, _state = _lost_selection_service(
+        field_text="A completely different paragraph sits here now"
+    )
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_one(0)
+
+    assert applied == []
+    assert messages and "changed" in messages[0]
+    service.stop()
+
+
+def test_sync_brings_the_target_app_forward_before_verifying(monkeypatch):
+    """A background web view answers nothing until it is frontmost again."""
+    service, applied, state = _lost_selection_service(
+        field_text="Also check the log. sometimes and more text",
+        frontmost=False,
+        activation_restores_selection=True,
+    )
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_one(0)
+
+    assert state["activated"] == 1  # brought forward, then read successfully
+    assert applied == [(8, 1, "sometimes,")]
+    assert messages == ["Applied."]
+    service.stop()

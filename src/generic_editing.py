@@ -462,6 +462,41 @@ class GenericTextEditor:
             return self._win_selection(target)
         return ""
 
+    def is_frontmost(self, target: dict[str, Any]) -> bool:
+        """Whether the target app currently owns the keyboard focus."""
+        if SYSTEM != "Darwin":
+            return False
+        return GenericTextEditor._mac_is_frontmost(target)
+
+    def field_text_at(
+        self, target: dict[str, Any], start: int, length: int
+    ) -> str:
+        """Document text at an absolute range, read without the selection.
+
+        Web views stop reporting ``AXSelectedText`` (and ignore a posted
+        Command-C) while another app is frontmost, which is exactly the state
+        after the user clicks the suggestion panel. The field's own text is
+        still readable, so the range can be verified positionally instead.
+        """
+        if SYSTEM != "Darwin" or length <= 0 or start < 0:
+            return ""
+        try:
+            import ApplicationServices as AS
+
+            _as, element = GenericTextEditor._mac_ax_text_element(
+                target.get("pid") or 0
+            )
+            if element is None:
+                return ""
+            err, value = AS.AXUIElementCopyAttributeValue(
+                element, AS.kAXValueAttribute, None
+            )
+            if err != 0 or not isinstance(value, str):
+                return ""
+            return value[start : start + length]
+        except Exception:
+            return ""
+
     def get_selection_by_copy(
         self, target: dict[str, Any], attempts: int = 2
     ) -> str:

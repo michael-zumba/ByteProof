@@ -916,6 +916,20 @@ class LivePreviewService(QObject):
         # before refusing, ask the app itself: a real copy of the selection is
         # authoritative and the clipboard is restored straight afterwards.
         if not read_text and not self._selection_is_word:
+            # A web view answers nothing at all while another app is frontmost
+            # (the state the user is in right after clicking the panel), so
+            # bring the captured app forward first - the apply needs it for the
+            # paste anyway - and read again.
+            if self._bring_target_forward():
+                state = self._read_selection_state()
+                read_text = state[0] if state is not None else ""
+                if state is not None and read_text == self._selection_text:
+                    self._selection_start = state[1]
+                    self._selection_end = (
+                        state[2] if self._selection_is_word else 0
+                    )
+                    _debug_log("LIVE SYNC: verified after bringing the app forward")
+                    return True, "ok"
             copied = self._read_selection_by_copy()
             if copied and copied == self._selection_text:
                 if state is not None:
@@ -937,7 +951,26 @@ class LivePreviewService(QObject):
                         f"now={_redact(copied)}"
                     ),
                 )
-            _debug_log("LIVE SYNC: selection unreadable (AX and copy both empty)")
+            # Nothing readable at all. The document itself is then the
+            # authority: when the captured range still holds the previewed
+            # text, applying is safe - the write path checks that same range
+            # again before it writes anything.
+            held = self._read_field_text_at_selection()
+            if held and held == self._selection_text:
+                _debug_log("LIVE SYNC: verified by document content at the range")
+                return True, "ok"
+            if held:
+                _debug_log("LIVE SYNC: document text at the range differs")
+                return (
+                    False,
+                    (
+                        "selection changed: previewed="
+                        f"{_redact(self._selection_text)} now={_redact(held)}"
+                    ),
+                )
+            _debug_log(
+                "LIVE SYNC: selection unreadable (AX, copy and content all empty)"
+            )
             return False, "selection could not be read"
 
         return (
@@ -962,6 +995,49 @@ class LivePreviewService(QObject):
                 "Select the text again to get fresh suggestions."
             )
         return "Could not verify the selection — please try again."
+
+    def _bring_target_forward(self) -> bool:
+        """Activate the captured app so its selection can be read again.
+
+        Returns True when the app was actually brought forward (so the caller
+        knows a re-read is worth attempting).
+        """
+        try:
+            if self._editor.is_frontmost(self._selection_target):
+                return False
+            current = self._editor.frontmost_app()
+            if current and current.get("pid") != self._selection_target.get(
+                "pid"
+            ):
+                name = str(current.get("name", "")).lower()
+                bundle = str(current.get("bundle_id", "")).lower()
+                # Remember where the user really was, so focus can be handed
+                # back after the apply (never to ByteProof itself).
+                if "byteproof" not in name and "bytemind" not in bundle:
+                    self._apply_foreign_frontmost = current
+            self._editor.activate(self._selection_target)
+            time.sleep(0.25)
+            return True
+        except Exception as exc:
+            _debug_log(f"LIVE SYNC: could not bring the app forward: {exc}")
+            return False
+
+    def _read_field_text_at_selection(self) -> str:
+        """Document text at the captured range (works without a selection)."""
+        reader = getattr(self._editor, "field_text_at", None)
+        if not callable(reader):
+            return ""
+        try:
+            return str(
+                reader(
+                    self._selection_target,
+                    self._selection_start,
+                    len(self._selection_text),
+                )
+                or ""
+            )
+        except Exception:
+            return ""
 
     def _read_selection_by_copy(self) -> str:
         """Read the live selection with a real copy (clipboard preserved)."""
@@ -1402,7 +1478,10 @@ class LivePreviewService(QObject):
         suggestions. Any later selection change still previews normally.
         """
         try:
-            target = self._editor.frontmost_app()
+            reader = getattr(self._editor, "frontmost_app", None)
+            if not callable(reader):
+                return  # a test double without app awareness
+            target = reader()
             if not target:
                 return
             pid = int(target.get("pid") or 0)
