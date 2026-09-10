@@ -1165,17 +1165,20 @@ class SettingsDialog(QDialog):
         # icon-only duplicates in a small bar underneath, which gave the same
         # destination two entry points and made the pages harder to find, so
         # the icons moved onto the rows themselves.
-        self.sidebar.addItems(
-            [
-                "General",
-                "Live Check",
-                "Automation",
-                "Connect",
-                "Local AI",
-                "License",
-                "Updates",
-            ]
-        )
+        for label, page_attr in (
+            ("General", "general_page"),
+            ("Live Check", "live_page"),
+            ("Automation", "automation_page"),
+            ("Connect", "connect_page"),
+            ("Local AI", "local_page"),
+            ("License", "license_page"),
+            ("Updates", "updates_page"),
+        ):
+            item = QListWidgetItem(label)
+            # The label may gain a status suffix later ("License  ✓"), so the
+            # page is stored on the row rather than parsed back out of it.
+            item.setData(Qt.ItemDataRole.UserRole, page_attr)
+            self.sidebar.addItem(item)
         self.sidebar.currentRowChanged.connect(self.change_page)
         self.sidebar.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
@@ -1313,6 +1316,14 @@ class SettingsDialog(QDialog):
         """)
         self.sidebar.setCurrentRow(0)
 
+    def _row_for_page(self, page_attr: str) -> int:
+        """Sidebar row that opens a page, by the page it stores (-1 if none)."""
+        for index in range(self.sidebar.count()):
+            item = self.sidebar.item(index)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == page_attr:
+                return index
+        return -1
+
     def _add_sidebar_status(self) -> None:
         """Give the License/Updates rows their icon and live status.
 
@@ -1321,15 +1332,16 @@ class SettingsDialog(QDialog):
         update is waiting, without a second set of controls.
         """
         icons = {
-            5: ("license.svg", "License Status"),
-            6: ("update.svg", "Updates"),
+            "license_page": ("license.svg", "License Status"),
+            "updates_page": ("update.svg", "Updates"),
         }
         parent = self.parent()
         self._pending_update_label = str(
             getattr(parent, "pending_update_version", "") or ""
         )
-        for row, (filename, tooltip) in icons.items():
-            item = self.sidebar.item(row)
+        for page_attr, (filename, tooltip) in icons.items():
+            row = self._row_for_page(page_attr)
+            item = self.sidebar.item(row) if row >= 0 else None
             if item is None:
                 continue
             icon_path = resource_path(os.path.join("assets", filename))
@@ -1340,8 +1352,8 @@ class SettingsDialog(QDialog):
 
     def refresh_sidebar_status(self) -> None:
         """Show licence state and pending updates on the sidebar rows."""
-        license_item = self.sidebar.item(5)
-        updates_item = self.sidebar.item(6)
+        license_item = self.sidebar.item(self._row_for_page("license_page"))
+        updates_item = self.sidebar.item(self._row_for_page("updates_page"))
         if license_item is not None:
             license_item.setText(f"License{self._license_badge()}")
             license_item.setToolTip(self._license_tooltip())
@@ -1395,7 +1407,7 @@ class SettingsDialog(QDialog):
         item = self.sidebar.item(index)
         if item is None:
             return
-        page_attr = {
+        page_attr = item.data(Qt.ItemDataRole.UserRole) or {
             "General": "general_page",
             "Live Check": "live_page",
             "Automation": "automation_page",
@@ -1403,7 +1415,7 @@ class SettingsDialog(QDialog):
             "Local AI": "local_page",
             "License": "license_page",
             "Updates": "updates_page",
-        }.get(item.text())
+        }.get(item.text().split("  ")[0])
         page = getattr(self, page_attr, None) if page_attr else None
         if page is not None:
             self.pages.setCurrentWidget(page)
@@ -3725,8 +3737,9 @@ class SettingsDialog(QDialog):
     def open_provider_settings(self, provider_name: str) -> None:
         provider_info = PROVIDERS.get(provider_name, {})
         if provider_info.get("is_local"):
-            self.sidebar.setCurrentRow(4)  # Local AI
-            self.change_page(4)
+            row = self._row_for_page("local_page")
+            self.sidebar.setCurrentRow(row)
+            self.change_page(row)
             return
 
         dialog = QDialog(self)
@@ -5973,7 +5986,9 @@ class ProofreaderApp(QMainWindow):
             )
             if dialog.license_page is not None:
                 dialog.pages.setCurrentWidget(dialog.license_page)
-                dialog.sidebar.setCurrentRow(5)  # License
+                dialog.sidebar.setCurrentRow(
+                    dialog._row_for_page("license_page")
+                )
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.settings = dialog.get_settings()
                 save_runtime_settings(self.settings)
@@ -5995,8 +6010,9 @@ class ProofreaderApp(QMainWindow):
             dialog.finished.connect(
                 lambda _result: setattr(self, "_active_settings_dialog", None)
             )
-            dialog.sidebar.setCurrentRow(4)  # Local AI
-            dialog.change_page(4)
+            row = dialog._row_for_page("local_page")
+            dialog.sidebar.setCurrentRow(row)
+            dialog.change_page(row)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.settings = dialog.get_settings()
                 save_runtime_settings(self.settings)

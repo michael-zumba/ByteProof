@@ -1959,3 +1959,40 @@ def test_live_check_app_rows_show_icons_when_installed() -> None:
     marker = dialog.live_apps_list.item(0).data(Qt.ItemDataRole.UserRole)
     assert marker
     _dispose(dialog, owner, app)
+
+
+def test_every_sidebar_page_opens_from_its_row() -> None:
+    """Regression: the License row's status suffix ("License  ✓") broke the
+    label-based page lookup, so clicking it left the previous page on screen."""
+    app, owner, dialog = _make_settings_dialog()
+    dialog.show()
+    app.processEvents()
+
+    expected = {
+        "General": "general_page",
+        "Live Check": "live_page",
+        "Automation": "automation_page",
+        "Connect": "connect_page",
+        "Local AI": "local_page",
+        "License": "license_page",
+        "Updates": "updates_page",
+    }
+    assert dialog.sidebar.count() == len(expected)
+    for row, (label, page_attr) in enumerate(expected.items()):
+        item = dialog.sidebar.item(row)
+        assert item.text().startswith(label)
+        dialog.sidebar.setCurrentRow(row)
+        app.processEvents()
+        assert dialog.pages.currentWidget() is getattr(dialog, page_attr), (
+            f"clicking {item.text()!r} did not open {page_attr}"
+        )
+
+    # The status suffix must not be what makes it work: a fresh dialog with a
+    # licence badge and a pending update still navigates correctly.
+    dialog.note_update_available("2.0.3")
+    dialog.refresh_sidebar_status()
+    app.processEvents()
+    dialog.sidebar.setCurrentRow(6)
+    app.processEvents()
+    assert dialog.pages.currentWidget() is dialog.updates_page
+    _dispose(dialog, owner, app)
