@@ -368,3 +368,41 @@ defects:
 
 Tests: flaky read retried, no second paste after a successful one, retry when
 the text is provably unchanged, and the actionable refusal message.
+
+## Checkpoint (2.0.2-beta.8) — suggest only after a real selection
+
+Owner report: Mail's Edit menu blinked constantly (the app looked like it was
+working in the background the whole time), and suggestions should only appear
+for a genuine selection of at least a few words.
+
+### Why Mail blinked
+
+A Mail compose selection can only be read by *posting Command-C* (Mail exposes
+no AX selection), and the poll did that every ~2.5 s for as long as a compose
+window was frontmost. macOS flashes the corresponding Edit-menu item for every
+delivered key equivalent - hence the blinking. The log showed reads at
+07:11:19, :21, :22, :24, :26, :29, :31, :32.
+
+### Fix: read only when a selection was just made
+
+`_selection_gesture_seen()` now gates the clipboard read:
+
+* within `SELECTION_MOUSE_WINDOW_S` (1.2 s) of a left mouse-up - a drag or
+  click selection just finished, so a read is worth its side effect;
+* otherwise once, after the user has stopped interacting for
+  `SELECTION_IDLE_SETTLE_S` (1.2 s), which also catches keyboard selections
+  (Shift+arrows, Cmd+A) - and only once per burst of activity;
+* never in a loop while the user types or reads.
+
+`GenericTextEditor.idle_seconds()` / `mouse_up_seconds()` read the system event
+source; if the OS returns nothing, the gate falls back to the previous
+behaviour rather than silently disabling Mail/Pages support. The poll also
+posts one keystroke per read, trying the second copy strategy only when a mouse
+selection was just made.
+
+### Minimum selection
+
+`evaluate_trigger` requires `MIN_PREVIEW_WORDS` (3) in addition to the 8-char
+floor, so a stray word or two never pings the model. The threshold is
+configurable in Settings -> Live Suggestions (1-10 words) and stored as
+`live_preview.min_words`.
