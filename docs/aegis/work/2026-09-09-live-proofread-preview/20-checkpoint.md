@@ -269,3 +269,42 @@ Fixes:
   select it again, and press Apply") instead of a generic retry prompt.
 - Offscreen runs skip the network-backed startup work (update check, remote
   licence validation); their TLS worker threads were crashing the test process.
+
+## Checkpoint (2.0.2-beta.5) — current model defaults + Settings tidy-up
+
+### Provider models (verified 2026-09-10 against vendor docs)
+
+| Provider | Was | Now | Source |
+| --- | --- | --- | --- |
+| DeepSeek | `deepseek-v4-flash` | `deepseek-flash` | api-docs.deepseek.com (V4.1-Flash; the v4-flash model was retired, the name still resolves) |
+| Google Gemini | `gemini-2.5-flash` | `gemini-3.8-flash` | ai.google.dev OpenAI-compatibility page |
+| Groq | `llama-3.1-70b-versatile` (removed by Groq) | `openai/gpt-oss-120b` | Groq model catalogue |
+| OpenAI | `gpt-4o` | `gpt-5.5` | OpenAI GPT-5.5 announcement |
+| Anthropic | `claude-sonnet-4-20250514` | `claude-sonnet-5` | Anthropic model/ID list (verified Sep 8, 2026) |
+| xAI | `grok-3-beta` | `grok-4.6` | docs.x.ai (model name is `grok-4.6`) |
+| Perplexity | `sonar-pro` | unchanged | Perplexity model list |
+
+Base URLs were all still correct and are unchanged.
+
+`SUPERSEDED_DEFAULT_MODELS` + `refresh_superseded_models()` move an install to
+the new default when the saved model is one ByteProof previously shipped, so a
+never-customised provider cannot stay on a retired model. A model the user
+chose (or a local model) is never touched, and the change is persisted through
+the atomic 0600 settings writer.
+
+### Settings panel: one entry point per page
+
+Decision: keep the **labelled sidebar rows**, remove the duplicate icon-only
+buttons. Reasons: two entry points to the same page is confusing; the rows are
+discoverable and standard; the 34x34 unlabelled buttons were the least
+discoverable part of the window. The icons moved onto the rows, which now also
+carry live status — `License  ✓` (or trial days / free mode) and `Updates •`
+when a version is waiting.
+
+### Test infrastructure
+
+The combined `pytest tests/` run intermittently segfaulted on macOS: Qt C++
+objects are released by Python's garbage collector, so a window created by one
+file could be destroyed while a later file was constructing its own.
+`scripts/run_tests.sh` (and CI) now run one test file per process: 273 tests,
+three deterministic clean runs.
