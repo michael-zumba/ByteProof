@@ -55,6 +55,8 @@ MAIL_COMPOSE_CHECK_INTERVAL_S = 5.0
 # It is therefore only attempted when the user has just made a selection:
 # within this window after a mouse-up, or once after they stop interacting.
 SELECTION_MOUSE_WINDOW_S = 1.2
+# A drag must have happened this recently for a mouse selection to count.
+SELECTION_DRAG_WINDOW_S = 3.0
 SELECTION_IDLE_SETTLE_S = 1.2
 USER_ACTIVE_WINDOW_S = 0.6
 ACCESS_CACHE_TTL_S = 30.0
@@ -655,8 +657,18 @@ class LivePreviewService(QObject):
             # The user is working again: re-arm the "one read after they stop"
             # allowance for this burst of activity.
             self._idle_read_done = False
-        if mouse_up is not None and mouse_up <= SELECTION_MOUSE_WINDOW_S:
-            _debug_log("LIVE CLIPBOARD: read after a mouse selection")
+        dragged = None
+        drag_reader = getattr(self._editor, "dragged_seconds", None)
+        if callable(drag_reader):
+            dragged = drag_reader()
+        if (
+            mouse_up is not None
+            and mouse_up <= SELECTION_MOUSE_WINDOW_S
+            and (dragged is None or dragged <= SELECTION_DRAG_WINDOW_S)
+        ):
+            # A drag ended a moment ago: that is a text selection, so the copy
+            # is worth its keystroke. A plain click is not.
+            _debug_log("LIVE CLIPBOARD: read after a drag selection")
             return True
         if (
             idle is not None
@@ -1096,7 +1108,7 @@ class LivePreviewService(QObject):
         except Exception:
             return ""
 
-    def _read_selection_by_copy(self, attempts: int = 3) -> str:
+    def _read_selection_by_copy(self, attempts: int = 2) -> str:
         """Read the live selection with a real copy (clipboard preserved).
 
         All copy strategies are tried: Mail ignores a process-targeted
@@ -1931,12 +1943,14 @@ class LivePreviewService(QObject):
             f"LIVE FULL APPLY: app={self._selection_target.get('name')!r} "
             f"count={len(self._pending)}"
         )
+        # A selection in Mail/Pages can only be read by copying, and a copy of
+        # a background window returns nothing (and beeps). Bring the captured
+        # app forward first - the paste needs it there anyway.
+        self._bring_target_forward()
         state = self._read_selection_state()
         if state is None:
-            # Mail/Pages selections are read through the clipboard, and Mail
-            # ignores a process-targeted copy now and then. Retry with the
-            # other strategies before refusing.
-            state = self._read_full_selection_with_retries()
+            # One more try, not a burst: each attempt is a real keystroke.
+            state = self._read_full_selection_with_retries(attempts=2)
         if state is None:
             _debug_log("LIVE FULL APPLY: selection read failed")
             self._hide_panel()
@@ -1989,14 +2003,22 @@ class LivePreviewService(QObject):
         self._hide_panel()
 
     def _read_full_selection_with_retries(
-        self, attempts: int = 3
+        self, attempts: int = 2
     ) -> tuple[str, int, int] | None:
-        """Read a clipboard-only selection (Mail, Pages) with retries."""
-        for _ in range(attempts):
-            text = self._read_selection_by_copy()
+        """Read a clipboard-only selection (Mail, Pages) with a bounded retry.
+
+        Two attempts at most: every attempt posts Command-C, which flashes the
+        Edit menu and beeps when nothing is selected, so a failure must never
+        turn into a burst of keystrokes.
+        """
+        for index in range(max(1, min(attempts, 2))):
+            text = self._read_selection_by_copy(attempts=1)
             if text:
                 return text, 0, 0
-            time.sleep(0.12)
+            if index + 1 < attempts:
+                # Wide enough to clear the copy rate limit in generic_editing;
+                # the UI thread blocks here, so this stays a single retry.
+                time.sleep(0.55)
         return None
 
     def _paste_evidence(self, corrected: str) -> str:
@@ -2006,7 +2028,7 @@ class LivePreviewService(QObject):
         Accessibility text. "unknown" deliberately blocks a retry: pasting a
         second time could duplicate the paragraph.
         """
-        current = self._read_selection_by_copy()
+        current = self._read_selection_by_copy(attempts=1)
         if not current:
             return "unknown"
         if current.strip() == corrected.strip():

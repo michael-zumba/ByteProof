@@ -1316,6 +1316,9 @@ def _mail_service(*, read_sequence, corrected_text, pasted):
     original = "Everything else stays where it belongs: "
 
     class MailEditor:
+        def is_frontmost(self, target):
+            return True  # the apply brings the app forward itself
+
         def get_selection_by_copy(self, target, attempts=3):
             index = min(reads["n"], len(reads["texts"]) - 1)
             reads["n"] += 1
@@ -1357,7 +1360,11 @@ def test_mail_apply_retries_a_flaky_clipboard_read(monkeypatch):
     """Mail ignores a process-targeted copy now and then; do not give up."""
     monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
     service, pasted, _reads = _mail_service(
-        read_sequence=["", "Everything else stays where it belongs: ", "Everything else stays where it belongs: "],
+        read_sequence=[
+            "",
+            "Everything else stays where it belongs: ",
+            "Everything else stays where it belongs: ",
+        ],
         corrected_text="Everything else stays where it belongs. ",
         pasted=[],
     )
@@ -1510,4 +1517,101 @@ def test_clipboard_read_allowed_again_after_the_user_returns(monkeypatch):
     assert service._selection_gesture_seen() is False
     service._editor.idle_seconds = lambda: 2.0
     assert service._selection_gesture_seen() is True
+    service.stop()
+
+
+def test_copy_keystrokes_are_rate_limited(monkeypatch):
+    """A loop must never be able to flood the app with Command-C.
+
+    Each attempt is a real key equivalent: it flashes the Edit menu, beeps
+    when there is no selection, and blocks the UI thread while waiting.
+    """
+    import sys as _sys
+
+    from src import generic_editing
+
+    monkeypatch.setattr(generic_editing.time, "sleep", lambda s: None)
+    monkeypatch.setattr(generic_editing, "_mac_clipboard_string", lambda: "x")
+    monkeypatch.setattr(generic_editing, "_mac_restore_clipboard", lambda t: None)
+    monkeypatch.setattr(generic_editing, "_mac_set_clipboard", lambda t: None)
+
+    posted: list[int] = []
+    monkeypatch.setattr(
+        generic_editing, "_post_mac_key", lambda code, pid: posted.append(code)
+    )
+    monkeypatch.setattr(
+        generic_editing, "_mac_system_events_key", lambda key, name: posted.append(0)
+    )
+
+    class FakeAS:
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+    monkeypatch.setitem(_sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(generic_editing, "_last_copy_attempt_at", 0.0)
+
+    # Six back-to-back attempts: only the first may reach the app.
+    for _ in range(6):
+        generic_editing.GenericTextEditor._mac_copy_selection(9, "Mail", 3)
+
+    assert len(posted) <= 3, f"flooded the app with {len(posted)} keystrokes"
+
+
+def test_mail_apply_brings_the_app_forward_before_reading(monkeypatch):
+    """A background Mail window answers nothing and beeps on Command-C."""
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    calls = {"activated": 0, "frontmost": False}
+    pasted: list[str] = []
+    text = "Everything else stays where it belongs: "
+
+    class MailEditor:
+        def is_frontmost(self, target):
+            return calls["frontmost"]
+
+        def activate(self, target):
+            calls["activated"] += 1
+            calls["frontmost"] = True
+            return True
+
+        def frontmost_app(self):
+            return {"bundle_id": "nz.co.bytemind.byteproof", "pid": 1}
+
+        def get_selection_by_copy(self, target, attempts=2):
+            return text if calls["frontmost"] else ""  # nothing while behind
+
+        def get_selection_light(self, target):
+            return ""
+
+        def replace_selection(self, target, new_text):
+            pasted.append(new_text)
+            return True, "Applied."
+
+        def running_apps(self):
+            return [{"pid": 9, "bundle_id": "com.apple.mail"}]
+
+    service._editor = MailEditor()
+    service._pending = [EditSpan("belongs:", "belongs.", "Punctuation", 0, 8)]
+    service._selection_target = {
+        "bundle_id": "com.apple.mail",
+        "pid": 9,
+        "name": "Mail",
+    }
+    service._selection_text = text
+    service._seen_text = text
+    service._selection_has_range = False
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+
+    service._apply_all()
+
+    assert calls["activated"] == 1  # brought forward before reading
+    assert pasted, "the apply went ahead once the window was active"
     service.stop()

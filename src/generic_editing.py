@@ -93,6 +93,10 @@ def _debug_log(msg: str) -> None:
 # the most expensive part of every poll tick. The element for a given app is
 # stable in practice, so it is cached and only re-discovered when it stops
 # answering or the focused element moves to a different editable field.
+# Minimum spacing between two copy keystrokes, whatever asks for them.
+MIN_COPY_INTERVAL_S = 0.5
+_last_copy_attempt_at = 0.0
+
 _ax_element_cache: dict[int, tuple[float, Any, Any]] = {}
 AX_ELEMENT_CACHE_S = 2.5
 # Role/settable probes for the editable gate are stable for a given element, so
@@ -515,6 +519,25 @@ class GenericTextEditor:
             )
         except Exception:
             return None  # unknown: callers fall back to their old behaviour
+
+    @staticmethod
+    def dragged_seconds() -> float | None:
+        """Seconds since the last left-button drag.
+
+        A plain click is not a text selection, and posting Command-C without
+        one makes the app beep; requiring a recent drag avoids that.
+        """
+        try:
+            import Quartz
+
+            return float(
+                Quartz.CGEventSourceSecondsSinceLastEventType(
+                    Quartz.kCGEventSourceStateCombinedSessionState,
+                    Quartz.kCGEventLeftMouseDragged,
+                )
+            )
+        except Exception:
+            return None  # unknown
 
     @staticmethod
     def mouse_up_seconds() -> float | None:
@@ -953,10 +976,19 @@ class GenericTextEditor:
     @staticmethod
     def _mac_copy_selection(pid: int = 0, app_name: str = "", max_attempts: int = 3) -> str:
         """Copy the current selection via Cmd+C and return the clipboard text."""
+        global _last_copy_attempt_at
         try:
             import ApplicationServices as AS
             if not AS.AXIsProcessTrusted():
                 return ""
+            # Every attempt is a real key equivalent: it flashes the app's Edit
+            # menu and beeps when there is nothing to copy. Two of them landing
+            # within this window means something is looping, so refuse.
+            now = time.monotonic()
+            if now - _last_copy_attempt_at < MIN_COPY_INTERVAL_S:
+                _debug_log("copy selection skipped: rate limited")
+                return ""
+            _last_copy_attempt_at = now
             saved = _mac_clipboard_string()
             text = ""
             keycode = 8  # kVK_ANSI_C
@@ -978,7 +1010,7 @@ class GenericTextEditor:
                     _post_mac_key(keycode, 0)
                 else:
                     _mac_system_events_key("c", value)
-                time.sleep(0.4)
+                time.sleep(0.25)
                 text = _mac_clipboard_string() or ""
                 _debug_log(f"copy attempt '{label}' -> {_redact(text)}")
                 if text:
