@@ -308,3 +308,33 @@ objects are released by Python's garbage collector, so a window created by one
 file could be destroyed while a later file was constructing its own.
 `scripts/run_tests.sh` (and CI) now run one test file per process: 273 tests,
 three deterministic clean runs.
+
+## Checkpoint (2.0.2-beta.6) — browser applies when the selection disappears
+
+Follow-up report of "could not identify selection" in browsers. The log showed
+the exact state:
+
+```
+[06:37:45] LIVE PREVIEW: app='Safari' chars=179
+[06:37:52] LIVE APPLY ALL: app='Safari' has_range=True count=2
+[06:37:53] copy attempt 'process' -> <len=0>
+[06:37:53] LIVE SYNC: selection unreadable (AX and copy both empty)
+```
+
+Clicking the suggestion panel leaves the captured app behind ByteProof. While
+it is not frontmost, WebKit reports no `AXSelectedText` and ignores a posted
+Command-C, so the pre-apply verification had nothing to compare and refused.
+
+Fixes:
+- `_sync_selection` brings the captured app forward when it is not already
+  frontmost and re-reads the selection (the apply needs it frontmost for the
+  paste regardless). The app the user was actually using is remembered so
+  `_restore_user_focus` hands focus back afterwards.
+- If AX, the copy and the re-read all come back empty, the document itself is
+  the authority: `field_text_at()` reads the text at the captured range and a
+  match lets the apply proceed. The write path re-verifies the same range with
+  `before_text` before writing, so nothing is ever written blind.
+- A genuinely changed document still refuses with the same message.
+
+Covered by three tests: the reported case applies, a changed range refuses, and
+the bring-forward path activates the app before verifying. 276 tests pass.
