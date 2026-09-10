@@ -875,3 +875,37 @@ def test_panel_is_dismissed_when_captured_app_closed(monkeypatch):
         is False
     )
     service.stop()
+
+
+def test_system_events_paste_fallback_uses_an_existing_helper(monkeypatch):
+    """The fallback paste used to import a name the module does not define."""
+    from src import generic_editing
+    from src.live_service import LivePreviewService
+
+    # If the import were still wrong this would raise ImportError.
+    assert hasattr(generic_editing, "GenericTextEditor")
+    assert not hasattr(generic_editing, "_mac_activate")  # module-level name
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    service._selection_target = {"bundle_id": "com.x", "pid": 5, "name": "X"}
+
+    activated = []
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_activate",
+        staticmethod(lambda target: activated.append(target) or True),
+    )
+    monkeypatch.setattr(generic_editing, "_mac_clipboard_string", lambda: "old")
+    monkeypatch.setattr(generic_editing, "_mac_set_clipboard", lambda text: None)
+    monkeypatch.setattr(generic_editing, "_mac_restore_clipboard", lambda text: None)
+    monkeypatch.setattr(
+        generic_editing, "_mac_system_events_key", lambda key, name: activated.append(key)
+    )
+
+    ok, message = service._paste_via_system_events("corrected text")
+    assert ok is True
+    assert activated  # the target was activated and the keystroke sent
+    service.stop()

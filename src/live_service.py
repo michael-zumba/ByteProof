@@ -1769,9 +1769,15 @@ class LivePreviewService(QObject):
         self._hide_panel()
 
     def _paste_via_system_events(self, corrected: str) -> tuple[bool, str]:
-        """Second paste attempt through System Events keystrokes."""
+        """Second paste attempt through System Events keystrokes.
+
+        Used when the direct paste is rejected, usually because the target app
+        was not frontmost. The activation helper lives on the editor class,
+        not at module level (importing it from the module raised ImportError,
+        so this fallback could never work).
+        """
         from .generic_editing import (
-            _mac_activate,
+            GenericTextEditor,
             _mac_clipboard_string,
             _mac_restore_clipboard,
             _mac_set_clipboard,
@@ -1781,11 +1787,13 @@ class LivePreviewService(QObject):
         try:
             saved = _mac_clipboard_string()
             _mac_set_clipboard(corrected)
-            _mac_activate(self._selection_target)
+            GenericTextEditor._mac_activate(self._selection_target)
+            time.sleep(0.25)
             _mac_system_events_key(
                 "v", self._selection_target.get("name") or ""
             )
             time.sleep(0.4)
+            # Only hand the clipboard back once the paste has had its chance.
             _mac_restore_clipboard(saved)
             _debug_log("LIVE FULL APPLY: system-events paste sent")
             return True, "Applied via system paste."

@@ -196,3 +196,44 @@ version-consistency check.
 - Accessibility metadata/i18n, dark mode, per-suggestion review queue in the
   main window, document-level compliance checks, managed cloud credits,
   opt-in telemetry.
+
+## Checkpoint (2.0.2-beta.2) — focus-independent applies + faster live loop
+
+Owner request: (a) an apply must still happen when the edited window is not
+frontmost, (b) a new selection must not interrupt an in-flight apply nor
+auto-trigger a preview of its own, (c) make live detection and applying faster
+without losing accuracy.
+
+### Focus independence
+- `_begin_apply`/`_end_apply` bracket every apply and stop the poll timer for
+  its duration; `_sample` returns immediately while `_applying`. A new
+  selection or another app coming forward can no longer abort the edits or
+  spawn a second preview.
+- The apply targets the captured app and range; `_read_selection_state` reads
+  that app through AX/AppleScript, which works in the background. AX-write
+  capable apps (TextEdit, Notes, ChatGPT) apply with no activation at all.
+- When a paste is required, the target is activated only if it is not already
+  frontmost, and `_restore_user_focus` hands focus back to the app the user
+  actually moved to (tracked per span in `_note_foreign_frontmost`).
+- `_keep_panel_for_detached_target` keeps the panel for up to 20 s (revalidated
+  every 1.5 s, dismissed when the captured app closes or its selection changes)
+  so Apply/Apply all is still clickable after switching apps.
+- `_suppress_current_selection` records (pid, text) selections that appeared
+  during an apply and ignores them for 15 s, so "selecting something to read"
+  never triggers a preview.
+
+### Speed (no change in accuracy)
+- Poll 350 → 250 ms; default preview delay 900 → 600 ms.
+- `_mac_ax_text_element`: returns the focused element immediately when it is
+  the text field (the common case) and otherwise caches the found element for
+  2.5 s; caches are dropped when the frontmost app changes.
+- The editable-context probe is cached per (ApplicationServices, pid, element).
+- The Word document name is read lazily at apply time instead of on every
+  preview (one AppleScript call saved per preview).
+- Apply: activation and its sleep are skipped when the target is already
+  frontmost, paste confirmation interval 150 → 80 ms, settle 350 → 150 ms.
+- Word: poll reads use a 3 s timeout and the service backs off 5 s when Word
+  stops answering (modal dialog) rather than blocking the UI thread per tick.
+- The live service is not started for offscreen Qt runs, so the test suite no
+  longer drives real Accessibility/AppleScript against the user's apps (this
+  was exposing a busy Word and hanging the suite).
