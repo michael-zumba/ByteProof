@@ -1,6 +1,5 @@
 # pyright: reportAttributeAccessIssue=false
 import copy
-import difflib
 import os
 import platform
 import shutil
@@ -3782,6 +3781,7 @@ class ProofreaderApp(QMainWindow):
         self.live_action_btn.clicked.connect(self._on_live_action)
         live_layout.addWidget(self.live_action_btn)
         layout.addWidget(live_container)
+        self.live_container = live_container
         self._live_status_state = ""
 
         diff_group = QFrame()
@@ -5472,6 +5472,10 @@ class ProofreaderApp(QMainWindow):
         )
         self.live_status_label.setText(text)
         self.live_action_btn.setText(action)
+        # When everything is working the row has nothing useful to say —
+        # hide it and let it reappear automatically if anything breaks.
+        if hasattr(self, "live_container"):
+            self.live_container.setVisible(state != "ready")
 
     def _on_live_action(self) -> None:
         if self._live_status_state == "no_permission":
@@ -5508,14 +5512,17 @@ class ProofreaderApp(QMainWindow):
             return
         try:
             editor = service._editor
-            # Prefer the app the live service last saw a selection in (the
-            # user just came from it) — the frontmost app here is usually
-            # ByteProof itself. Fall back to the frontmost app otherwise.
-            target = None
-            remembered = getattr(service, "_selection_target", None) or {}
-            if remembered.get("pid"):
-                target = remembered
-            if not target:
+            # Prefer the last real app the user worked in (tracked by the
+            # service every poll), then the app that last produced a
+            # preview, then the frontmost app. This keeps working when the
+            # user selects text in Word, then switches to a PDF and wants
+            # that tested instead.
+            target = getattr(service, "_last_user_app", None) or {}
+            if not target.get("pid"):
+                remembered = getattr(service, "_selection_target", None) or {}
+                if remembered.get("pid"):
+                    target = remembered
+            if not target.get("pid"):
                 target = editor.frontmost_app()
             if not target:
                 self._show_toast(
@@ -5568,6 +5575,9 @@ class ProofreaderApp(QMainWindow):
             self._show_toast(
                 message, kind="success" if ok_state else "warning"
             )
+            if ok_state:
+                # Clearly working: retire the readiness row.
+                self._apply_live_status("ready")
         except Exception as exc:
             self._show_toast(
                 f"Live test failed: {exc}", kind="warning"
@@ -6697,31 +6707,29 @@ class ProofreaderApp(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not open settings: {e}")
 
     def display_diff(self, original: str, corrected: str) -> None:
-        matcher = difflib.SequenceMatcher(None, original, corrected, autojunk=False)
-        cursor = self.diff_text.textCursor()
-        
-        del_fmt = QTextCharFormat()
-        del_fmt.setBackground(QColor("#FEF2F2"))
-        del_fmt.setForeground(QColor("#991B1B"))
-        del_fmt.setFontStrikeOut(True)
-        
-        ins_fmt = QTextCharFormat()
-        ins_fmt.setBackground(QColor("#ECFDF5"))
-        ins_fmt.setForeground(QColor("#065F46"))
-        
-        normal_fmt = QTextCharFormat()
-        normal_fmt.setForeground(QColor("#57534E"))
+        """Render the proposed changes with the shared word-level diff.
 
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == 'replace':
-                cursor.insertText(original[i1:i2], del_fmt)
-                cursor.insertText(corrected[j1:j2], ins_fmt)
-            elif tag == 'delete':
-                cursor.insertText(original[i1:i2], del_fmt)
-            elif tag == 'insert':
-                cursor.insertText(corrected[j1:j2], ins_fmt)
-            elif tag == 'equal':
-                cursor.insertText(original[i1:i2], normal_fmt)
+        Reuses the suggestion panel's renderer (struck original → arrow →
+        green replacement, dimmed unchanged context) with the full text and
+        preserved line breaks, keeping both surfaces visually consistent.
+        """
+        try:
+            from .ui_theme import diff_html
+
+            rendered = diff_html(
+                original,
+                corrected,
+                context=100000,  # review view: never truncate
+                preserve_newlines=True,
+            )
+            cursor = self.diff_text.textCursor()
+            cursor.insertHtml(
+                f"<div style='white-space:pre-wrap;'>{rendered}</div>"
+            )
+        except Exception:
+            # Never lose the review text if rich rendering fails.
+            cursor = self.diff_text.textCursor()
+            cursor.insertText(corrected)
 
 
 def _find_owner_window(widget: QWidget) -> ProofreaderApp | None:

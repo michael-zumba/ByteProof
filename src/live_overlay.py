@@ -1,8 +1,5 @@
 """Transparent overlay that draws dashed underlines and a hover popup."""
 
-import difflib
-import html
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -21,6 +18,9 @@ from PyQt6.QtWidgets import (
 )
 
 from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
+from .ui_theme import (
+    diff_html,
+)
 
 # Bright, Google-inspired surfaces and typography.
 SURFACE_SHEET = (
@@ -57,10 +57,6 @@ CLOSE_BUTTON = (
     "QPushButton:pressed { background: #E4E7EB; color: #202124; }"
 )
 
-OLD_STYLE = "color:#C5221F; background:#FCE8E6;"
-NEW_STYLE = "color:#137333; background:#E6F4EA; font-weight:500;"
-ARROW_STYLE = "color:#9AA0A6;"
-CONTEXT_STYLE = "color:#5F6368;"
 DIVIDER_SHEET = "QFrame { background: #F1F3F5; border: none; }"
 REASON_CHIP = (
     "color: #5F6368; font-size: 11px; background: #F1F3F4;"
@@ -94,38 +90,6 @@ def popup_rows(span: OverlaySpan) -> list[tuple[str, str]]:
     if span.reason:
         rows.append(("reason", span.reason))
     return rows
-
-
-def diff_html(before: str, after: str, context: int = 24) -> str:
-    """Render a pinpoint word/character diff, unchanged text left normal."""
-
-    def escape(text: str) -> str:
-        return html.escape(text).replace("\n", " ")
-
-    before_tokens = re.findall(r"\S+|\s+", before)
-    after_tokens = re.findall(r"\S+|\s+", after)
-    matcher = difflib.SequenceMatcher(None, before_tokens, after_tokens)
-    parts: list[str] = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        old = "".join(before_tokens[i1:i2])
-        new = "".join(after_tokens[j1:j2])
-        if tag == "equal":
-            segment = escape(old)
-            if len(segment) > context * 2:
-                segment = segment[:context] + "…" + segment[-context:]
-            if segment:
-                parts.append(
-                    f"<span style='{CONTEXT_STYLE}'>{segment}</span>"
-                )
-        elif tag == "delete":
-            parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
-        elif tag == "insert":
-            parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
-        elif tag == "replace":
-            parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
-            parts.append(f"<span style='{ARROW_STYLE}'> → </span>")
-            parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
-    return "".join(parts) or escape(after)
 
 
 def clear_layout(layout: QLayout) -> None:

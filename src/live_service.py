@@ -164,6 +164,7 @@ class LivePreviewService(QObject):
         self._undo_timer: QTimer | None = None
         self._last_anchor: QPoint | None = None
         self._last_escape_at = 0.0
+        self._last_user_app: dict[str, Any] = {}
         self._escape_bridge = _EscapeBridge()
         self._escape_bridge.pressed.connect(self._on_escape_pressed)
         self._escape_token: Any = None
@@ -217,6 +218,15 @@ class LivePreviewService(QObject):
         target = self._editor.frontmost_app()
         if not target:
             return
+        bundle_check = str(target.get("bundle_id", "")).lower()
+        name_check = str(target.get("name", "")).lower()
+        if not any(
+            marker in bundle_check or marker in name_check
+            for marker in ("bytemind", "byteproof")
+        ):
+            # Remember the last real app the user worked in, so "Test now"
+            # can probe it even after ByteProof becomes frontmost.
+            self._last_user_app = target
         is_word = bool(getattr(self._editor, "is_word", lambda _t: False)(target))
         # Word's AppleScript read is heavy: poll Word at a relaxed cadence
         # so the UI thread stays responsive while Word is frontmost.

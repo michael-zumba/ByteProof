@@ -468,7 +468,8 @@ def test_diff_html_replacement_shows_arrow():
 
 
 def test_diff_html_dims_unchanged_context():
-    from src.live_overlay import CONTEXT_STYLE, diff_html
+    from src.live_overlay import diff_html
+    from src.ui_theme import CONTEXT_STYLE
 
     rendered = diff_html("the cat sat", "the cat sat")
     assert CONTEXT_STYLE.split(":")[1].split(";")[0].strip() in rendered
@@ -2523,18 +2524,22 @@ def test_readiness_row_updates_per_state():
         window._apply_live_status("ready")
         assert "ready" in window.live_status_label.text().lower()
         assert window.live_action_btn.text() == "Test now"
+        # Working fine: the whole row retires so the window stays clean.
+        assert window.live_container.isHidden() is True
 
         window._apply_live_status("no_permission")
         assert "accessibility" in window.live_status_label.text().lower()
         assert window.live_action_btn.text() == "Open System Settings"
+        assert window.live_container.isHidden() is False
 
         window._apply_live_status("disabled")
         assert window.live_action_btn.text() == "Open Settings"
+        assert window.live_container.isHidden() is False
     finally:
         window.close()
 
 
-def test_live_test_now_probes_remembered_target(monkeypatch):
+def test_live_test_now_probes_last_user_app(monkeypatch):
     from PyQt6.QtWidgets import QApplication
 
     from src import settings as settings_mod
@@ -2563,13 +2568,13 @@ def test_live_test_now_probes_remembered_target(monkeypatch):
             @staticmethod
             def selection_details(target):
                 return {
-                    "text": "teh cat sat",
-                    "range": (0, 11),
+                    "text": "a paragraph of pdf text",
+                    "range": (0, 23),
                     "context_before": "",
                     "context_after": "",
                     "found": True,
-                    "editable": True,
-                    "role": "AXTextArea",
+                    "editable": False,
+                    "role": "AXStaticText",
                 }
 
             @staticmethod
@@ -2577,10 +2582,17 @@ def test_live_test_now_probes_remembered_target(monkeypatch):
                 return False
 
         monkeypatch.setattr(service, "_editor", FakeEditor())
+        # Word produced the last preview, but the user most recently worked
+        # in a PDF — the probe must follow the user, not the preview cache.
         service._selection_target = {
             "bundle_id": "com.microsoft.word",
             "pid": 5,
             "name": "Microsoft Word",
+        }
+        service._last_user_app = {
+            "bundle_id": "com.apple.Preview",
+            "pid": 6,
+            "name": "Preview",
         }
         toasts = []
         monkeypatch.setattr(
@@ -2591,8 +2603,102 @@ def test_live_test_now_probes_remembered_target(monkeypatch):
         window._test_live_now()
         assert toasts
         message, kind = toasts[0]
-        assert "Microsoft Word" in message  # the editing app, not ByteProof
-        assert "(11 chars)" in message
-        assert kind == "success"
+        assert "Preview" in message  # the last active app, not Word
+        assert "read-only" in message
+        assert kind == "warning"
     finally:
         window.close()
+
+
+def test_sample_records_last_user_app(monkeypatch):
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class MutableFront:
+        def __init__(self):
+            self.current = {
+                "bundle_id": "com.apple.TextEdit",
+                "pid": 1,
+                "name": "TextEdit",
+            }
+
+        def frontmost_app(self):
+            return self.current
+
+        def permission_status(self):
+            return True, ""
+
+        def selection_details(self, target):
+            return {
+                "text": "",
+                "range": None,
+                "context_before": "",
+                "context_after": "",
+                "found": False,
+                "editable": False,
+                "role": "",
+            }
+
+    editor = MutableFront()
+    monkeypatch.setattr(service, "_editor", editor)
+    service._sample(now=1.0)
+    assert service._last_user_app.get("name") == "TextEdit"
+    # ByteProof becomes frontmost: the remembered app must not change.
+    editor.current = {
+        "bundle_id": "nz.co.bytemind.byteproof",
+        "pid": 2,
+        "name": "ByteProof",
+    }
+    service._sample(now=2.0)
+    assert service._last_user_app.get("name") == "TextEdit"
+    # The user moves to a PDF: the remembered app follows them.
+    editor.current = {
+        "bundle_id": "com.apple.Preview",
+        "pid": 3,
+        "name": "Preview",
+    }
+    service._sample(now=3.0)
+    assert service._last_user_app.get("name") == "Preview"
+
+
+# --- P3: shared diff renderer in the main window ---
+
+
+def test_main_window_display_diff_uses_word_level_renderer():
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+
+    QApplication.instance() or QApplication([])
+    loaded = settings_mod.load_runtime_settings()
+    loaded["general"]["auto_apply"] = False
+    window = ProofreaderApp(1024, loaded)
+    try:
+        window.diff_text.clear()
+        window.display_diff(
+            "teh cat sat on the mat", "the cat sat on the mat"
+        )
+        text = window.diff_text.toPlainText()
+        assert "teh" in text
+        assert "the" in text
+        assert "→" in text  # the shared renderer's replacement arrow
+    finally:
+        window.close()
+
+
+def test_diff_html_preserves_newlines_when_requested():
+    from src.ui_theme import diff_html
+
+    rendered = diff_html(
+        "first line\ntecond line",
+        "first line\nsecond line",
+        preserve_newlines=True,
+    )
+    assert "\n" in rendered
+    plain = diff_html(
+        "first line\ntecond line", "first line\nsecond line"
+    )
+    assert "\n" not in plain  # panel default still flattens newlines
