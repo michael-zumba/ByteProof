@@ -275,6 +275,52 @@ def _parse_ax_rect(value: Any) -> tuple[float, float, float, float] | None:
     return None
 
 
+def _mac_copy_menu_item(AS: Any, pid: int) -> Any:
+    """The app's Edit ▸ Copy menu item, or None when it cannot be found.
+
+    Matching the *key equivalent* rather than the title keeps this working in
+    every language, and it skips lookalikes such as Safari's "Copy Search
+    Terms" (which carries an extra modifier).
+    """
+    try:
+        app_el = AS.AXUIElementCreateApplication(pid)
+        err, bar = AS.AXUIElementCopyAttributeValue(
+            app_el, AS.kAXMenuBarAttribute, None
+        )
+        if err != 0 or bar is None:
+            return None
+        err, top_items = AS.AXUIElementCopyAttributeValue(
+            bar, AS.kAXChildrenAttribute, None
+        )
+        for top in top_items or []:
+            err, menus = AS.AXUIElementCopyAttributeValue(
+                top, AS.kAXChildrenAttribute, None
+            )
+            for menu in menus or []:
+                err, entries = AS.AXUIElementCopyAttributeValue(
+                    menu, AS.kAXChildrenAttribute, None
+                )
+                for entry in entries or []:
+                    try:
+                        e_char, char = AS.AXUIElementCopyAttributeValue(
+                            entry, AS.kAXMenuItemCmdCharAttribute, None
+                        )
+                        if e_char != 0 or str(char).upper() != "C":
+                            continue
+                        e_mod, modifiers = AS.AXUIElementCopyAttributeValue(
+                            entry, AS.kAXMenuItemCmdModifiersAttribute, None
+                        )
+                        # 0 means "Command only": the plain Copy command.
+                        if e_mod == 0 and int(modifiers or 0) != 0:
+                            continue
+                        return entry
+                    except Exception:
+                        continue
+    except Exception:
+        return None
+    return None
+
+
 def _mac_clipboard_string() -> str | None:
     try:
         from AppKit import NSPasteboard, NSPasteboardTypeString
@@ -989,6 +1035,43 @@ class GenericTextEditor:
                 _debug_log("copy selection skipped: rate limited")
                 return ""
             _last_copy_attempt_at = now
+            # Ask the app's own Copy command first. Its menu item reports
+            # whether anything is selected, and performing it sends no key
+            # equivalent - so nothing beeps and no menu flashes. Posting
+            # Command-C to an app with nothing selected is what made Mail and
+            # Pages beep when they were simply opened.
+            entry = _mac_copy_menu_item(AS, pid)
+            if entry is not None:
+                try:
+                    e_enabled, enabled = AS.AXUIElementCopyAttributeValue(
+                        entry, AS.kAXEnabledAttribute, None
+                    )
+                except Exception:
+                    e_enabled, enabled = 1, None
+                if e_enabled == 0 and enabled is False:
+                    _debug_log(
+                        "copy selection skipped: the app reports nothing "
+                        "selected (no keystroke sent)"
+                    )
+                    return ""
+                if e_enabled == 0:
+                    saved_for_menu = _mac_clipboard_string()
+                    try:
+                        _mac_set_clipboard("")
+                        if AS.AXUIElementPerformAction(
+                            entry, AS.kAXPressAction
+                        ) == 0:
+                            time.sleep(0.12)
+                            text = _mac_clipboard_string() or ""
+                            if text:
+                                _debug_log(
+                                    "copy selection used the app's Copy menu "
+                                    "command"
+                                )
+                                return text
+                    finally:
+                        _mac_restore_clipboard(saved_for_menu)
+
             saved = _mac_clipboard_string()
             text = ""
             keycode = 8  # kVK_ANSI_C

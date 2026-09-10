@@ -1996,3 +1996,106 @@ def test_every_sidebar_page_opens_from_its_row() -> None:
     app.processEvents()
     assert dialog.pages.currentWidget() is dialog.updates_page
     _dispose(dialog, owner, app)
+
+
+# --- copying without beeping: use the app's own Copy command ----------------
+def _menu_fake_as(*, copy_enabled: bool, press_copies: str = ""):
+    """A FakeAS that exposes an Edit ▸ Copy menu item."""
+    import sys
+
+    class FakeMenuItem:
+        def __init__(self):
+            self.pressed = 0
+
+    class FakeAS:
+        kAXMenuBarAttribute = "menubar"
+        kAXChildrenAttribute = "children"
+        kAXMenuItemCmdCharAttribute = "cmdchar"
+        kAXMenuItemCmdModifiersAttribute = "cmdmods"
+        kAXEnabledAttribute = "enabled"
+        kAXPressAction = "press"
+        kAXValueAttribute = "value"
+        kAXSelectedTextAttribute = "seltext"
+        kAXSelectedTextRangeAttribute = "range"
+        copy = FakeMenuItem()
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXUIElementCreateApplication(pid):
+            return "app"
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXMenuBarAttribute:
+                return 0, "bar"
+            if attr == FakeAS.kAXChildrenAttribute:
+                if el == "bar":
+                    return 0, ["editbar"]
+                if el == "editbar":
+                    return 0, ["editmenu"]
+                if el == "editmenu":
+                    return 0, [FakeAS.copy, "paste"]
+                return 1, None
+            if attr == FakeAS.kAXMenuItemCmdCharAttribute:
+                return (0, "C") if el is FakeAS.copy else (0, "V")
+            if attr == FakeAS.kAXMenuItemCmdModifiersAttribute:
+                return 0, 0
+            if attr == FakeAS.kAXEnabledAttribute:
+                return 0, copy_enabled
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, ""
+            return 1, None
+
+        @staticmethod
+        def AXUIElementPerformAction(el, action):
+            if el is FakeAS.copy:
+                FakeAS.copy.pressed += 1
+                if press_copies:
+                    import src.generic_editing as ge
+
+                    ge._mac_set_clipboard(press_copies)
+                return 0
+            return 1
+
+    sys.modules["ApplicationServices"] = FakeAS
+    return FakeAS
+
+
+def test_copy_is_skipped_when_the_app_reports_no_selection(monkeypatch):
+    """The beep fix: no keystroke when the app has nothing to copy."""
+    import src.generic_editing as ge
+
+    fake = _menu_fake_as(copy_enabled=False)
+    posted: list[int] = []
+    monkeypatch.setattr(ge, "_post_mac_key", lambda code, pid: posted.append(code))
+    monkeypatch.setattr(ge, "time", ge.time)
+    monkeypatch.setattr(ge.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ge, "_last_copy_attempt_at", 0.0)
+
+    text = ge.GenericTextEditor._mac_copy_selection(9, "Mail", 3)
+
+    assert text == ""
+    assert posted == [], "a keystroke would have made the app beep"
+    assert fake.copy.pressed == 0
+
+
+def test_copy_uses_the_app_command_when_a_selection_exists(monkeypatch):
+    import src.generic_editing as ge
+
+    fake = _menu_fake_as(copy_enabled=True, press_copies="selected text")
+    posted: list[int] = []
+    monkeypatch.setattr(ge, "_post_mac_key", lambda code, pid: posted.append(code))
+    monkeypatch.setattr(ge.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ge, "_last_copy_attempt_at", 0.0)
+    monkeypatch.setattr(ge, "_mac_clipboard_string", lambda: "selected text")
+    monkeypatch.setattr(ge, "_mac_restore_clipboard", lambda t: None)
+    monkeypatch.setattr(ge, "_mac_set_clipboard", lambda t: None)
+
+    text = ge.GenericTextEditor._mac_copy_selection(9, "Pages", 3)
+
+    assert text == "selected text"
+    assert fake.copy.pressed == 1, "the app's own Copy command was used"
+    assert posted == [], "no key equivalent was posted"
