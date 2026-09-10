@@ -2925,3 +2925,155 @@ def test_service_remembers_panel_position_after_drag():
     # position drives the animation's final target.
     assert card._pop_target is not None
     assert card._pop_target.topLeft() == expected
+
+
+# --- UTF-16 range conversion + drag-pause recovery ---
+
+
+def test_utf16_codepoint_index_roundtrip():
+    from src.live_preview import (
+        codepoint_to_utf16_index,
+        utf16_to_codepoint_index,
+    )
+
+    text = "a😀b🎉c"
+    # UTF-16 units: a(0) 😀(1-2) b(3) 🎉(4-5) c(6)
+    assert utf16_to_codepoint_index(text, 0) == 0
+    assert utf16_to_codepoint_index(text, 1) == 1
+    assert utf16_to_codepoint_index(text, 3) == 2
+    assert utf16_to_codepoint_index(text, 6) == 4
+    assert utf16_to_codepoint_index(text, 99) == len(text)
+    for cp in range(len(text) + 1):
+        assert utf16_to_codepoint_index(
+            text, codepoint_to_utf16_index(text, cp)
+        ) == cp
+
+
+def test_selection_details_converts_utf16_range_to_codepoints(monkeypatch):
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXRoleAttribute = "role"
+        kAXValueAttribute = "value"
+        kAXSelectedTextAttribute = "seltext"
+        kAXSelectedTextRangeAttribute = "range"
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXUIElementIsAttributeSettable(el, attr, out):
+            return (0, False)
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXRoleAttribute:
+                return 0, "AXTextArea"
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, "a😀b cat"
+            if attr == FakeAS.kAXSelectedTextAttribute:
+                return 1, None  # force the range-slice fallback
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, (3, 5)  # UTF-16 units: "b cat"
+            return 1, None
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor,
+        "_mac_ax_text_element",
+        lambda pid: (FakeAS, "el"),
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    editor = GenericTextEditor()
+    details = editor.selection_details(
+        {"pid": 9, "bundle_id": "com.apple.TextEdit"}
+    )
+    assert details["text"] == "b cat"
+    assert details["range"] == (2, 5)  # code points, not UTF-16 units
+
+
+def test_ax_replace_range_sets_range_in_utf16_units(monkeypatch):
+    from typing import ClassVar
+
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+        created: ClassVar[list] = []
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, value):
+            FakeAS.created.append(value)
+            return value
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, value):
+            return 0
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, "a😀xx yy"
+            if attr == FakeAS.kAXSelectedTextAttribute:
+                return 0, "xx"
+            return 1, None
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_set_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, message, _ = None, "", 0
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "App", "bundle_id": "com.example.app"},
+        3,  # code-point start: "xx"
+        2,
+        "xx",
+        allow_direct_paste=False,
+    )
+    assert ok is True and message == "Applied."
+    # The range passed to the app must be UTF-16 units (4, 2), because the
+    # emoji before the edit occupies two units.
+    assert FakeAS.created[0] == (4, 2)
+
+
+def test_hide_panel_resumes_polling_after_lost_drag():
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service.start()
+    service._pause_polling()
+    assert not service._timer.isActive()
+    # A drag whose release event was lost (panel hidden mid-drag) must not
+    # leave the poll frozen.
+    service._hide_panel()
+    assert service._timer.isActive()
+    service.stop()

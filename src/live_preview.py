@@ -178,6 +178,34 @@ def _locate_all(text: str, needle: str) -> list[tuple[int, int]]:
     return [fuzzy]
 
 
+def utf16_to_codepoint_index(text: str, utf16_index: int) -> int:
+    """Map a UTF-16 code-unit index to a Python code-point index.
+
+    macOS text ranges are UTF-16 based (NSString lengths), while Python
+    strings index by code points. Any emoji or astral character before an
+    offset makes the two drift apart and every edit lands in the wrong
+    place, so all AX ranges must be converted at read time and back again
+    when writing.
+    """
+    if utf16_index <= 0:
+        return 0
+    encoded = text.encode("utf-16-le")
+    total_units = len(encoded) // 2
+    if utf16_index >= total_units:
+        return len(text)
+    prefix = encoded[: utf16_index * 2].decode("utf-16-le")
+    return len(prefix)
+
+
+def codepoint_to_utf16_index(text: str, cp_index: int) -> int:
+    """Map a Python code-point index to a UTF-16 code-unit index."""
+    if cp_index <= 0:
+        return 0
+    if cp_index >= len(text):
+        return len(text.encode("utf-16-le")) // 2
+    return len(text[:cp_index].encode("utf-16-le")) // 2
+
+
 def word_visible_to_doc(
     rel: int,
     selection_start: int,

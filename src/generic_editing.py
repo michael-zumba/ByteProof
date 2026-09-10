@@ -839,17 +839,6 @@ class GenericTextEditor:
                     f"AX selection_details: AXSelectedText err={err} "
                     f"pid={pid}",
                 )
-            err, range_val = AS.AXUIElementCopyAttributeValue(
-                focused, AS.kAXSelectedTextRangeAttribute, None
-            )
-            if err == 0 and range_val is not None:
-                result["range"] = _parse_ax_range(range_val)
-            else:
-                _log_once(
-                    f"{bundle}:range",
-                    f"AX selection_details: AXSelectedTextRange err={err} "
-                    f"pid={pid}",
-                )
             err, value = AS.AXUIElementCopyAttributeValue(
                 focused, AS.kAXValueAttribute, None
             )
@@ -858,6 +847,34 @@ class GenericTextEditor:
                 _log_once(
                     f"{bundle}:value",
                     f"AX selection_details: AXValue err={err} pid={pid}",
+                )
+            err, range_val = AS.AXUIElementCopyAttributeValue(
+                focused, AS.kAXSelectedTextRangeAttribute, None
+            )
+            if err == 0 and range_val is not None:
+                location, length = _parse_ax_range(range_val)
+                if full and location is not None:
+                    # AX ranges are UTF-16 based; convert to code points so
+                    # every downstream offset matches Python string indices
+                    # (emoji before the selection would otherwise shift
+                    # every edit to the wrong place).
+                    from .live_preview import utf16_to_codepoint_index
+
+                    cp_location = utf16_to_codepoint_index(full, location)
+                    cp_length = (
+                        utf16_to_codepoint_index(
+                            full, location + (length or 0)
+                        )
+                        - cp_location
+                    )
+                    result["range"] = (cp_location, cp_length)
+                else:
+                    result["range"] = (location, length)
+            else:
+                _log_once(
+                    f"{bundle}:range",
+                    f"AX selection_details: AXSelectedTextRange err={err} "
+                    f"pid={pid}",
                 )
             if not result["text"] and full and result["range"]:
                 location, length = result["range"]
@@ -904,6 +921,20 @@ class GenericTextEditor:
         )
         if AS is None:
             return []
+        # Convert the code-point offsets to the app's UTF-16 units.
+        try:
+            from .live_preview import codepoint_to_utf16_index
+
+            err, value = AS.AXUIElementCopyAttributeValue(
+                focused, AS.kAXValueAttribute, None
+            )
+            if err == 0 and isinstance(value, str):
+                cp_start = start
+                start = codepoint_to_utf16_index(value, cp_start)
+                end = codepoint_to_utf16_index(value, cp_start + length)
+                length = end - start
+        except Exception:
+            pass
         rects: list[tuple[float, float, float, float]] = []
         for offset in range(start, start + length):
             try:
@@ -979,7 +1010,27 @@ class GenericTextEditor:
             elements.append(alt_focused)
 
         def _set_range(el: Any) -> int:
-            param = AS.AXValueCreate(AS.kAXValueTypeCFRange, (start, length))
+            # The service works in code points, but the app expects UTF-16
+            # code units for its range attribute. Convert before writing so
+            # pastes land exactly where intended (emoji-safe).
+            cu_start = start
+            cu_end = start + length
+            try:
+                err, value = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXValueAttribute, None
+                )
+                if err == 0 and isinstance(value, str):
+                    from .live_preview import codepoint_to_utf16_index
+
+                    cu_start = codepoint_to_utf16_index(value, start)
+                    cu_end = codepoint_to_utf16_index(
+                        value, start + length
+                    )
+            except Exception:
+                pass
+            param = AS.AXValueCreate(
+                AS.kAXValueTypeCFRange, (cu_start, cu_end - cu_start)
+            )
             return int(
                 AS.AXUIElementSetAttributeValue(
                     el, AS.kAXSelectedTextRangeAttribute, param

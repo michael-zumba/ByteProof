@@ -190,6 +190,7 @@ class LivePreviewService(QObject):
     def stop(self) -> None:
         if self._timer is not None:
             self._timer.stop()
+        self._drag_paused_poll = False
         self._cancel_event.set()
         worker = self._worker
         if worker is not None:
@@ -894,6 +895,9 @@ class LivePreviewService(QObject):
         self._remove_escape_monitor()
         if self._clean_timer is not None:
             self._clean_timer.stop()
+        # If the panel was hidden mid-drag, the release event never arrives;
+        # make sure the poll resumes so the service can't get stuck.
+        self._resume_polling()
         if self._panel is not None:
             stop_pop = getattr(self._panel, "stop_pop", None)
             if stop_pop is not None:
