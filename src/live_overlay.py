@@ -18,9 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
-from .ui_theme import (
-    diff_html,
-)
+from .ui_theme import diff_html, reason_color
 
 # Bright, Google-inspired surfaces and typography.
 SURFACE_SHEET = (
@@ -641,6 +639,13 @@ class WordSuggestionCard(QWidget):
                 body_layout.addSpacing(4)
             row = QHBoxLayout()
             row.setSpacing(10)
+            reason_dot = QLabel()
+            reason_dot.setFixedSize(8, 8)
+            reason_dot.setStyleSheet(
+                f"background-color: {reason_color(span.reason)};"
+                " border-radius: 4px;"
+            )
+            row.addWidget(reason_dot, 0, Qt.AlignmentFlag.AlignTop)
             diff_box = QFrame()
             diff_box.setStyleSheet(DIFF_BOX)
             diff_box_layout = QVBoxLayout(diff_box)

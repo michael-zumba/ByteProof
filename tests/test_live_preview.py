@@ -2702,3 +2702,93 @@ def test_diff_html_preserves_newlines_when_requested():
         "first line\ntecond line", "first line\nsecond line"
     )
     assert "\n" not in plain  # panel default still flattens newlines
+
+
+# --- P4.1 / P4.3 / P2.4 ---
+
+
+def test_reason_color_maps_categories():
+    from src.ui_theme import DOT_AMBER, DOT_BLUE, DOT_RED, reason_color
+
+    assert reason_color("Spelling") == DOT_RED
+    assert reason_color("Capitalization") == DOT_RED
+    assert reason_color("Grammar") == DOT_AMBER
+    assert reason_color("Punctuation") == DOT_AMBER
+    assert reason_color("Word choice") == DOT_BLUE
+    assert reason_color("Clarity") == DOT_BLUE
+    assert reason_color("") == DOT_BLUE
+
+
+def test_card_rows_include_reason_dots():
+    from PyQt6.QtWidgets import QLabel
+
+    from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
+
+    card = WordSuggestionCard()
+    spans = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("go", "goes", "Grammar", 10, 12),
+        EditSpan("nice", "elegant", "Word choice", 20, 24),
+    ]
+    card.set_spans(spans)
+    dots = [
+        label
+        for label in card.findChildren(QLabel)
+        if label.width() == 8 and label.height() == 8
+    ]
+    assert len(dots) == len(spans)
+
+
+def test_tray_tooltip_mirrors_live_status():
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+
+    QApplication.instance() or QApplication([])
+    loaded = settings_mod.load_runtime_settings()
+    loaded["general"]["auto_apply"] = False
+    window = ProofreaderApp(1024, loaded)
+    try:
+        window._apply_live_status("ready")
+        assert "ready" in window.tray_icon.toolTip()
+        window._apply_live_status("no_permission")
+        assert "Accessibility" in window.tray_icon.toolTip()
+        window._apply_live_status("disabled")
+        assert "off" in window.tray_icon.toolTip()
+    finally:
+        window.close()
+
+
+def test_close_hides_to_tray_with_first_time_hint(monkeypatch):
+    from PyQt6.QtWidgets import QSystemTrayIcon
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+
+    loaded = settings_mod.load_runtime_settings()
+    loaded["general"]["auto_apply"] = False
+    window = ProofreaderApp(1024, loaded)
+    try:
+        monkeypatch.setattr(
+            QSystemTrayIcon,
+            "isSystemTrayAvailable",
+            staticmethod(lambda: True),
+        )
+        toasts = []
+        monkeypatch.setattr(
+            window,
+            "_show_toast",
+            lambda msg, kind="success": toasts.append(msg),
+        )
+        window.show()
+        window.close()
+        assert window.isHidden() is True
+        assert len(toasts) == 1
+        assert "menu bar" in toasts[0]
+        window.show()
+        window.close()
+        assert len(toasts) == 1  # hint only on the first close
+    finally:
+        window.close()

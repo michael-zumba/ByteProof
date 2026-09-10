@@ -31,6 +31,27 @@ NEW_STYLE = (
 ARROW_STYLE = f"color:{TEXT_ARROW};"
 CONTEXT_STYLE = f"color:{TEXT_MUTED};"
 
+DOT_RED = "#D93025"
+DOT_AMBER = "#F9AB00"
+DOT_BLUE = BLUE_PRIMARY
+
+
+def reason_color(reason: str) -> str:
+    """Colour for a suggestion's reason dot.
+
+    Spelling/capitalisation errors are red, grammar/punctuation amber, and
+    everything else (word choice, style, clarity) blue.
+    """
+    r = (reason or "").lower()
+    if any(key in r for key in ("spell", "capital", "typo", "hyphen")):
+        return DOT_RED
+    if any(
+        key in r
+        for key in ("grammar", "agreement", "tense", "verb", "article", "punct")
+    ):
+        return DOT_AMBER
+    return DOT_BLUE
+
 
 def diff_html(
     before: str,

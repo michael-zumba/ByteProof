@@ -3884,6 +3884,7 @@ class ProofreaderApp(QMainWindow):
         self._activation_worker: ActivationWorker | None = None
         self._suppress_activate_until = 0.0
         self._tray_menu_open = False
+        self._close_hint_shown = False
         self._task_cancel_event = threading.Event()
         self._last_task_cancelled = False
         self._escape_monitor = None
@@ -5476,6 +5477,22 @@ class ProofreaderApp(QMainWindow):
         # hide it and let it reappear automatically if anything breaks.
         if hasattr(self, "live_container"):
             self.live_container.setVisible(state != "ready")
+        # Mirror the state in the tray tooltip so it stays visible while
+        # the main window is hidden.
+        tray = getattr(self, "tray_icon", None)
+        if tray is not None:
+            tray_labels = {
+                "ready": "Live suggestions: ready",
+                "no_permission": (
+                    "Live suggestions: needs Accessibility permission"
+                ),
+                "disabled": "Live suggestions: off",
+                "waiting": "Live suggestions: starting…",
+            }
+            tray.setToolTip(
+                f"{APP_NAME} — "
+                f"{tray_labels.get(state, 'Live suggestions: starting…')}"
+            )
 
     def _on_live_action(self) -> None:
         if self._live_status_state == "no_permission":
@@ -5978,6 +5995,13 @@ class ProofreaderApp(QMainWindow):
                     a0.accept()
                 return
             self.hide()
+            # First close per session: tell the user where the app went.
+            if not self._close_hint_shown:
+                self._close_hint_shown = True
+                self._show_toast(
+                    "ByteProof keeps running in the menu bar — choose "
+                    "Quit from the tray menu to exit.",
+                )
             if a0 is not None:
                 a0.ignore()
         except Exception as e:
