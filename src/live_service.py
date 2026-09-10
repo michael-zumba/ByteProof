@@ -51,6 +51,9 @@ MAIL_COMPOSE_CHECK_INTERVAL_S = 5.0
 # How long the Undo pill stays available after an apply.
 UNDO_AVAILABLE_MS = 10000
 
+# How long the "no changes needed" panel lingers before fading away.
+CLEAN_PANEL_MS = 2600
+
 # Word's AppleScript selection read takes a few hundred milliseconds, so
 # polling Word at the full rate keeps the UI thread busy and makes the app
 # feel slow. Word polls at a relaxed cadence; every other app keeps the
@@ -165,6 +168,10 @@ class LivePreviewService(QObject):
         self._last_anchor: QPoint | None = None
         self._last_escape_at = 0.0
         self._last_user_app: dict[str, Any] = {}
+        self._clean_timer: QTimer | None = None
+        self._dismissed: set[tuple[str, str]] = set()
+        self._remembered_pos: QPoint | None = None
+        self._drag_paused_poll = False
         self._escape_bridge = _EscapeBridge()
         self._escape_bridge.pressed.connect(self._on_escape_pressed)
         self._escape_token: Any = None
@@ -744,31 +751,119 @@ class LivePreviewService(QObject):
 
     # --- presentation ---
 
-    def _show_result(self, spans: list[EditSpan]) -> None:
-        self._pending = spans
-        if not spans:
-            self._hide_panel()
-            return
-        if not self._settings.get("live_preview", {}).get("enabled", True):
-            self._hide_panel()
-            return
+    def _ensure_panel(self) -> LiveSuggestionPanel:
         panel = self._panel
         if panel is None:
             panel = LiveSuggestionPanel()
             panel.apply_requested.connect(self._apply_one)
             panel.apply_all_requested.connect(self._apply_all)
             panel.dismissed.connect(self._hide_panel)
+            panel.dismiss_requested.connect(self._on_dismiss)
+            panel.dragging_started.connect(self._pause_polling)
+            panel.dragging_finished.connect(self._resume_polling)
+            panel.dragging_finished.connect(self._on_panel_dragged)
             apply_nonactivating_panel(panel)
             self._panel = panel
-        was_visible = panel.isVisible()
-        panel.set_spans(spans)
-        panel.show()
-        if not was_visible:
+        return panel
+
+    def _place_panel(self, panel: LiveSuggestionPanel) -> None:
+        """Position the panel: the user's last dragged spot wins."""
+        if self._remembered_pos is not None:
+            panel.place_at(self._remembered_pos)
+            self._last_anchor = self._remembered_pos
+        else:
             anchor = self._anchor_point()
             self._last_anchor = anchor
             panel.place_near(anchor)
-            panel.pop_in()
+        panel.pop_in()
+
+    def _show_result(
+        self, spans: list[EditSpan], clean_when_empty: bool = True
+    ) -> None:
+        filtered = self._filter_dismissed(spans)
+        self._pending = filtered
+        if not filtered:
+            if clean_when_empty and not spans:
+                self._show_clean_panel()
+            else:
+                self._hide_panel()
+            return
+        if not self._settings.get("live_preview", {}).get("enabled", True):
+            self._hide_panel()
+            return
+        panel = self._ensure_panel()
+        was_visible = panel.isVisible()
+        panel.set_spans(filtered)
+        panel.show()
+        if not was_visible:
+            self._place_panel(panel)
         self._install_escape_monitor()
+
+    def _show_clean_panel(self) -> None:
+        """Gently confirm that the selected text needs no changes."""
+        panel = self._ensure_panel()
+        was_visible = panel.isVisible()
+        panel.set_clean()
+        panel.show()
+        if not was_visible:
+            self._place_panel(panel)
+        self._install_escape_monitor()
+        if self._clean_timer is None:
+            self._clean_timer = QTimer(self)
+            self._clean_timer.setSingleShot(True)
+            self._clean_timer.timeout.connect(self._hide_panel)
+        self._clean_timer.start(CLEAN_PANEL_MS)
+
+    def _filter_dismissed(
+        self, spans: list[EditSpan]
+    ) -> list[EditSpan]:
+        """Drop session-dismissed suggestions (even from the cache)."""
+        if not self._dismissed:
+            return spans
+        return [
+            span
+            for span in spans
+            if (span.before, span.after) not in self._dismissed
+        ]
+
+    def _on_dismiss(self, index: int) -> None:
+        """'Don't suggest this again' for one suggestion row."""
+        if not (0 <= index < len(self._pending)):
+            return
+        span = self._pending.pop(index)
+        self._dismissed.add((span.before, span.after))
+        _debug_log(f"LIVE DISMISS: {span.before!r} -> {span.after!r}")
+        if not self._pending:
+            self._hide_panel()
+            return
+        panel = self._panel
+        if panel is not None:
+            panel.set_spans(self._pending)
+            panel.show()
+
+    # --- drag handling ---
+
+    def _pause_polling(self) -> None:
+        """Freeze the poll while the user drags the panel.
+
+        The poll runs heavy AX/AppleScript reads on the UI thread, which
+        makes drags stutter; suspending it keeps movement smooth.
+        """
+        if self._timer is not None and self._timer.isActive():
+            self._drag_paused_poll = True
+            self._timer.stop()
+        else:
+            self._drag_paused_poll = False
+
+    def _resume_polling(self) -> None:
+        if self._drag_paused_poll and self._timer is not None:
+            self._timer.start()
+        self._drag_paused_poll = False
+
+    def _on_panel_dragged(self) -> None:
+        """Remember where the user put the panel for the next time."""
+        if self._panel is not None:
+            self._remembered_pos = QPoint(self._panel.pos())
 
     def _anchor_point(self) -> QPoint:
         """Anchor the panel at the selection when bounds exist, else cursor."""
@@ -797,6 +892,8 @@ class LivePreviewService(QObject):
     def _hide_panel(self) -> None:
         self._pending = []
         self._remove_escape_monitor()
+        if self._clean_timer is not None:
+            self._clean_timer.stop()
         if self._panel is not None:
             stop_pop = getattr(self._panel, "stop_pop", None)
             if stop_pop is not None:
@@ -868,22 +965,12 @@ class LivePreviewService(QObject):
         instant feedback the moment the provider call starts; the panel is
         rebuilt with the real suggestions when the result arrives.
         """
-        panel = self._panel
-        if panel is None:
-            panel = LiveSuggestionPanel()
-            panel.apply_requested.connect(self._apply_one)
-            panel.apply_all_requested.connect(self._apply_all)
-            panel.dismissed.connect(self._hide_panel)
-            apply_nonactivating_panel(panel)
-            self._panel = panel
+        panel = self._ensure_panel()
         if panel.isVisible():
             return
         panel.set_checking()
         panel.show()
-        anchor = self._anchor_point()
-        self._last_anchor = anchor
-        panel.place_near(anchor)
-        panel.pop_in()
+        self._place_panel(panel)
         self._install_escape_monitor()
 
     # --- undo ---

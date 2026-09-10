@@ -395,6 +395,9 @@ class WordSuggestionCard(QWidget):
     apply_requested = pyqtSignal(int)
     apply_all_requested = pyqtSignal()
     dismissed = pyqtSignal()
+    dismiss_requested = pyqtSignal(int)
+    dragging_started = pyqtSignal()
+    dragging_finished = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__(
@@ -467,6 +470,7 @@ class WordSuggestionCard(QWidget):
                     event.globalPosition().toPoint()
                     - self.frameGeometry().topLeft()
                 )
+                self.dragging_started.emit()
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -483,6 +487,7 @@ class WordSuggestionCard(QWidget):
             self._dragging = False
             # Keep the manually placed panel inside the screen it sits on.
             self.move(_clamp_rect(self.frameGeometry(), self.pos()).topLeft())
+            self.dragging_finished.emit()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -664,7 +669,16 @@ class WordSuggestionCard(QWidget):
             apply_btn.clicked.connect(
                 lambda _checked=False, i=index: self.apply_requested.emit(i)
             )
+            dismiss_btn = QPushButton("×")
+            dismiss_btn.setFixedSize(24, 24)
+            dismiss_btn.setStyleSheet(CLOSE_BUTTON)
+            dismiss_btn.setToolTip("Don't suggest this again")
+            dismiss_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            dismiss_btn.clicked.connect(
+                lambda _checked=False, i=index: self.dismiss_requested.emit(i)
+            )
             row.addWidget(diff_box, 1)
+            row.addWidget(dismiss_btn, 0, Qt.AlignmentFlag.AlignTop)
             row.addWidget(apply_btn, 0, Qt.AlignmentFlag.AlignTop)
             body_layout.addLayout(row)
             if span.reason:
@@ -714,6 +728,58 @@ class WordSuggestionCard(QWidget):
             point.x() + 14, point.y() + 14, self.width(), self.height()
         )
         self.move(_clamp_rect(target, point).topLeft())
+
+    def place_at(self, point: QPoint) -> None:
+        """Place the panel exactly at a remembered top-left position."""
+        target = QRect(point.x(), point.y(), self.width(), self.height())
+        self.move(_clamp_rect(target, point).topLeft())
+
+    def set_clean(self) -> None:
+        """Show the card in a gentle 'no changes needed' state."""
+        layout = self.layout()
+        if layout is None:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(18, 14, 18, 16)
+            layout.setSpacing(0)
+        else:
+            clear_layout(layout)
+        self._diff_labels = []
+
+        header_widget = QWidget()
+        header_widget.setCursor(Qt.CursorShape.OpenHandCursor)
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(0, 2, 0, 2)
+        header.setSpacing(8)
+        title = QLabel("Suggested changes")
+        title.setStyleSheet(TITLE_SHEET)
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(26, 26)
+        close_btn.setStyleSheet(CLOSE_BUTTON)
+        close_btn.setToolTip("Close (Esc)")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.dismissed.emit)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(close_btn)
+        self._header_widget = header_widget
+        layout.addWidget(header_widget)
+        layout.addWidget(_hairline())
+        layout.addSpacing(12)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        check = QLabel("✓")
+        check.setStyleSheet(
+            "color: #137333; font-size: 16px; font-weight: 700;"
+        )
+        message = QLabel("No changes needed — your writing is clean.")
+        message.setStyleSheet("color: #5F6368; font-size: 13px;")
+        message.setWordWrap(True)
+        row.addWidget(check, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(message, 1)
+        layout.addLayout(row)
+        layout.addSpacing(4)
+        self.adjustSize()
 
 
 LiveSuggestionPanel = WordSuggestionCard

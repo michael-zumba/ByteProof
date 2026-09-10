@@ -1118,7 +1118,7 @@ def test_card_rebuild_leaves_exactly_one_of_each_control():
     ]
     assert buttons.count("Apply") == 2
     assert buttons.count("Apply all") == 1
-    assert buttons.count("×") == 1
+    assert buttons.count("×") == 1 + len(spans)  # close + row dismissals
     assert len(titles) == 1
     assert titles[0] == "Suggested changes (2)"
 
@@ -2792,3 +2792,136 @@ def test_close_hides_to_tray_with_first_time_hint(monkeypatch):
         assert len(toasts) == 1  # hint only on the first close
     finally:
         window.close()
+
+
+# --- clean panel, dismiss, drag smoothness, position memory ---
+
+
+def test_service_shows_clean_panel_when_no_changes(monkeypatch):
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _FakeEditor("com.apple.TextEdit", "a perfect sentence")
+    editor.ax_bounds_for_range = lambda *a: []
+    monkeypatch.setattr(service, "_editor", editor)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    # Simulate the worker replying with no edits.
+    result = {"status": "ok", "edits": [], "meta": {"provider": "fake"}}
+    service._on_done(result, "key", "a perfect sentence")
+    assert service._panel is not None and service._panel.isVisible()
+    from PyQt6.QtWidgets import QLabel
+
+    labels = [
+        label.text()
+        for label in service._panel.findChildren(QLabel)
+    ]
+    assert any("No changes needed" in text for text in labels)
+    assert service._clean_timer is not None
+    assert service._clean_timer.isActive()  # auto-fades after a moment
+
+
+def test_service_dismiss_removes_suggestion_and_persists(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    spans = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("go", "goes", "Grammar", 10, 12),
+    ]
+    service._pending = list(spans)
+    service._on_dismiss(0)
+    assert [(s.before, s.after) for s in service._pending] == [
+        ("go", "goes")
+    ]
+    # The dismissed pair must never come back, even via the cache.
+    service._show_result(list(spans), clean_when_empty=False)
+    assert [(s.before, s.after) for s in service._pending] == [
+        ("go", "goes")
+    ]
+
+
+def test_card_emits_drag_signals():
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
+
+    card = WordSuggestionCard()
+    card.set_spans([EditSpan("teh", "the", "Spelling", 0, 3)])
+    card.move(100, 100)
+    recorded = []
+    card.dragging_started.connect(lambda: recorded.append("start"))
+    card.dragging_finished.connect(lambda: recorded.append("end"))
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(40, 20),
+        QPointF(140, 120),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    card.mousePressEvent(press)
+    assert recorded == ["start"]
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        QPointF(40, 20),
+        QPointF(140, 120),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    card.mouseReleaseEvent(release)
+    assert recorded == ["start", "end"]
+
+
+def test_service_pauses_polling_while_dragging():
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service.start()
+    assert service._timer.isActive()
+    service._pause_polling()
+    assert not service._timer.isActive()
+    service._resume_polling()
+    assert service._timer.isActive()
+    # When the poll was already stopped, resuming must not restart it.
+    service._timer.stop()
+    service._pause_polling()
+    service._resume_polling()
+    assert not service._timer.isActive()
+    service.stop()
+
+
+def test_service_remembers_panel_position_after_drag():
+    from PyQt6.QtCore import QPoint
+
+    from src.live_overlay import WordSuggestionCard
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    card = WordSuggestionCard()
+    card.set_spans([])
+    service._panel = card
+    card.move(200, 200)
+    service._on_panel_dragged()
+    assert service._remembered_pos == QPoint(200, 200)
+    service._place_panel(card)
+    # The remembered spot is used, clamped to the screen's usable area.
+    from PyQt6.QtCore import QRect
+
+    from src.live_overlay import _clamp_rect
+
+    expected = _clamp_rect(
+        QRect(200, 200, card.width(), card.height()), QPoint(200, 200)
+    ).topLeft()
+    # pop_in animates the geometry from a shrunk rect; the remembered
+    # position drives the animation's final target.
+    assert card._pop_target is not None
+    assert card._pop_target.topLeft() == expected
