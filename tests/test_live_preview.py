@@ -1551,9 +1551,10 @@ def test_apply_one_reports_sync_failure_instead_of_silent_close(monkeypatch):
     service.apply_done.connect(messages.append)
     monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
     service._apply_one(0)
-    assert messages == [
-        "Could not verify the selection — please try again."
-    ]
+    # The message now names the app and says what to do about it.
+    assert len(messages) == 1
+    assert "TextEdit" in messages[0]
+    assert "changed before the edit was applied" in messages[0]
 
 
 def test_apply_edits_to_text_applies_spans_right_to_left():

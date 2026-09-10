@@ -462,6 +462,28 @@ class GenericTextEditor:
             return self._win_selection(target)
         return ""
 
+    def get_selection_by_copy(
+        self, target: dict[str, Any], attempts: int = 2
+    ) -> str:
+        """Read the selection with a real Cmd+C (clipboard restored).
+
+        Web views (Safari, Chrome) can answer the Accessibility selection
+        query with an empty string even while a selection exists. A copy is
+        authoritative, so it is used to verify a selection before refusing an
+        apply.
+        """
+        if SYSTEM != "Darwin":
+            return ""
+        return GenericTextEditor._mac_copy_selection(
+            target.get("pid") or 0,
+            target.get("name") or "",
+            max_attempts=max(1, attempts),
+        )
+
+    def invalidate_ax_element(self, pid: int) -> None:
+        """Forget the cached Accessibility element for an app."""
+        _ax_element_cache.pop(pid, None)
+
     def get_selection_info(
         self, target: dict[str, Any]
     ) -> tuple[str, str, str]:

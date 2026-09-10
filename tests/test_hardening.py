@@ -909,3 +909,113 @@ def test_system_events_paste_fallback_uses_an_existing_helper(monkeypatch):
     assert ok is True
     assert activated  # the target was activated and the keystroke sent
     service.stop()
+
+
+# --- browser applies: AX can return empty while the selection is intact ------
+
+
+def _browser_service(ax_text: str, copied: str):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    applied: list[tuple[int, int, str]] = []
+    invalidated: list[int] = []
+
+    class SafariEditor:
+        def selection_details(self, target):
+            # Safari answers the AX query with an empty string here.
+            return {
+                "text": ax_text,
+                "range": (0, 21) if ax_text else None,
+                "context_before": "",
+                "context_after": "",
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+        def get_selection_by_copy(self, target, attempts=2):
+            return copied
+
+        def invalidate_ax_element(self, pid):
+            invalidated.append(pid)
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            applied.append((start, length, new))
+            return True, "Applied."
+
+    service._editor = SafariEditor()
+    service._pending = [EditSpan("sometimes", "sometimes,", "Punctuation", 8, 9)]
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 22297,
+        "name": "Safari",
+    }
+    service._selection_text = "Also check the log. sometimes "
+    service._seen_text = "Also check the log. sometimes "
+    service._selection_start = 0
+    service._selection_has_range = True
+    service._selection_is_word = False
+    return service, applied, invalidated
+
+
+def test_sync_verifies_by_copy_when_ax_returns_empty(monkeypatch):
+    """The Safari failure: AX empty at apply time, selection actually intact."""
+    service, applied, invalidated = _browser_service(
+        ax_text="", copied="Also check the log. sometimes "
+    )
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_one(0)
+
+    assert applied == [(8, 1, "sometimes,")]  # the edit went through
+    assert messages == ["Applied."]
+    assert invalidated  # the stale AX element was dropped and re-read
+    service.stop()
+
+
+def test_sync_refuses_when_the_copy_shows_a_different_selection(monkeypatch):
+    service, applied, _ = _browser_service(
+        ax_text="", copied="a completely different selection"
+    )
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_one(0)
+
+    assert applied == []  # nothing was written
+    assert messages and "Safari" in messages[0]
+    service.stop()
+
+
+def test_sync_message_explains_an_unreadable_selection(monkeypatch):
+    service, applied, _ = _browser_service(ax_text="", copied="")
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_one(0)
+
+    assert applied == []
+    assert messages == [
+        (
+            "Could not read the selection in Safari. Click into the text, "
+            "select it again, and press Apply."
+        )
+    ]
+    service.stop()

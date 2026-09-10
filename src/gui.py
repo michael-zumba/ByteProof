@@ -3988,12 +3988,18 @@ class ProofreaderApp(QMainWindow):
             self._app_event_filter_installed = False
         
         self._update_proofread_button()
+        # Network-backed startup work is skipped when running offscreen (the
+        # test suite): it cannot succeed there and its TLS worker threads made
+        # the process unstable.
+        self._offscreen_run = offscreen
         QTimer.singleShot(500, self.check_api_keys)
         QTimer.singleShot(600, self._sync_launch_at_login)
         QTimer.singleShot(1200, self._check_trial_status_at_startup)
-        QTimer.singleShot(1800, self._validate_license_at_startup)
+        if not self._offscreen_run:
+            QTimer.singleShot(1800, self._validate_license_at_startup)
         QTimer.singleShot(2500, self._run_cache_cleanup)
-        QTimer.singleShot(3000, self._check_for_app_updates)
+        if not getattr(self, "_offscreen_run", False):
+            QTimer.singleShot(3000, self._check_for_app_updates)
 
     def _copy_corrected_text(self) -> None:
         if not self.last_corrected:

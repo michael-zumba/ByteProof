@@ -876,6 +876,17 @@ class LivePreviewService(QObject):
         try:
             details = self._editor.selection_details(self._selection_target)
             text = details.get("text") or ""
+            if not text:
+                # Web views re-render constantly: the element cached a moment
+                # ago may no longer hold the selection. Drop it and re-read
+                # once with a freshly discovered element before giving up.
+                invalidate = getattr(self._editor, "invalidate_ax_element", None)
+                if callable(invalidate):
+                    invalidate(self._selection_target.get("pid") or 0)
+                    details = self._editor.selection_details(
+                        self._selection_target
+                    )
+                    text = details.get("text") or ""
             start = (details.get("range") or (0, 0))[0] or 0
             return str(text), int(start), 0
         except Exception:
@@ -894,20 +905,75 @@ class LivePreviewService(QObject):
         it produced spurious "could not verify" toasts.
         """
         state = self._read_selection_state()
-        if state is None:
-            return False, "selection read failed"
-        text, start, end = state
-        if text != self._selection_text:
+        read_text = state[0] if state is not None else ""
+        if read_text == self._selection_text and state is not None:
+            self._selection_start = state[1]
+            self._selection_end = state[2] if self._selection_is_word else 0
+            return True, "ok"
+
+        # The re-read came back empty or different. In browsers the AX query
+        # often returns nothing while the selection is perfectly intact, so
+        # before refusing, ask the app itself: a real copy of the selection is
+        # authoritative and the clipboard is restored straight afterwards.
+        if not read_text and not self._selection_is_word:
+            copied = self._read_selection_by_copy()
+            if copied and copied == self._selection_text:
+                if state is not None:
+                    self._selection_start = state[1]
+                    self._selection_end = (
+                        state[2] if self._selection_is_word else 0
+                    )
+                _debug_log("LIVE SYNC: verified the selection by copy")
+                return True, "ok"
+            if copied:
+                _debug_log(
+                    "LIVE SYNC: copy read differs from the previewed selection"
+                )
+                return (
+                    False,
+                    (
+                        "selection changed: previewed="
+                        f"{_redact(self._selection_text)} "
+                        f"now={_redact(copied)}"
+                    ),
+                )
+            _debug_log("LIVE SYNC: selection unreadable (AX and copy both empty)")
+            return False, "selection could not be read"
+
+        return (
+            False,
+            (
+                f"selection changed: previewed={_redact(self._selection_text)} "
+                f"now={_redact(read_text)}"
+            ),
+        )
+
+    def _sync_failure_message(self, reason: str) -> str:
+        """Explain a failed selection check in terms the user can act on."""
+        app = self._selection_target.get("name") or "that app"
+        if reason == "selection could not be read":
             return (
-                False,
-                (
-                    f"selection changed: previewed={self._selection_text[:30]!r} "
-                    f"now={text[:30]!r}"
-                ),
+                f"Could not read the selection in {app}. Click into the text, "
+                "select it again, and press Apply."
             )
-        self._selection_start = start
-        self._selection_end = end if self._selection_is_word else 0
-        return True, "ok"
+        if reason.startswith("selection changed"):
+            return (
+                f"The selection in {app} changed before the edit was applied. "
+                "Select the text again to get fresh suggestions."
+            )
+        return "Could not verify the selection — please try again."
+
+    def _read_selection_by_copy(self) -> str:
+        """Read the live selection with a real copy (clipboard preserved)."""
+        reader = getattr(self._editor, "get_selection_by_copy", None)
+        try:
+            if callable(reader):
+                return str(reader(self._selection_target) or "")
+            return str(
+                self._editor.get_selection_light(self._selection_target) or ""
+            )
+        except Exception:
+            return ""
 
     def _sync_after_apply(self, expected: str) -> bool:
         """After an apply, keep state only when the selection still covers
@@ -1565,9 +1631,7 @@ class LivePreviewService(QObject):
         if not sync_ok:
             _debug_log(f"LIVE APPLY SYNC FAIL: {sync_reason}")
             self._hide_panel()
-            self.apply_done.emit(
-                "Could not verify the selection — please try again."
-            )
+            self.apply_done.emit(self._sync_failure_message(sync_reason))
             return
         span = self._pending[index]
         ok, message, abs_start = self._apply_abs(
@@ -1655,9 +1719,7 @@ class LivePreviewService(QObject):
         if not sync_ok:
             _debug_log(f"LIVE APPLY ALL SYNC FAIL: {sync_reason}")
             self._hide_panel()
-            self.apply_done.emit(
-                "Could not verify the selection — please try again."
-            )
+            self.apply_done.emit(self._sync_failure_message(sync_reason))
             return
         total = len(self._pending)
         applied = 0
