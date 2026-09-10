@@ -497,3 +497,40 @@ Hotkeys, Proofreading Style, Proofreading Settings - with a one-line subtitle
 and muted helper text under the live controls (naming the real hotkeys), under
 Track Changes, under the hotkey list, and under the temperature slider. The
 Word options moved out of the mixed "Preferences" card into their own.
+
+## Checkpoint (2.0.2-beta.12) — Live Check menu, per-app triggers, cleaner pages
+
+Three owner requests.
+
+### Naming
+The feature is **Live Check** in the interface: short, familiar next to Word's
+spell check, and it no longer reads as a beta experiment. The settings key
+stays `live_preview`, so nothing migrates.
+
+### Live Check is its own top-level menu (after General)
+It holds everything about the feature, mirroring Automation's fold/unfold:
+
+- master switch;
+- **Show Apps** folds out the per-app trigger list - the apps ByteProof knows
+  about (Word, Mail, Outlook, Pages, TextEdit, Notes, Chrome, Safari, Edge,
+  ChatGPT), each with a checkbox, plus **Add App…** (chooses from the apps
+  running right now) and an **Allow other apps** fallback;
+- **Suggestions**: style, minimum words, wait after selecting, prefer local AI;
+- **Hotkeys**: turn Live Check on/off, apply all suggestions.
+
+Engine: `live_preview.app_rules` maps an app identifier (bundle id, name
+fragment, or `"*"` for everything else) to enabled/disabled; an empty map keeps
+the previous behaviour (every app). `evaluate_trigger` returns `app_disabled`
+for an excluded app, which the poll logs once rather than every tick.
+
+### General page: explanations moved into ⓘ tooltips
+New `info_icon()` / `labelled_with_info()` helpers put the rationale on hover
+instead of as paragraphs of grey text. Converted: Track Changes, the
+temperature slider, the proofreading settings rows (spelling, style, comment
+type, context) and the hotkey fields. General now reads as five clean cards:
+App & Window, Microsoft Word, Hotkeys, Proofreading Style, Proofreading
+Settings.
+
+### Fold state
+`_toggle_live_apps` tracks its state explicitly: `isVisible()` is always False
+while a page is not the one on screen, which inverted the toggle.
