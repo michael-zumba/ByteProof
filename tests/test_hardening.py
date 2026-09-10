@@ -905,7 +905,7 @@ def test_system_events_paste_fallback_uses_an_existing_helper(monkeypatch):
         generic_editing, "_mac_system_events_key", lambda key, name: activated.append(key)
     )
 
-    ok, message = service._paste_via_system_events("corrected text")
+    ok, _message = service._paste_via_system_events("corrected text")
     assert ok is True
     assert activated  # the target was activated and the keystroke sent
     service.stop()
