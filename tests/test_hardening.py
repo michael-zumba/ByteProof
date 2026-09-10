@@ -1432,3 +1432,82 @@ def test_mail_apply_refuses_with_an_actionable_message_when_unreadable(
     assert pasted == []
     assert messages and "Mail" in messages[0] and "select it again" in messages[0]
     service.stop()
+
+
+# --- suggestions only after a real selection --------------------------------
+
+
+def test_short_selections_never_trigger_a_preview() -> None:
+    from src.live_preview import evaluate_trigger
+
+    settings = {"live_preview": {"enabled": True, "max_chars": 1500}}
+    target = {"bundle_id": "com.apple.mail", "name": "Mail"}
+
+    def decide(text: str) -> str:
+        return evaluate_trigger(settings, target, text, True, True, False, False)[0]
+
+    assert decide("hi") == "too_short"          # one word
+    assert decide("two words") == "too_short"   # two words
+    assert decide("ok thanks") == "too_short"
+    assert decide("three words here") == "run"  # a few words is enough
+    assert decide("Please check this sentence.") == "run"
+
+
+def test_minimum_words_is_configurable() -> None:
+    from src.live_preview import evaluate_trigger
+
+    settings = {"live_preview": {"enabled": True, "max_chars": 1500, "min_words": 5}}
+    target = {"bundle_id": "com.apple.mail", "name": "Mail"}
+    assert evaluate_trigger(settings, target, "four short words only", True, True, False, False)[0] == "too_short"
+    assert evaluate_trigger(settings, target, "five short words are here", True, True, False, False)[0] == "run"
+
+
+def _gesture_service(*, idle: float, mouse_up: float):
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+
+    class ProbeEditor:
+        def idle_seconds(self):
+            return idle
+
+        def mouse_up_seconds(self):
+            return mouse_up
+
+    service._editor = ProbeEditor()
+    return service
+
+
+def test_clipboard_read_only_after_a_selection_gesture(monkeypatch):
+    """No Command-C while the user types or reads: it flashes the Edit menu."""
+    # Just finished dragging a selection -> read.
+    service = _gesture_service(idle=0.4, mouse_up=0.3)
+    assert service._selection_gesture_seen() is True
+    service.stop()
+
+    # Mid-typing, no mouse-up, no settle -> do not read.
+    service = _gesture_service(idle=0.2, mouse_up=30.0)
+    assert service._selection_gesture_seen() is False
+    service.stop()
+
+    # User stopped interacting -> one read (catches keyboard selections)...
+    service = _gesture_service(idle=2.0, mouse_up=30.0)
+    assert service._selection_gesture_seen() is True
+    # ...and only one per interaction burst.
+    assert service._selection_gesture_seen() is False
+    service.stop()
+
+
+def test_clipboard_read_allowed_again_after_the_user_returns(monkeypatch):
+    service = _gesture_service(idle=2.0, mouse_up=30.0)
+    assert service._selection_gesture_seen() is True
+    assert service._selection_gesture_seen() is False
+    # The user starts working again, then pauses: allowed once more.
+    service._editor.idle_seconds = lambda: 0.1
+    assert service._selection_gesture_seen() is False
+    service._editor.idle_seconds = lambda: 2.0
+    assert service._selection_gesture_seen() is True
+    service.stop()

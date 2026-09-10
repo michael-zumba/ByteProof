@@ -58,6 +58,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QStackedWidget,
     QStyle,
     QSystemTrayIcon,
@@ -1465,6 +1466,24 @@ class SettingsDialog(QDialog):
         delay_row.addWidget(self.live_delay_slider)
         delay_row.addWidget(self.live_delay_label)
         live_layout.addLayout(delay_row)
+
+        words_row = QHBoxLayout()
+        words_label = QLabel("Suggest only for")
+        self.live_min_words_spin = QSpinBox()
+        self.live_min_words_spin.setRange(1, 10)
+        self.live_min_words_spin.setValue(
+            int(self.settings.get("live_preview", {}).get("min_words", 3))
+        )
+        self.live_min_words_spin.setToolTip(
+            "Selections shorter than this are ignored, so a stray word or two "
+            "never triggers a suggestion."
+        )
+        words_suffix = QLabel("words or more")
+        words_row.addWidget(words_label)
+        words_row.addWidget(self.live_min_words_spin)
+        words_row.addWidget(words_suffix)
+        words_row.addStretch()
+        live_layout.addLayout(words_row)
 
         self.chk_live_local = QCheckBox(
             "Prefer Local AI for live suggestions (saves cloud tokens)"
@@ -3584,6 +3603,9 @@ class SettingsDialog(QDialog):
         )
         self.settings["live_preview"]["max_chars"] = int(
             self.settings.get("live_preview", {}).get("max_chars", 1500)
+        )
+        self.settings["live_preview"]["min_words"] = int(
+            self.live_min_words_spin.value()
         )
         self.settings["live_preview"]["use_local_model"] = (
             self.chk_live_local.isChecked()

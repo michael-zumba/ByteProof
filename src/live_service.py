@@ -51,6 +51,12 @@ MAIL_COMPOSE_CHECK_INTERVAL_S = 5.0
 # How long the Undo pill stays available after an apply.
 # Live suggestions respect the same entitlement as the manual flow. The
 # entitlement check is cached so the 350 ms poll never reads licence files.
+# A clipboard read posts Command-C, which makes the app's Edit menu flash.
+# It is therefore only attempted when the user has just made a selection:
+# within this window after a mouse-up, or once after they stop interacting.
+SELECTION_MOUSE_WINDOW_S = 1.2
+SELECTION_IDLE_SETTLE_S = 1.2
+USER_ACTIVE_WINDOW_S = 0.6
 ACCESS_CACHE_TTL_S = 30.0
 # After a refusal, do not re-check on every selection change.
 ACCESS_RETRY_S = 60.0
@@ -186,6 +192,7 @@ class LivePreviewService(QObject):
         self._selection_has_range = True
         self._last_clipboard_read_at = 0.0
         self._clipboard_empty_streak = 0
+        self._idle_read_done = False
         self._last_clipboard_text = ""
         self._last_clipboard_target: dict[str, Any] = {}
         self._last_permission_ok: bool | None = None
@@ -352,13 +359,20 @@ class LivePreviewService(QObject):
                 self._last_clipboard_read_at = now
                 try:
                     # pyright: ignore[reportPrivateUsage]
+                    # One keystroke normally; a second strategy only when a
+                    # mouse selection was just made, where a miss would mean
+                    # no panel at all for that selection.
+                    mouse_reader = getattr(
+                        self._editor, "mouse_up_seconds", None
+                    )
+                    just_selected = bool(
+                        callable(mouse_reader)
+                        and mouse_reader() <= SELECTION_MOUSE_WINDOW_S
+                    )
                     copied = self._editor._mac_copy_selection(
                         target.get("pid") or 0,
                         target.get("name") or "",
-                        # Mail ignores a process-targeted copy now and then;
-                        # one retry keeps the panel appearing. The read is
-                        # already throttled, so the extra attempt is rare.
-                        max_attempts=2,
+                        max_attempts=2 if just_selected else 1,
                     )
                 except Exception:
                     copied = ""
@@ -610,9 +624,49 @@ class LivePreviewService(QObject):
         )
         if now - self._last_clipboard_read_at < interval:
             return False
+        if not self._selection_gesture_seen():
+            return False
         if bundle == "com.apple.mail":
             return self._mail_is_composing(target)
         return bool(details.get("found"))
+
+    def _selection_gesture_seen(self) -> bool:
+        """Whether it is worth posting Command-C to find out.
+
+        Reading a clipboard-only selection costs a keystroke, and macOS flashes
+        the app's Edit menu for it. So the read happens only when the user has
+        just finished a mouse selection, or once after they stop interacting
+        (which also catches keyboard selections) - never in a steady loop while
+        they type or read.
+        """
+        idle_reader = getattr(self._editor, "idle_seconds", None)
+        mouse_reader = getattr(self._editor, "mouse_up_seconds", None)
+        if not callable(idle_reader) or not callable(mouse_reader):
+            # No activity information available: keep the previous behaviour.
+            return True
+        idle = idle_reader()
+        mouse_up = mouse_reader()
+        if idle is None and mouse_up is None:
+            # The OS would not report input activity; do not silently disable
+            # the fallback for apps whose selection can only be read by copy.
+            return True
+        active = idle is not None and idle < USER_ACTIVE_WINDOW_S
+        if active:
+            # The user is working again: re-arm the "one read after they stop"
+            # allowance for this burst of activity.
+            self._idle_read_done = False
+        if mouse_up is not None and mouse_up <= SELECTION_MOUSE_WINDOW_S:
+            _debug_log("LIVE CLIPBOARD: read after a mouse selection")
+            return True
+        if (
+            idle is not None
+            and idle >= SELECTION_IDLE_SETTLE_S
+            and not self._idle_read_done
+        ):
+            self._idle_read_done = True
+            _debug_log("LIVE CLIPBOARD: read after the user stopped interacting")
+            return True
+        return False
 
     def _context_is_editable(
         self,

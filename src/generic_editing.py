@@ -497,6 +497,45 @@ class GenericTextEditor:
         except Exception:
             return ""
 
+    @staticmethod
+    def idle_seconds() -> float | None:
+        """Seconds since the last keyboard or mouse input, system-wide.
+
+        Used to tell "the user is working" from "the user is reading", so the
+        clipboard-reading fallback does not fire in the background.
+        """
+        try:
+            import Quartz
+
+            return float(
+                Quartz.CGEventSourceSecondsSinceLastEventType(
+                    Quartz.kCGEventSourceStateCombinedSessionState,
+                    Quartz.kCGAnyInputEventType,
+                )
+            )
+        except Exception:
+            return None  # unknown: callers fall back to their old behaviour
+
+    @staticmethod
+    def mouse_up_seconds() -> float | None:
+        """Seconds since the last left-button mouse-up.
+
+        Finishing a drag (or a double-click) is the clearest signal that the
+        user just made a selection, which is the only moment a clipboard read
+        is worth its side effect (posting Command-C flashes the Edit menu).
+        """
+        try:
+            import Quartz
+
+            return float(
+                Quartz.CGEventSourceSecondsSinceLastEventType(
+                    Quartz.kCGEventSourceStateCombinedSessionState,
+                    Quartz.kCGEventLeftMouseUp,
+                )
+            )
+        except Exception:
+            return None  # unknown
+
     def get_selection_by_copy(
         self, target: dict[str, Any], attempts: int = 2
     ) -> str:

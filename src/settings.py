@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.0.2-beta.7"
+APP_VERSION = "2.0.2-beta.8"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -322,6 +322,9 @@ def load_runtime_settings() -> dict[str, Any]:
         "live_preview": {
             "enabled": True,
             "delay_ms": 600,
+            # Suggestions appear only for selections of at least this many
+            # words, so a stray word or two never pings the model.
+            "min_words": 3,
             "max_chars": 1500,
             "use_local_model": True,
             "style": "strict",

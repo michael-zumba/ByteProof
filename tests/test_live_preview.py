@@ -95,7 +95,7 @@ def test_evaluate_trigger_disabled():
     decision, reason = evaluate_trigger(
         _settings(enabled=False),
         {"bundle_id": "com.apple.TextEdit"},
-        "hello world",
+        "hello world again",
         True,
         True,
         False,
@@ -109,7 +109,7 @@ def test_evaluate_trigger_unchanged_selection_skips():
     decision, _ = evaluate_trigger(
         _settings(),
         {"bundle_id": "com.apple.TextEdit"},
-        "hello world",
+        "hello world again",
         True,
         True,
         False,
@@ -122,7 +122,7 @@ def test_evaluate_trigger_any_app_with_selection_runs():
     decision, _ = evaluate_trigger(
         _settings(),
         {"bundle_id": "com.example.random"},
-        "hello world",
+        "hello world again",
         True,
         True,
         False,
@@ -135,7 +135,7 @@ def test_evaluate_trigger_skips_byteproof_itself():
     decision, _ = evaluate_trigger(
         _settings(),
         {"bundle_id": "com.bytemind.byteproof", "name": "ByteProof"},
-        "hello world",
+        "hello world again",
         True,
         True,
         False,
@@ -292,7 +292,7 @@ def test_preview_edits_once_prefers_active_provider_when_configured(monkeypatch)
     status, edits, meta = logic.preview_edits_once(
         settings,
         {"bundle_id": "com.apple.TextEdit"},
-        "hello world",
+        "hello world again",
         "",
         "",
     )
@@ -327,7 +327,7 @@ def test_preview_edits_once_parses_empty_reply_as_no_edits(monkeypatch):
             },
         },
         {"bundle_id": "com.apple.TextEdit"},
-        "hello world",
+        "hello world again",
         "",
         "",
     )
@@ -807,6 +807,7 @@ def test_load_runtime_settings_includes_live_preview_defaults(monkeypatch, tmp_p
         "enabled": True,
         "delay_ms": 600,
         "max_chars": 1500,
+        "min_words": 3,
         "use_local_model": True,
         "style": "strict",
     }
@@ -2141,7 +2142,7 @@ def test_preview_edits_once_defaults_to_strict(monkeypatch):
     _status, _edits, meta = logic.preview_edits_once(
         settings,
         {"bundle_id": "com.apple.TextEdit"},
-        "hello world",
+        "hello world again",
         "",
         "",
     )

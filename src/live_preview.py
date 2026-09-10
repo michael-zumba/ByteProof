@@ -35,6 +35,10 @@ MIN_DELAY_MS = 400
 MAX_DELAY_MS = 2000
 DEFAULT_MAX_CHARS = 1500
 MIN_PREVIEW_CHARS = 8
+# A selection must also be a few words long before suggestions appear:
+# a stray word or two is usually just a cursor placement, and pinging the
+# model for it wastes tokens and interrupts the user.
+MIN_PREVIEW_WORDS = 3
 CONTEXT_CHARS = 200
 PREVIEW_MAX_OUTPUT_TOKENS = 512
 PREVIEW_MAX_EDITS = 12
@@ -364,6 +368,7 @@ def settings_fingerprint(settings: dict[str, Any]) -> str:
             "enabled": live.get("enabled", True),
             "delay_ms": live.get("delay_ms", DEFAULT_DELAY_MS),
             "max_chars": live.get("max_chars", DEFAULT_MAX_CHARS),
+            "min_words": int(live.get("min_words", MIN_PREVIEW_WORDS)),
             "use_local_model": live.get("use_local_model", True),
             "style": live.get("style", "strict"),
         },
@@ -408,6 +413,12 @@ def evaluate_trigger(
     if length < MIN_PREVIEW_CHARS:
         return "too_short", (
             f"Selection is shorter than {MIN_PREVIEW_CHARS} characters."
+        )
+    min_words = int(live.get("min_words", MIN_PREVIEW_WORDS))
+    words = len([word for word in selected_text.split() if word.strip()])
+    if words < min_words:
+        return "too_short", (
+            f"Selection is shorter than {min_words} words."
         )
     max_chars = int(live.get("max_chars", DEFAULT_MAX_CHARS))
     if length > max_chars:
