@@ -8,7 +8,7 @@ import threading
 import time
 import webbrowser
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 from PyQt6.QtCore import (
     QEvent,
@@ -1728,10 +1728,12 @@ class SettingsDialog(QDialog):
     # Apps offered as one-click rows on the Live Check page. Anything else can
     # be added from the running apps.
     LIVE_CHECK_KNOWN_APPS = (
-        ("com.microsoft.word", "Microsoft Word"),
-        ("com.apple.mail", "Apple Mail"),
-        ("com.microsoft.outlook", "Microsoft Outlook"),
-        ("com.apple.pages", "Apple Pages"),
+        ("com.microsoft.Word", "Microsoft Word"),
+        ("com.apple.mail", "Mail"),
+        ("com.microsoft.Outlook", "Microsoft Outlook"),
+        # Pages' real identifier is camel-cased; "com.apple.pages" resolves to
+        # nothing, which is why its icon was missing.
+        ("com.apple.iWork.Pages", "Pages"),
         ("com.apple.TextEdit", "TextEdit"),
         ("com.apple.Notes", "Notes"),
         ("com.google.Chrome", "Google Chrome"),
@@ -1739,6 +1741,14 @@ class SettingsDialog(QDialog):
         ("com.microsoft.edgemac", "Microsoft Edge"),
         ("com.openai.chat", "ChatGPT"),
     )
+
+    # Identifiers written by earlier builds, mapped to the real bundle ids.
+    APP_ID_ALIASES: ClassVar[dict[str, str]] = {
+        "com.apple.pages": "com.apple.iWork.Pages",
+        "com.apple.iwork.pages": "com.apple.iWork.Pages",
+        "com.microsoft.word": "com.microsoft.Word",
+        "com.microsoft.outlook": "com.microsoft.Outlook",
+    }
 
     def init_live_check_tab(self) -> None:
         """Live Check: everything about automatic suggestions in one place."""
@@ -2030,6 +2040,17 @@ class SettingsDialog(QDialog):
         rules = self.settings.get("live_preview", {}).get("app_rules", {})
         if not isinstance(rules, dict):
             rules = {}
+        # Carry the state of identifiers written by earlier builds over to the
+        # real bundle id, so no stale row is left behind.
+        normalised: dict[str, bool] = {}
+        for key, value in rules.items():
+            marker = str(key)
+            canonical = self.APP_ID_ALIASES.get(marker.lower(), marker)
+            if canonical != marker and marker not in normalised:
+                normalised.setdefault(canonical, bool(value))
+            elif canonical == marker:
+                normalised[marker] = bool(value)
+        rules = normalised
         entries: list[tuple[str, str]] = list(self.LIVE_CHECK_KNOWN_APPS)
         for key in rules:
             marker = str(key)
@@ -2512,6 +2533,14 @@ class SettingsDialog(QDialog):
         self.automation_list.setCurrentItem(item)
 
     def _installed_apps_for_trigger(self) -> list[dict[str, Any]]:
+        cached = getattr(self, "_installed_apps_cache", None)
+        if cached is not None:
+            return cached
+        result = self._scan_installed_apps()
+        self._installed_apps_cache = result
+        return result
+
+    def _scan_installed_apps(self) -> list[dict[str, Any]]:
         if platform.system() == "Darwin":
             return self._mac_installed_apps()
         try:
@@ -2570,12 +2599,26 @@ class SettingsDialog(QDialog):
                 )
         return sorted(apps.values(), key=lambda app: app["name"].lower())
 
-    @staticmethod
-    def _app_icon(app: dict[str, Any]) -> QIcon:
+    def _app_icon(self, app: dict[str, Any]) -> QIcon:
         path = ""
         try:
             if app.get("path") and os.path.exists(app["path"]):
                 return QFileIconProvider().icon(QFileInfo(app["path"]))
+            # A known app may be listed with a different identifier spelling
+            # than the installed bundle (that is how Pages lost its icon), so
+            # match against what is actually installed first.
+            wanted_id = str(app.get("bundle_id") or "").strip().lower()
+            wanted_name = str(app.get("name") or "").strip().lower()
+            if wanted_id or wanted_name:
+                for installed in self._installed_apps_for_trigger():
+                    found_id = str(installed.get("bundle_id") or "").lower()
+                    found_name = str(installed.get("name") or "").lower()
+                    if (wanted_id and found_id == wanted_id) or (
+                        wanted_name and found_name == wanted_name
+                    ):
+                        found_path = str(installed.get("path") or "")
+                        if found_path and os.path.exists(found_path):
+                            return QFileIconProvider().icon(QFileInfo(found_path))
             if platform.system() == "Darwin":
                 bundle_id = app.get("bundle_id") or ""
                 if bundle_id:

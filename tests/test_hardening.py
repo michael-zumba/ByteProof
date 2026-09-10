@@ -1105,7 +1105,7 @@ def test_deepseek_config_uses_the_canonical_model_name() -> None:
 # --- settings sidebar: one entry point per page -----------------------------
 
 
-def _make_settings_dialog():
+def _make_settings_dialog(settings: dict | None = None):
     """Build a SettingsDialog with an owner that outlives the assertions.
 
     A parentless dialog is destroyed by the garbage collector at an
@@ -1119,7 +1119,10 @@ def _make_settings_dialog():
 
     app = QApplication.instance() or QApplication([])
     owner = QWidget()
-    dialog = SettingsDialog(settings_mod.load_runtime_settings(), owner)
+    dialog = SettingsDialog(
+        settings if settings is not None else settings_mod.load_runtime_settings(),
+        owner,
+    )
     return app, owner, dialog
 
 
@@ -2099,3 +2102,68 @@ def test_copy_uses_the_app_command_when_a_selection_exists(monkeypatch):
     assert text == "selected text"
     assert fake.copy.pressed == 1, "the app's own Copy command was used"
     assert posted == [], "no key equivalent was posted"
+
+
+def test_live_check_known_apps_use_real_bundle_ids() -> None:
+    """Pages is com.apple.iWork.Pages; the lower-case form resolved to nothing,
+    which is why its icon was missing."""
+    from src.gui import SettingsDialog
+
+    ids = [bundle for bundle, _ in SettingsDialog.LIVE_CHECK_KNOWN_APPS]
+    assert "com.apple.iWork.Pages" in ids
+    assert "com.apple.pages" not in ids
+    assert "com.microsoft.Word" in ids
+    # Every entry has a display name.
+    assert all(name.strip() for _, name in SettingsDialog.LIVE_CHECK_KNOWN_APPS)
+
+
+def test_every_installed_app_row_has_an_icon() -> None:
+    import os
+
+    from PyQt6.QtCore import Qt
+
+    app, owner, dialog = _make_settings_dialog()
+    missing: list[str] = []
+    for index in range(dialog.live_apps_list.count()):
+        item = dialog.live_apps_list.item(index)
+        bundle = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        icon = dialog._app_icon({"bundle_id": bundle, "name": item.text()})
+        if icon.isNull():
+            # Only a problem when the app really is installed here.
+            path = dialog._app_icon  # noqa: F841  (kept for readability)
+            installed = any(
+                str(entry.get("bundle_id", "")).lower() == bundle.lower()
+                and os.path.exists(str(entry.get("path") or ""))
+                for entry in dialog._installed_apps_for_trigger()
+            )
+            if installed:
+                missing.append(bundle)
+    assert missing == [], f"rows without an icon: {missing}"
+    _dispose(dialog, owner, app)
+
+
+def test_saved_pages_identifier_is_migrated() -> None:
+    """An older build saved 'com.apple.pages'; the row must not linger."""
+    from PyQt6.QtCore import Qt
+
+    from src import settings as settings_mod
+
+    loaded = settings_mod.load_runtime_settings()
+    loaded.setdefault("live_preview", {})["app_rules"] = {
+        "com.apple.pages": False,
+        "com.microsoft.word": True,
+    }
+    app, owner, dialog = _make_settings_dialog(loaded)
+    markers = [
+        str(dialog.live_apps_list.item(i).data(Qt.ItemDataRole.UserRole))
+        for i in range(dialog.live_apps_list.count())
+    ]
+    assert "com.apple.pages" not in markers
+    assert "com.apple.iWork.Pages" in markers
+
+    # The saved off state carried over to the real identifier.
+    for index in range(dialog.live_apps_list.count()):
+        item = dialog.live_apps_list.item(index)
+        if item.data(Qt.ItemDataRole.UserRole) == "com.apple.iWork.Pages":
+            assert item.checkState() == Qt.CheckState.Unchecked
+    _dispose(dialog, owner, app)
