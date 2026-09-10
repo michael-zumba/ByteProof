@@ -1,5 +1,10 @@
 # ByteProof full-app review & improvement roadmap
 
+**Status (2026-09-10):** implemented in `2.0.2-beta.1` — see the checkpoint at
+`docs/aegis/work/2026-09-09-live-proofread-preview/20-checkpoint.md` and the
+section *Implementation status* at the end of this document for what shipped
+and what is deliberately deferred.
+
 **Date:** 2026-09-10 · **Version reviewed:** `2.0.1-beta.2` · **Method:** full read-only
 sweep of `src/` (~18k lines) by the owner's agent plus five parallel subsystem
 reviewers (engine, live preview, UI/UX, Word/platform, business/security), with
@@ -555,3 +560,35 @@ citation checks · §6.3 edit reports · §5.6 dark mode and accessibility.
     no action is proposed.
 - Two findings were verified by executing the code in the review environment: the
   version-comparison table in §2.1 and the plaintext API keys in §1.4.
+
+
+---
+
+## Implementation status (2.0.2-beta.1)
+
+Shipped:
+
+- §1.1 developer-email path removed (local configuration only), §1.2 update
+  download verification (host allowlist + SHA-256), §1.3 live panel respects
+  the paywall, §1.4 keychain-ready secret handling (0600 + atomic writes, log
+  redaction), §1.5 revoked-licence fix.
+- §2.1 pre-release-aware version comparison (beta builds now see releases),
+  §2.2 Track-Changes restore on error paths, §2.3 AppleScript timeout and real
+  Word diagnostics, §2.4 Word live-edit guards + Windows implementation,
+  §2.5 guarded stacked undo, §2.6 clipboard-restore race fixed, §2.7 secure
+  fields, parameterized AX write hardened.
+- §4.1 truncated replies refused, §4.2 reviewer-comment cleaning, §4.3 prompt
+  loading and similarity measurement.
+- §5.2 License/Updates sidebar pages, §5.5 full-contrast review diff, plus
+  window-geometry persistence and honest Windows live-settings state.
+- §7.1 CI runs tests/lint/version checks, pinned dependencies.
+
+Deferred (each needs a decision or a larger change):
+
+- §3.1 moving the 350 ms AX poll off the GUI thread (timeouts and bounded
+  waits remove the worst freezes in the meantime).
+- §5.1 per-suggestion review queue, §5.3 onboarding checklist, §5.6 dark mode
+  and accessibility metadata.
+- §6.1 Windows live preview (now unblocked: `apply_live_edit` exists for
+  Windows), §6.2 document-level compliance/citation checks, §6.4 managed cloud
+  credits, §6.5 opt-in telemetry.

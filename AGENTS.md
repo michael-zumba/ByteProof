@@ -21,4 +21,15 @@ Durable state lives in `docs/aegis/` (intent, checkpoints, evidence) and
 
 Versioning rule: every update, however minor, bumps `APP_VERSION` in
 `src/settings.py` and mirrors it in `version_info.txt`, so testers can
-always tell they are on the latest build.
+always tell they are on the latest build. `scripts/check_version.py` verifies
+the two agree (CI runs it); `tools/bump_version.py` updates both and skips the
+public update feed for pre-releases. Name a beta after the next release line
+(`2.0.2-beta.1`), never after a version that is already public
+(`2.0.1-beta.N` sorts below the released `2.0.1`).
+
+Licensing rule (do not regress): **no public value may unlock the app.**
+`DEVELOPER_EMAILS` ships empty; developer access requires explicit local
+configuration on the machine — `scripts/dev_access.py add <email>` writes
+`dev-access.json` in the support folder (or set `BYTEPROOF_DEV_EMAILS`).
+Customers activate with Polar keys only, and `byteproof://` links must stay
+confirmed by the user before they activate anything.

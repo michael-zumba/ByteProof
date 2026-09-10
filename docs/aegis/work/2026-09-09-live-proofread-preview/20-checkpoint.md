@@ -147,3 +147,52 @@ was refused every time. `AXSelectedText` writes are ignored by that app.
   several suggestions).
 - If range confirmation still fails there, consider per-app full-selection
   paste fallback (Mail/Pages path) — needs an owner decision on the UX.
+
+## Checkpoint (2.0.2-beta.1) — full-app review fixes implemented
+
+Implements the 2026-09-10 review (`docs/aegis/plans/2026-09-10-codebase-review-roadmap.md`).
+256 tests pass; the suite now runs in CI on macOS and Windows with lint and a
+version-consistency check.
+
+### Security / licensing
+- The public support address is no longer a master key. `DEVELOPER_EMAILS`
+  ships empty; developer access needs explicit local configuration
+  (`dev-access.json` via `scripts/dev_access.py`, or `BYTEPROOF_DEV_EMAILS`).
+  Verified: the owner's machine is licensed through **Polar**, so this cannot
+  affect their access.
+- `byteproof://` activation asks the user to confirm the key first.
+- Revoked licences are detected again (`validate_license_remote` returns
+  `ok=False`; the handler tested a `valid` key that never existed).
+- `settings.json` and `license.json` are written atomically with `0600`.
+- `capture.log` records lengths and digests instead of document text.
+
+### Update path
+- Beta builds are offered later releases: `2.0.1-beta.2 < 2.0.1 < 2.0.2`.
+  Because the old numbering (`2.0.1-beta.N`) sorts below the released `2.0.1`,
+  this beta is numbered **2.0.2-beta.1** so testers are not told to "update"
+  to the older release.
+- Downloads are restricted to GitHub/ByteMind hosts over https and verified
+  against a published SHA-256 when the feed provides one.
+- The startup update notice is a toast, not a modal; the modal update dialog
+  can no longer re-enter itself from its nested event loop (this was a real
+  hang that the version fix exposed).
+
+### Document safety
+- Word: AppleScript timeout, Track-Changes restored on error paths, guarded and
+  read-back-verified live edits, Windows `apply_live_edit` implemented,
+  comments verified before pasting, diagnostics in `capture.log`.
+- Live preview: guarded undo with a bounded stack, clipboard restored only
+  after the paste is observed, secure fields skipped, paywall respected,
+  dismissal sticky, parameterized AX write converted to UTF-16 and verified.
+- Engine: truncated replies are refused instead of auto-applied; entitlement is
+  checked before any local model download; the local output cap fits the
+  server context.
+
+### Not done (deliberately deferred, needs a decision or a larger change)
+- Moving the 350 ms AX poll off the GUI thread (large refactor; the timeouts
+  and bounded waits remove the worst freezes for now).
+- Windows live preview (macOS-only engine; `apply_live_edit` now exists so the
+  port is unblocked).
+- Accessibility metadata/i18n, dark mode, per-suggestion review queue in the
+  main window, document-level compliance checks, managed cloud credits,
+  opt-in telemetry.
