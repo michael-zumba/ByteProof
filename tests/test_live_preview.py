@@ -1579,6 +1579,7 @@ def test_ax_replace_range_browser_uses_paste_not_ax_write(monkeypatch):
         kAXValueAttribute = "value"
         value = "the cat sat"
         set_attr_calls: ClassVar[list[str]] = []
+        last_range: ClassVar[tuple] = (0, 0)
 
         @staticmethod
         def AXIsProcessTrusted():
@@ -1586,6 +1587,7 @@ def test_ax_replace_range_browser_uses_paste_not_ax_write(monkeypatch):
 
         @staticmethod
         def AXValueCreate(kind, v):
+            FakeAS.last_range = v
             return v
 
         @staticmethod
@@ -1597,6 +1599,8 @@ def test_ax_replace_range_browser_uses_paste_not_ax_write(monkeypatch):
         def AXUIElementCopyAttributeValue(el, attr, out):
             if attr == FakeAS.kAXValueAttribute:
                 return 0, FakeAS.value
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, FakeAS.last_range
             return 0, ""
 
     monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
@@ -1651,6 +1655,7 @@ def test_ax_replace_range_falls_back_to_paste_when_write_unverified(monkeypatch)
         kAXValueAttribute = "value"
         value = "zzz cat sat"  # the AX write never reaches the value
         set_attr_calls: ClassVar[list[str]] = []
+        last_range: ClassVar[tuple] = (0, 0)
 
         @staticmethod
         def AXIsProcessTrusted():
@@ -1658,6 +1663,7 @@ def test_ax_replace_range_falls_back_to_paste_when_write_unverified(monkeypatch)
 
         @staticmethod
         def AXValueCreate(kind, v):
+            FakeAS.last_range = v
             return v
 
         @staticmethod
@@ -1669,6 +1675,8 @@ def test_ax_replace_range_falls_back_to_paste_when_write_unverified(monkeypatch)
         def AXUIElementCopyAttributeValue(el, attr, out):
             if attr == FakeAS.kAXValueAttribute:
                 return 0, FakeAS.value
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, FakeAS.last_range
             return 0, ""
 
     monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
@@ -3077,3 +3085,139 @@ def test_hide_panel_resumes_polling_after_lost_drag():
     service._hide_panel()
     assert service._timer.isActive()
     service.stop()
+
+
+# --- apply safety for apps that ignore range writes (Codex/ChatGPT) ---
+
+
+def test_ax_replace_range_refuses_paste_when_range_not_confirmed(monkeypatch):
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, v):
+            return v
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, v):
+            return 0  # claims success
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, "the cat sat"
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, (999, 1)  # the app ignores the range write
+            return 0, ""
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    posted = []
+    monkeypatch.setattr(
+        "src.generic_editing._post_mac_key", lambda code, pid: posted.append(code)
+    )
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, _message = editor.ax_replace_range(
+        {"pid": 9, "name": "ChatGPT", "bundle_id": "com.openai.chat"},
+        0,
+        3,
+        "da",  # differs from the existing text at the range
+        allow_direct_paste=False,
+    )
+    assert ok is False  # never paste into an unconfirmed range
+    assert posted == []
+
+
+def test_ax_replace_range_does_not_retry_after_document_changed(monkeypatch):
+    from typing import ClassVar
+
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+        value = "the cat sat"
+        last_range: ClassVar[tuple] = (0, 0)
+        paste_count = 0
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, v):
+            FakeAS.last_range = v
+            return v
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, v):
+            return 0
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, FakeAS.value
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, FakeAS.last_range
+            return 0, ""
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+
+    def fake_post(code, pid):
+        FakeAS.paste_count += 1
+        # The paste lands somewhere unexpected: the range itself changed.
+        FakeAS.value = "xhe cat sat"
+
+    monkeypatch.setattr("src.generic_editing._post_mac_key", fake_post)
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+    system_events = []
+    monkeypatch.setattr(
+        "src.generic_editing._mac_system_events_key",
+        lambda key, name: system_events.append(key),
+    )
+
+    editor = GenericTextEditor()
+    ok, _message = editor.ax_replace_range(
+        {"pid": 9, "name": "ChatGPT", "bundle_id": "com.openai.chat"},
+        0,
+        3,
+        "changed",
+        allow_direct_paste=False,
+    )
+    assert ok is False
+    assert FakeAS.paste_count == 1
+    assert system_events == []  # a second paste could only corrupt further

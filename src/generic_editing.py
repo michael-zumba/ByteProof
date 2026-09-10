@@ -91,6 +91,11 @@ def _verify_range_write(
                     and value[start : start + len(new_text)] == new_text
                 ):
                     return "ok"
+                _debug_log(
+                    "ax_replace_range verify: value slice "
+                    f"{value[start : start + len(new_text)][:40]!r} "
+                    f"expected {new_text[:40]!r}"
+                )
         except Exception:
             continue
     selection_readable = False
@@ -105,6 +110,10 @@ def _verify_range_write(
                 if got == new_text or new_text in got:
                     return "ok"
                 if got:
+                    _debug_log(
+                        "ax_replace_range verify: selected text "
+                        f"{got[:40]!r} expected {new_text[:40]!r}"
+                    )
                     return "mismatch"
         except Exception:
             continue
@@ -1009,10 +1018,11 @@ class GenericTextEditor:
         ):
             elements.append(alt_focused)
 
-        def _set_range(el: Any) -> int:
+        def _set_range(el: Any) -> tuple[int | None, int | None]:
             # The service works in code points, but the app expects UTF-16
             # code units for its range attribute. Convert before writing so
-            # pastes land exactly where intended (emoji-safe).
+            # pastes land exactly where intended (emoji-safe). Returns the
+            # written (start, length) on success, (None, None) on failure.
             cu_start = start
             cu_end = start + length
             try:
@@ -1031,11 +1041,14 @@ class GenericTextEditor:
             param = AS.AXValueCreate(
                 AS.kAXValueTypeCFRange, (cu_start, cu_end - cu_start)
             )
-            return int(
+            err = int(
                 AS.AXUIElementSetAttributeValue(
                     el, AS.kAXSelectedTextRangeAttribute, param
                 )
             )
+            if err != 0:
+                return None, None
+            return cu_start, cu_end - cu_start
 
         def _set_text(el: Any) -> int:
             return int(
@@ -1080,9 +1093,9 @@ class GenericTextEditor:
         if not is_browser:
             for el in elements:
                 try:
-                    err = _set_range(el)
-                    if err != 0:
-                        _debug_log(f"ax_replace_range set-range err={err}")
+                    cu_start, _cu_len = _set_range(el)
+                    if cu_start is None:
+                        _debug_log("ax_replace_range set-range failed")
                         continue
                     err = _set_text(el)
                     if err != 0:
@@ -1104,21 +1117,62 @@ class GenericTextEditor:
                         f"ax_replace_range attribute fallback error: {exc}"
                     )
 
-        # 3. Clipboard paste over the sub-range. Only safe when the range can
-        #    be selected first, or when the span covers the whole selection.
-        #    For browsers this is the primary (and only reliable) route.
+        # 3. Clipboard paste over the sub-range — only when it is safe:
+        #    the range must actually become selected (some apps silently
+        #    ignore range writes), and the document must still hold the
+        #    original text at that range, so a paste can never land on
+        #    partially modified content.
+        def _range_slice() -> str | None:
+            for el in elements:
+                try:
+                    err, value = AS.AXUIElementCopyAttributeValue(
+                        el, AS.kAXValueAttribute, None
+                    )
+                    if err == 0 and isinstance(value, str):
+                        return value[start : start + length]
+                except Exception:
+                    continue
+            return None
+
+        def _range_confirmed(el: Any, cu_start: int, cu_len: int) -> bool:
+            try:
+                err, rv = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXSelectedTextRangeAttribute, None
+                )
+                if err != 0 or rv is None:
+                    return False
+                loc, ln = _parse_ax_range(rv)
+                return loc == cu_start and ln == cu_len
+            except Exception:
+                return False
+
+        old_text = _range_slice()
+        if old_text is not None:
+            _debug_log(
+                f"ax_replace_range: range holds {old_text[:40]!r} before apply"
+            )
+
         range_ok = False
         for el in elements:
             try:
-                if _set_range(el) == 0:
+                cu_start, cu_len = _set_range(el)
+                if cu_start is not None and _range_confirmed(el, cu_start, cu_len):
                     range_ok = True
                     break
             except Exception:
                 continue
         if not range_ok and not allow_direct_paste:
             _debug_log(
-                "ax_replace_range: cannot select sub-range and span does not "
-                "cover the selection; giving up"
+                "ax_replace_range: cannot confirm the sub-range selection "
+                "and the span does not cover the whole selection; giving up"
+            )
+            return False, "Could not apply the edit in this app."
+
+        current = _range_slice()
+        if old_text is not None and current is not None and current != old_text:
+            _debug_log(
+                "ax_replace_range: range no longer holds the original text "
+                f"({current[:40]!r}); refusing to paste"
             )
             return False, "Could not apply the edit in this app."
 
@@ -1134,14 +1188,25 @@ class GenericTextEditor:
             verdict = _verify_range_write(AS, elements, start, new_text)
             _log_paste_verdict(verdict, new_text)
             if verdict == "mismatch" and range_ok:
-                # Some apps ignore process-targeted events; retry through
-                # System Events keystrokes (pasting over the same range is
-                # idempotent, so a retry cannot duplicate text).
-                _debug_log("ax_replace_range: retrying paste via System Events")
-                _mac_system_events_key("v", target.get("name") or "")
-                time.sleep(0.4)
-                verdict = _verify_range_write(AS, elements, start, new_text)
-                _log_paste_verdict(verdict, new_text)
+                # A retry is only safe while the range still holds the
+                # ORIGINAL text — if the document changed at all, a second
+                # paste would land on shifted content and corrupt it.
+                still_original = _range_slice()
+                if still_original == old_text:
+                    _debug_log(
+                        "ax_replace_range: retrying paste via System Events"
+                    )
+                    _mac_system_events_key("v", target.get("name") or "")
+                    time.sleep(0.4)
+                    verdict = _verify_range_write(
+                        AS, elements, start, new_text
+                    )
+                    _log_paste_verdict(verdict, new_text)
+                else:
+                    _debug_log(
+                        "ax_replace_range: range changed after paste "
+                        f"({still_original!r}); refusing retry"
+                    )
             if verdict == "ok":
                 return True, "Applied."
             if verdict == "unreadable":
