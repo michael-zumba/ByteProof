@@ -1298,3 +1298,137 @@ def test_sync_brings_the_target_app_forward_before_verifying(monkeypatch):
     assert applied == [(8, 1, "sometimes,")]
     assert messages == ["Applied."]
     service.stop()
+
+
+# --- Mail (macOS): clipboard-only selections --------------------------------
+
+
+def _mail_service(*, read_sequence, corrected_text, pasted):
+    """A Mail-like editor: no AX text, selections read by copy."""
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    reads = {"n": 0, "texts": list(read_sequence)}
+    original = "Everything else stays where it belongs: "
+
+    class MailEditor:
+        def get_selection_by_copy(self, target, attempts=3):
+            index = min(reads["n"], len(reads["texts"]) - 1)
+            reads["n"] += 1
+            return reads["texts"][index]
+
+        def get_selection_light(self, target):
+            return ""
+
+        def replace_selection(self, target, new_text):
+            pasted.append(new_text)
+            return False, "Could not confirm the paste — please check the document."
+
+        def activate(self, target):
+            return True
+
+        def frontmost_app(self):
+            return {"bundle_id": "com.apple.mail", "pid": 9, "name": "Mail"}
+
+        def running_apps(self):
+            return [{"pid": 9, "bundle_id": "com.apple.mail"}]
+
+    service._editor = MailEditor()
+    service._pending = [EditSpan("belongs:", "belongs.", "Punctuation", 0, 8)]
+    service._selection_target = {
+        "bundle_id": "com.apple.mail",
+        "pid": 9,
+        "name": "Mail",
+    }
+    service._selection_text = original
+    service._seen_text = original
+    service._selection_start = 0
+    service._selection_has_range = False
+    service._selection_is_word = False
+    service._corrected_probe = corrected_text
+    return service, pasted, reads
+
+
+def test_mail_apply_retries_a_flaky_clipboard_read(monkeypatch):
+    """Mail ignores a process-targeted copy now and then; do not give up."""
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    service, pasted, _reads = _mail_service(
+        read_sequence=["", "Everything else stays where it belongs: ", "Everything else stays where it belongs: "],
+        corrected_text="Everything else stays where it belongs. ",
+        pasted=[],
+    )
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert pasted, "the apply must go ahead once the read succeeds"
+    service.stop()
+
+
+def test_mail_paste_is_not_repeated_when_it_already_landed(monkeypatch):
+    """A failed confirmation must not trigger a second paste (duplication)."""
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    corrected = "Everything else stays where it belongs. "
+    service, pasted, _reads = _mail_service(
+        # read 1: the pre-apply check; read 2: the paste-evidence check.
+        read_sequence=["Everything else stays where it belongs: ", corrected],
+        corrected_text=corrected,
+        pasted=[],
+    )
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert len(pasted) == 1, "a second paste would duplicate the paragraph"
+    assert messages and messages[0].startswith("Applied")
+    service.stop()
+
+
+def test_mail_paste_retries_when_the_text_is_provably_unchanged(monkeypatch):
+    original = "Everything else stays where it belongs: "
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    service, pasted, _reads = _mail_service(
+        # read 1: pre-apply; read 2: evidence says nothing was pasted.
+        read_sequence=[original, original, original],
+        corrected_text="Everything else stays where it belongs. ",
+        pasted=[],
+    )
+    fallbacks: list[str] = []
+    monkeypatch.setattr(
+        service,
+        "_paste_via_system_events",
+        lambda text: (fallbacks.append(text), (True, "Applied via system paste."))[1],
+    )
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert len(pasted) == 1, "the first paste attempt still happened"
+    assert fallbacks, "an unchanged selection proves the first paste did nothing"
+    service.stop()
+
+
+def test_mail_apply_refuses_with_an_actionable_message_when_unreadable(
+    monkeypatch,
+):
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    service, pasted, _reads = _mail_service(
+        read_sequence=["", ""],
+        corrected_text="Everything else stays where it belongs. ",
+        pasted=[],
+    )
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert pasted == []
+    assert messages and "Mail" in messages[0] and "select it again" in messages[0]
+    service.stop()

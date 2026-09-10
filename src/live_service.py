@@ -355,7 +355,10 @@ class LivePreviewService(QObject):
                     copied = self._editor._mac_copy_selection(
                         target.get("pid") or 0,
                         target.get("name") or "",
-                        max_attempts=1,
+                        # Mail ignores a process-targeted copy now and then;
+                        # one retry keeps the panel appearing. The read is
+                        # already throttled, so the extra attempt is rare.
+                        max_attempts=2,
                     )
                 except Exception:
                     copied = ""
@@ -1039,12 +1042,17 @@ class LivePreviewService(QObject):
         except Exception:
             return ""
 
-    def _read_selection_by_copy(self) -> str:
-        """Read the live selection with a real copy (clipboard preserved)."""
+    def _read_selection_by_copy(self, attempts: int = 3) -> str:
+        """Read the live selection with a real copy (clipboard preserved).
+
+        All copy strategies are tried: Mail ignores a process-targeted
+        Command-C intermittently, and the global one works once the app has
+        been brought forward.
+        """
         reader = getattr(self._editor, "get_selection_by_copy", None)
         try:
             if callable(reader):
-                return str(reader(self._selection_target) or "")
+                return str(reader(self._selection_target, attempts) or "")
             return str(
                 self._editor.get_selection_light(self._selection_target) or ""
             )
@@ -1871,10 +1879,15 @@ class LivePreviewService(QObject):
         )
         state = self._read_selection_state()
         if state is None:
+            # Mail/Pages selections are read through the clipboard, and Mail
+            # ignores a process-targeted copy now and then. Retry with the
+            # other strategies before refusing.
+            state = self._read_full_selection_with_retries()
+        if state is None:
             _debug_log("LIVE FULL APPLY: selection read failed")
             self._hide_panel()
             self.apply_done.emit(
-                "Could not verify the selection — please try again."
+                self._sync_failure_message("selection could not be read")
             )
             return
         if state[0] != self._seen_text:
@@ -1895,7 +1908,19 @@ class LivePreviewService(QObject):
         )
         _debug_log(f"LIVE FULL APPLY: replace ok={ok} message={message!r}")
         if not ok:
-            ok, message = self._paste_via_system_events(corrected)
+            # A failed confirmation is NOT proof that nothing was pasted: apps
+            # like Mail expose no text to verify against. Ask the app what the
+            # selection holds now, and only paste again when the text shows the
+            # first attempt really did nothing - a second paste over a
+            # collapsed selection would duplicate the paragraph.
+            evidence = self._paste_evidence(corrected)
+            _debug_log(f"LIVE FULL APPLY: paste evidence={evidence}")
+            if evidence == "applied":
+                ok, message = True, "Applied all suggestions to the selection."
+            elif evidence == "not_applied":
+                ok, message = self._paste_via_system_events(corrected)
+            else:
+                ok, message = True, "Applied — please check the document."
         if ok:
             self._arm_undo(
                 {
@@ -1908,6 +1933,33 @@ class LivePreviewService(QObject):
             message = self._verify_full_apply(corrected)
         self.apply_done.emit(message)
         self._hide_panel()
+
+    def _read_full_selection_with_retries(
+        self, attempts: int = 3
+    ) -> tuple[str, int, int] | None:
+        """Read a clipboard-only selection (Mail, Pages) with retries."""
+        for _ in range(attempts):
+            text = self._read_selection_by_copy()
+            if text:
+                return text, 0, 0
+            time.sleep(0.12)
+        return None
+
+    def _paste_evidence(self, corrected: str) -> str:
+        """What the selection holds after a paste: applied/not_applied/unknown.
+
+        A real copy is the only trustworthy signal for apps that expose no
+        Accessibility text. "unknown" deliberately blocks a retry: pasting a
+        second time could duplicate the paragraph.
+        """
+        current = self._read_selection_by_copy()
+        if not current:
+            return "unknown"
+        if current.strip() == corrected.strip():
+            return "applied"
+        if current.strip() == (self._selection_text or "").strip():
+            return "not_applied"
+        return "unknown"
 
     def _paste_via_system_events(self, corrected: str) -> tuple[bool, str]:
         """Second paste attempt through System Events keystrokes.
@@ -1946,7 +1998,9 @@ class LivePreviewService(QObject):
         """Read the selection back and report honestly."""
         try:
             time.sleep(0.2)
-            got = self._editor.get_selection_light(self._selection_target)
+            got = self._read_selection_by_copy() or self._editor.get_selection_light(
+                self._selection_target
+            )
             if got and got.strip() == corrected.strip():
                 _debug_log("LIVE FULL APPLY: verified")
                 return "Applied all suggestions to the selection."
