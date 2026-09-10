@@ -630,7 +630,7 @@ class _MutableEditor(_FakeEditor):
             "role": "AXTextArea",
         }
 
-    def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
+    def ax_replace_range(self, target, start, length, new, allow_direct_paste=False, before_text=None):
         self.applied.append((start, length, new))
         return True, "Applied."
 
@@ -679,7 +679,7 @@ def test_service_applies_one_suggestion_through_ax(monkeypatch):
                 "context_after": "",
             }
 
-        def ax_replace_range(self, target, start, length, text, allow_direct_paste=False):
+        def ax_replace_range(self, target, start, length, text, allow_direct_paste=False, before_text=None):
             applied.append((start, length, text))
             return True, "Applied."
 
@@ -716,7 +716,7 @@ def test_service_apply_all_applies_each_suggestion_with_delta(monkeypatch):
                 "context_after": "",
             }
 
-        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
+        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False, before_text=None):
             applied.append((start, length, new))
             return True, "Applied."
 
@@ -839,7 +839,7 @@ def test_service_full_cycle_with_fake_provider(monkeypatch):
     editor.applied = []
     editor.ax_bounds_for_range = lambda target, start, length: [editor.rects[0]]
 
-    def replace(target, start, length, text, allow_direct_paste=False):
+    def replace(target, start, length, text, allow_direct_paste=False, before_text=None):
         editor.applied.append((start, length, text))
         return True, "Applied."
 
@@ -1046,7 +1046,7 @@ def test_apply_one_shifts_and_keeps_remaining(monkeypatch):
                 "context_after": "",
             }
 
-        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
+        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False, before_text=None):
             self.applied.append((start, length, new))
             self.text = self.text[:start] + new + self.text[start + length :]
             return True, "Applied."
@@ -1265,7 +1265,7 @@ def test_service_apply_all_reports_partial_failure(monkeypatch):
                 "context_after": "",
             }
 
-        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False):
+        def ax_replace_range(self, target, start, length, new, allow_direct_paste=False, before_text=None):
             if self.fail_next:
                 self.fail_next = False
                 return False, "Could not apply."
@@ -2148,7 +2148,13 @@ def test_apply_one_arms_undo_and_undo_restores(monkeypatch):
             }
 
         def ax_replace_range(
-            self, target, start, length, text, allow_direct_paste=False
+            self,
+            target,
+            start,
+            length,
+            text,
+            allow_direct_paste=False,
+            before_text=None,
         ):
             applied.append((start, length, text))
             return True, "Applied."
@@ -3031,7 +3037,7 @@ def test_ax_replace_range_sets_range_in_utf16_units(monkeypatch):
         @staticmethod
         def AXUIElementCopyAttributeValue(el, attr, out):
             if attr == FakeAS.kAXValueAttribute:
-                return 0, "a😀xx yy"
+                return 0, "ab😀xxy"  # code points 3..5 are "xx"
             if attr == FakeAS.kAXSelectedTextAttribute:
                 return 0, "xx"
             return 1, None
@@ -3065,6 +3071,7 @@ def test_ax_replace_range_sets_range_in_utf16_units(monkeypatch):
         2,
         "xx",
         allow_direct_paste=False,
+        before_text="xx",
     )
     assert ok is True and message == "Applied."
     # The range passed to the app must be UTF-16 units (4, 2), because the
@@ -3221,3 +3228,320 @@ def test_ax_replace_range_does_not_retry_after_document_changed(monkeypatch):
     assert ok is False
     assert FakeAS.paste_count == 1
     assert system_events == []  # a second paste could only corrupt further
+
+
+def test_ax_replace_range_waits_for_async_range_application(monkeypatch):
+    """ChatGPT applies range writes asynchronously: the first readback still
+    shows the old range, but the write lands a moment later. The apply must
+    wait for it instead of giving up."""
+    from typing import ClassVar
+
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+        value = "the cat sat"
+        last_range: ClassVar[tuple] = (0, 0)
+        range_reads = 0
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, v):
+            FakeAS.last_range = v
+            return v
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, v):
+            return 0
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, FakeAS.value
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                FakeAS.range_reads += 1
+                if FakeAS.range_reads >= 2:
+                    return 0, FakeAS.last_range  # applied on the second read
+                return 0, (999, 1)  # first readback still shows the old range
+            return 0, ""
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    posted = []
+
+    def fake_post(code, pid):
+        posted.append(code)
+        FakeAS.value = "dax cat sat"  # the paste lands on the range
+
+    monkeypatch.setattr("src.generic_editing._post_mac_key", fake_post)
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "ChatGPT", "bundle_id": "com.openai.chat"},
+        0,
+        3,
+        "dax",
+        allow_direct_paste=False,
+        before_text="the",
+    )
+    assert ok is True and message == "Applied."
+    assert posted == [9]  # the paste landed after the async range arrived
+
+
+def test_ax_replace_range_confirms_async_range_via_selected_text(monkeypatch):
+    """When an app never reflects the range attribute but does move its
+    selection, a selected-text match on the original span confirms it."""
+    from typing import ClassVar
+
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+        value = "the cat sat"
+        last_range: ClassVar[tuple] = (0, 0)
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, v):
+            FakeAS.last_range = v
+            return v
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, v):
+            return 0
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, FakeAS.value
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, (999, 1)  # the range readback never updates
+            if attr == FakeAS.kAXSelectedTextAttribute:
+                return 0, "the"  # but the selection moved to the span
+            return 0, ""
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    posted = []
+
+    def fake_post(code, pid):
+        posted.append(code)
+        FakeAS.value = "dax cat sat"
+
+    monkeypatch.setattr("src.generic_editing._post_mac_key", fake_post)
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "ChatGPT", "bundle_id": "com.openai.chat"},
+        0,
+        3,
+        "dax",
+        allow_direct_paste=False,
+        before_text="the",
+    )
+    assert ok is True and message == "Applied."
+    assert posted == [9]
+
+
+def test_ax_replace_range_skips_ax_write_when_range_holds_other_text(
+    monkeypatch,
+):
+    """Never write selected text into a range that no longer holds the
+    original span — an async app could have moved it under us."""
+    from typing import ClassVar
+
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+        value = "xhe cat sat"  # someone else changed the range content
+        last_range: ClassVar[tuple] = (0, 0)
+        text_writes = 0
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, v):
+            FakeAS.last_range = v
+            return v
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, v):
+            if attr == FakeAS.kAXSelectedTextAttribute:
+                FakeAS.text_writes += 1
+            return 0
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, FakeAS.value
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                return 0, FakeAS.last_range
+            return 0, ""
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    posted = []
+    monkeypatch.setattr(
+        "src.generic_editing._post_mac_key", lambda code, pid: posted.append(code)
+    )
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, _message = editor.ax_replace_range(
+        {"pid": 9, "name": "App", "bundle_id": "com.example.app"},
+        0,
+        3,
+        "dax",
+        allow_direct_paste=False,
+        before_text="the",
+    )
+    assert ok is False  # refuse everything when the range content differs
+    assert FakeAS.text_writes == 0  # never write into a stale range
+    assert posted == []
+
+
+def test_ax_replace_range_reports_applied_when_delayed_write_landed(
+    monkeypatch,
+):
+    """If the step-2 AX write lands late (after its verification), the
+    paste path must recognise the edit is already present instead of
+    pasting again or reporting a false failure."""
+    from typing import ClassVar
+
+    from src.generic_editing import GenericTextEditor
+
+    class FakeAS:
+        kAXValueTypeCFRange = "cfrange"
+        kAXSelectedTextRangeAttribute = "range"
+        kAXSelectedTextAttribute = "seltext"
+        kAXValueAttribute = "value"
+        value = "the cat sat"
+        last_range: ClassVar[tuple] = (0, 0)
+        pending = None
+
+        @staticmethod
+        def AXIsProcessTrusted():
+            return True
+
+        @staticmethod
+        def AXValueCreate(kind, v):
+            FakeAS.last_range = v
+            return v
+
+        @staticmethod
+        def AXUIElementSetAttributeValue(el, attr, v):
+            if attr == FakeAS.kAXSelectedTextAttribute:
+                FakeAS.pending = v
+            return 0
+
+        @staticmethod
+        def AXUIElementCopyAttributeValue(el, attr, out):
+            if attr == FakeAS.kAXValueAttribute:
+                return 0, FakeAS.value
+            if attr == FakeAS.kAXSelectedTextRangeAttribute:
+                # The delayed text write lands while the range is re-read.
+                if FakeAS.pending is not None:
+                    FakeAS.value = FakeAS.pending
+                    FakeAS.pending = None
+                return 0, FakeAS.last_range
+            return 0, ""
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", FakeAS)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (FakeAS, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_activate", lambda target: True
+    )
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    posted = []
+    monkeypatch.setattr(
+        "src.generic_editing._post_mac_key", lambda code, pid: posted.append(code)
+    )
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    editor = GenericTextEditor()
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "App", "bundle_id": "com.example.app"},
+        0,
+        3,
+        "dax",
+        allow_direct_paste=False,
+        before_text="the",
+    )
+    assert ok is True and message == "Applied."
+    assert posted == []  # the edit was already present; no paste needed

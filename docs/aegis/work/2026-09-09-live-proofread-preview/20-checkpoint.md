@@ -109,3 +109,41 @@
 
 Scope unchanged (macOS beta, same four defaults). No new owners or schema
 changes beyond the planned `settings["live_preview"]`. Decision: `continue`.
+
+## Checkpoint (2.0.1-beta.2) — ChatGPT/Codex apply refusal diagnosed and fixed
+
+### Diagnosis (from capture.log 17:45–17:47)
+
+"0 of N changes applied" in ChatGPT (bundle `com.openai.chat`) was NOT offset
+drift: every value-slice diagnostic matched the original document text at the
+exact expected code-point offsets. The document was never modified — the
+refusal guard worked as intended.
+
+The real cause: ChatGPT applies `AXSelectedTextRange` writes ASYNCHRONOUSLY.
+The immediate readback still shows the old range (the log shows the selection
+trailing exactly one edit behind), so the confirmation failed and the paste
+was refused every time. `AXSelectedText` writes are ignored by that app.
+
+### Fix (beta.2)
+
+- `ax_replace_range` now re-reads the range confirmation over a short window
+  (`RANGE_CONFIRM_RETRIES=6 × 0.12 s`) and also accepts a selected-text match
+  on the original span as proof the range landed.
+- New `before_text` parameter (passed from `_apply_one`/`_apply_all` via the
+  original span slice): the AX selected-text write is skipped unless the range
+  verifiably holds the original text — writing into a stale range in an async
+  app could otherwise corrupt the document.
+- Paste guards tightened: the retry-via-System-Events only fires when the
+  range still holds the expected original text; a paste whose verification
+  lags gets one settle re-check before any retry.
+- A delayed AX write that already applied the edit is recognised as
+  "Applied." instead of a false failure or a duplicate paste.
+- 4 new tests (async range, selected-text confirmation, stale-range skip,
+  delayed-write recognition); full suite 229 passed.
+
+### Next
+
+- Owner re-test in ChatGPT/Codex (Apply and Apply all on a selection with
+  several suggestions).
+- If range confirmation still fails there, consider per-app full-selection
+  paste fallback (Mail/Pages path) — needs an owner decision on the UX.

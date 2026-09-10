@@ -1047,9 +1047,18 @@ class LivePreviewService(QObject):
     # --- apply ---
 
     def _apply_abs(
-        self, rel_start: int, length: int, replacement: str
+        self,
+        rel_start: int,
+        length: int,
+        replacement: str,
+        before_text: str | None = None,
     ) -> tuple[bool, str, int]:
-        """Replace a relative span; returns (ok, message, absolute start)."""
+        """Replace a relative span; returns (ok, message, absolute start).
+
+        ``before_text`` is the original text expected at the span; the
+        editor uses it to guard against apps whose AX state lags behind the
+        real document (e.g. ChatGPT applies range writes asynchronously).
+        """
         if self._selection_is_word:
             from .word_integration import get_word_integration
 
@@ -1070,6 +1079,7 @@ class LivePreviewService(QObject):
             allow_direct_paste=(
                 rel_start == 0 and length == len(self._selection_text)
             ),
+            before_text=before_text,
         )
         return ok, message, abs_start
 
@@ -1160,7 +1170,10 @@ class LivePreviewService(QObject):
             return
         span = self._pending[index]
         ok, message, abs_start = self._apply_abs(
-            span.start, span.end - span.start, span.after
+            span.start,
+            span.end - span.start,
+            span.after,
+            before_text=self._selection_text[span.start : span.end],
         )
         _debug_log(
             f"LIVE APPLY ONE RESULT: ok={ok} message={message!r} "
@@ -1243,7 +1256,10 @@ class LivePreviewService(QObject):
             rel_start = span.start + delta
             rel_end = span.end + delta
             ok, _, abs_start = self._apply_abs(
-                rel_start, rel_end - rel_start, span.after
+                rel_start,
+                rel_end - rel_start,
+                span.after,
+                before_text=self._selection_text[span.start : span.end],
             )
             if ok:
                 applied += 1

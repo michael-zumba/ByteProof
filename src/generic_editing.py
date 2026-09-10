@@ -47,6 +47,13 @@ BROWSER_BUNDLE_IDS = frozenset(
     }
 )
 
+# Some apps (e.g. ChatGPT) apply the AXSelectedTextRange write
+# asynchronously: an immediate readback still shows the old range, so the
+# paste-over-range confirmation re-reads for a short window before giving
+# up, and also accepts a selected-text match on the original span.
+RANGE_CONFIRM_RETRIES = 6
+RANGE_CONFIRM_DELAY_S = 0.12
+
 
 def _debug_log(msg: str) -> None:
     """Append a timestamped line to a capture debug log."""
@@ -972,17 +979,24 @@ class GenericTextEditor:
         length: int,
         new_text: str,
         allow_direct_paste: bool = False,
+        before_text: str | None = None,
     ) -> tuple[bool, str]:
         """Replace an absolute range in the focused field without keystrokes.
 
         Attempts, in order:
         1. The AXReplaceRangeWithText parameterized action (newer PyObjC).
-        2. Selecting the sub-range and writing the selected-text attribute.
+        2. Selecting the sub-range and writing the selected-text attribute,
+           only once the range is confirmed to hold ``before_text``.
         3. A clipboard-preserving paste over the sub-range; when the sub-range
            equals the whole selection, the existing selection is pasted over
            directly without setting a range.
         Every failure logs its AX error code so app-specific behaviour is
         visible in capture.log.
+
+        ``before_text`` is the original text expected at the range. Passing
+        it hardens the guards for apps whose AX state lags behind the real
+        document: the range is confirmed before any write, and the paste is
+        refused unless the range still holds exactly that text.
         """
         if SYSTEM != "Darwin":
             return False, "Live apply is only supported on macOS in this beta."
@@ -1084,19 +1098,95 @@ class GenericTextEditor:
         bundle = str(target.get("bundle_id", "")).lower()
         is_browser = bundle in BROWSER_BUNDLE_IDS
 
+        def _range_slice(n: int | None = None) -> str | None:
+            want = length if n is None else n
+            for el in elements:
+                try:
+                    err, value = AS.AXUIElementCopyAttributeValue(
+                        el, AS.kAXValueAttribute, None
+                    )
+                    if err == 0 and isinstance(value, str):
+                        return value[start : start + want]
+                except Exception:
+                    continue
+            return None
+
+        def _range_confirmed(el: Any, cu_start: int, cu_len: int) -> bool:
+            try:
+                err, rv = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXSelectedTextRangeAttribute, None
+                )
+                if err != 0 or rv is None:
+                    return False
+                loc, ln = _parse_ax_range(rv)
+                return loc == cu_start and ln == cu_len
+            except Exception:
+                return False
+
+        def _selection_holds(el: Any, text: str) -> bool:
+            try:
+                err, got = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXSelectedTextAttribute, None
+                )
+                if err != 0 or not isinstance(got, str):
+                    return False
+                return got == text or got.strip() == text.strip()
+            except Exception:
+                return False
+
+        def _confirm_range(el: Any, cu_start: int, cu_len: int) -> bool:
+            # Some apps (e.g. ChatGPT) apply the range-selection write
+            # asynchronously: the immediate readback still shows the old
+            # range. Re-read over a short window, and also accept a
+            # selected-text match on the original span as the range having
+            # landed, before deciding it was ignored.
+            if _range_confirmed(el, cu_start, cu_len):
+                return True
+            for _attempt in range(RANGE_CONFIRM_RETRIES):
+                time.sleep(RANGE_CONFIRM_DELAY_S)
+                if _range_confirmed(el, cu_start, cu_len):
+                    return True
+                if before_text is not None and _selection_holds(
+                    el, before_text
+                ):
+                    _debug_log(
+                        "ax_replace_range: range confirmed via selected text"
+                    )
+                    return True
+            _debug_log(
+                "ax_replace_range: range confirmation failed after "
+                f"{RANGE_CONFIRM_RETRIES} retries"
+            )
+            return False
+
         # 2. Select the sub-range, then write the selected-text attribute.
         #    Browsers are skipped: Chrome/Safari accept this write with a
         #    success code but never commit it to the page. Other apps get
-        #    the write first, but it is only trusted when the document
-        #    verifiably changed — several apps (e.g. Outlook) report success
-        #    without committing either.
+        #    the write first, but only once the range verifiably holds the
+        #    original text — writing to a stale range would corrupt the
+        #    document in apps that apply range writes asynchronously.
         if not is_browser:
             for el in elements:
                 try:
-                    cu_start, _cu_len = _set_range(el)
+                    cu_start, cu_len = _set_range(el)
                     if cu_start is None:
                         _debug_log("ax_replace_range set-range failed")
                         continue
+                    if not _confirm_range(el, cu_start, cu_len):
+                        _debug_log(
+                            "ax_replace_range: range not confirmed before "
+                            "the AX write; skipping the text write"
+                        )
+                        continue
+                    if before_text is not None:
+                        held = _range_slice()
+                        if held != before_text:
+                            _debug_log(
+                                "ax_replace_range: range no longer holds the "
+                                f"original text ({held[:40]!r}); skipping "
+                                "the AX write"
+                            )
+                            continue
                     err = _set_text(el)
                     if err != 0:
                         _debug_log(
@@ -1122,41 +1212,20 @@ class GenericTextEditor:
         #    ignore range writes), and the document must still hold the
         #    original text at that range, so a paste can never land on
         #    partially modified content.
-        def _range_slice() -> str | None:
-            for el in elements:
-                try:
-                    err, value = AS.AXUIElementCopyAttributeValue(
-                        el, AS.kAXValueAttribute, None
-                    )
-                    if err == 0 and isinstance(value, str):
-                        return value[start : start + length]
-                except Exception:
-                    continue
-            return None
-
-        def _range_confirmed(el: Any, cu_start: int, cu_len: int) -> bool:
-            try:
-                err, rv = AS.AXUIElementCopyAttributeValue(
-                    el, AS.kAXSelectedTextRangeAttribute, None
-                )
-                if err != 0 or rv is None:
-                    return False
-                loc, ln = _parse_ax_range(rv)
-                return loc == cu_start and ln == cu_len
-            except Exception:
-                return False
-
         old_text = _range_slice()
         if old_text is not None:
             _debug_log(
                 f"ax_replace_range: range holds {old_text[:40]!r} before apply"
             )
+        expected_before = before_text if before_text is not None else old_text
 
         range_ok = False
         for el in elements:
             try:
                 cu_start, cu_len = _set_range(el)
-                if cu_start is not None and _range_confirmed(el, cu_start, cu_len):
+                if cu_start is None:
+                    continue
+                if _confirm_range(el, cu_start, cu_len):
                     range_ok = True
                     break
             except Exception:
@@ -1169,7 +1238,16 @@ class GenericTextEditor:
             return False, "Could not apply the edit in this app."
 
         current = _range_slice()
-        if old_text is not None and current is not None and current != old_text:
+        if (
+            expected_before is not None
+            and current is not None
+            and current != expected_before
+        ):
+            if _range_slice(len(new_text)) == new_text:
+                # A delayed AX write from step 2 already applied the edit;
+                # nothing left to paste.
+                _debug_log("ax_replace_range: edit already present")
+                return True, "Applied."
             _debug_log(
                 "ax_replace_range: range no longer holds the original text "
                 f"({current[:40]!r}); refusing to paste"
@@ -1187,12 +1265,21 @@ class GenericTextEditor:
             _paste()
             verdict = _verify_range_write(AS, elements, start, new_text)
             _log_paste_verdict(verdict, new_text)
+            if verdict == "mismatch":
+                # Async apps (e.g. ChatGPT) can lag their AX value readback
+                # briefly after a paste; re-check once before retrying.
+                time.sleep(0.3)
+                verdict = _verify_range_write(AS, elements, start, new_text)
+                _log_paste_verdict(verdict, new_text)
             if verdict == "mismatch" and range_ok:
                 # A retry is only safe while the range still holds the
                 # ORIGINAL text — if the document changed at all, a second
                 # paste would land on shifted content and corrupt it.
                 still_original = _range_slice()
-                if still_original == old_text:
+                if (
+                    still_original is not None
+                    and still_original == expected_before
+                ):
                     _debug_log(
                         "ax_replace_range: retrying paste via System Events"
                     )
