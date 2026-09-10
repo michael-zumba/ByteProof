@@ -51,7 +51,11 @@ jobs:
           status=0
           for file in tests/test_*.py; do
             echo "=== $file"
-            python -m pytest "$file" -q -p no:cacheprovider || status=1
+            # A hanging test must fail with a stack trace instead of burning the
+            # whole job timeout: faulthandler dumps every thread after 60s and
+            # pytest-timeout fails the test so the file still finishes.
+            python -m pytest "$file" -v -p no:cacheprovider \
+              --timeout=150 -o faulthandler_timeout=60 --tb=short || status=1
           done
           exit $status
 
