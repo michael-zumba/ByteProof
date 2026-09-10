@@ -554,3 +554,20 @@ processes; it now uses the same chooser as Automation's "Choose App…".
 Tests: the scanner returns named apps with real icons; Add App appends the
 chosen app with the right marker, checkbox state and rule; list rows carry
 icons when installed.
+
+## Checkpoint (2.0.2-beta.14) — clicking License in Settings
+
+Owner report: the License row in Settings did nothing when clicked.
+
+Cause: the row label carries a status suffix ("License  ✓", "Updates •") that
+the sidebar status added, but `change_page()` resolved pages by the label text.
+The lookup missed, no page was switched, and the previous page stayed on
+screen. `Updates` only worked while it had no dot.
+
+Fixed by removing the fragile coupling:
+- each sidebar row stores the page it opens (`Qt.ItemDataRole.UserRole`) and
+  `change_page()` uses that; the label map remains only as a fallback
+- `_row_for_page()` replaces the hard-coded row numbers used for the
+  License/Updates icons, the Local AI shortcuts and the License shortcut
+- a regression test clicks every row and asserts the expected page appears,
+  including with a licence badge and a pending-update dot present
