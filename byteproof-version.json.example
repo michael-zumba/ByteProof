@@ -1,7 +1,7 @@
 {
-  "version": "2.0.0",
+  "version": "2.0.1",
   "release_date": "2026-09-10",
-  "release_notes": "ByteProof 2.0 — Live Suggestions: select text in Word, Pages, Mail, Outlook, or any editable field for instant AI edits with one-click Apply, Apply all, and Undo. New Polish mode, editable-context detection, suggestion style selector, and a redesigned floating suggestion panel.",
+  "release_notes": "Fixed email edits shifting position when the text contains emoji or special characters, and a rare stall in Word after dragging the suggestion panel.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
