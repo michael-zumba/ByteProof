@@ -1,7 +1,7 @@
 {
-  "version": "2.0.1",
+  "version": "2.0.2",
   "release_date": "2026-09-10",
-  "release_notes": "Fixed email edits shifting position when the text contains emoji or special characters, and a rare stall in Word after dragging the suggestion panel.",
+  "release_notes": "Live Check is now its own settings menu with per-app triggers, plus two new hotkeys: Cmd+Shift+L turns suggestions on or off, Cmd+Shift+Return applies everything on screen. Mail and Pages no longer beep in the background, applies keep working when you switch apps, every provider defaults to its current model (DeepSeek deepseek-flash, Gemini 3.8 Flash, GPT-5.5, Claude Sonnet 5, Grok 4.6, Groq GPT-OSS 120B), and the settings window is cleaner and faster.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
