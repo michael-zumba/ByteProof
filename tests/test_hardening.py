@@ -1911,3 +1911,51 @@ def test_live_check_runs_everywhere_by_default() -> None:
 
     assert app_allowed({}, {"bundle_id": "com.example", "name": "Editor"}) is True
     assert app_allowed({"app_rules": {}}, {"bundle_id": "x"}) is True
+
+
+def test_live_check_add_app_uses_the_installed_app_picker() -> None:
+    """Add App lists installed applications (with icons), like Automation."""
+    from PyQt6.QtCore import Qt
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.show()
+    app.processEvents()
+
+    installed = dialog._installed_apps_for_trigger()
+    assert installed, "the installed-app scanner returned nothing"
+    assert all(entry.get("name") for entry in installed)
+    # Real icons come from the bundle, not a placeholder.
+    assert any(not dialog._app_icon(entry).isNull() for entry in installed[:20])
+
+    before = dialog.live_apps_list.count()
+    monkeypatch_target = {"bundle_id": "com.example.editor", "name": "Example Editor"}
+    dialog.choose_installed_app = lambda existing=None: monkeypatch_target  # type: ignore[assignment]
+
+    dialog._add_live_app()
+    app.processEvents()
+
+    assert dialog.live_apps_list.count() == before + 1
+    added = dialog.live_apps_list.item(dialog.live_apps_list.count() - 1)
+    assert added.text() == "Example Editor"
+    assert added.data(Qt.ItemDataRole.UserRole) == "com.example.editor"
+    assert added.checkState() == Qt.CheckState.Checked
+    rules = dialog.get_settings()["live_preview"]["app_rules"]
+    assert rules["com.example.editor"] is True
+    _dispose(dialog, owner, app)
+
+
+def test_live_check_app_rows_show_icons_when_installed() -> None:
+    from PyQt6.QtCore import Qt
+
+    app, owner, dialog = _make_settings_dialog()
+    icons = 0
+    for index in range(dialog.live_apps_list.count()):
+        item = dialog.live_apps_list.item(index)
+        if not item.icon().isNull():
+            icons += 1
+    # Word/Mail/Safari and friends are installed on this machine, so at least
+    # some rows carry a real icon; the list never breaks when none do.
+    assert icons >= 1 or dialog.live_apps_list.count() == 0
+    marker = dialog.live_apps_list.item(0).data(Qt.ItemDataRole.UserRole)
+    assert marker
+    _dispose(dialog, owner, app)

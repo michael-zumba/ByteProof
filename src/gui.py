@@ -2025,6 +2025,7 @@ class SettingsDialog(QDialog):
                 continue
             entries.append((marker, marker))
         self.live_apps_list.clear()
+        self.live_apps_list.setIconSize(QSize(26, 26))
         for marker, name in entries:
             item = QListWidgetItem(name)
             item.setData(Qt.ItemDataRole.UserRole, marker)
@@ -2034,41 +2035,36 @@ class SettingsDialog(QDialog):
                 if bool(rules.get(marker, True))
                 else Qt.CheckState.Unchecked
             )
+            icon = self._app_icon(
+                {"bundle_id": marker, "name": name}
+            )
+            if not icon.isNull():
+                item.setIcon(icon)
             self.live_apps_list.addItem(item)
 
     def _add_live_app(self) -> None:
-        """Add an app to the list from the ones currently running."""
+        """Add an installed app to the list (same picker as Automation)."""
         existing = {
-            self.live_apps_list.item(i).data(Qt.ItemDataRole.UserRole)
+            str(self.live_apps_list.item(i).data(Qt.ItemDataRole.UserRole) or "")
             for i in range(self.live_apps_list.count())
         }
-        try:
-            from .generic_editing import get_generic_editor
-
-            running = get_generic_editor().running_apps()
-        except Exception:
-            running = []
-        options = [
-            f"{app.get('name')} ({app.get('bundle_id')})"
-            for app in running
-            if app.get("bundle_id") and app.get("bundle_id") not in existing
-        ]
-        if not options:
-            QMessageBox.information(
-                self, "Add App", "Every running app is already in the list."
-            )
+        existing |= {
+            str(self.live_apps_list.item(i).text() or "")
+            for i in range(self.live_apps_list.count())
+        }
+        app = self.choose_installed_app(existing)
+        if not app:
             return
-        choice, ok = QInputDialog.getItem(
-            self, "Add App", "Suggest changes in:", options, 0, False
-        )
-        if not ok or not choice:
+        marker = str(app.get("bundle_id") or app.get("name") or "").strip()
+        if not marker:
             return
-        bundle = choice.rsplit("(", 1)[-1].rstrip(")").strip()
-        name = choice.rsplit("(", 1)[0].strip()
-        item = QListWidgetItem(name)
-        item.setData(Qt.ItemDataRole.UserRole, bundle)
+        item = QListWidgetItem(str(app.get("name") or marker))
+        item.setData(Qt.ItemDataRole.UserRole, marker)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(Qt.CheckState.Checked)
+        icon = self._app_icon(app)
+        if not icon.isNull():
+            item.setIcon(icon)
         self.live_apps_list.addItem(item)
         if not getattr(self, "_live_apps_shown", False):
             self._toggle_live_apps()  # reveal the list so the new app is seen
@@ -2590,7 +2586,16 @@ class SettingsDialog(QDialog):
             pass
         return QIcon()
 
-    def _choose_app_for_trigger(self) -> dict[str, Any] | None:
+    def choose_installed_app(
+        self, existing: set[str] | None = None
+    ) -> dict[str, Any] | None:
+        """Let the user pick an installed application, with its real icon.
+
+        Shared by Automation ("Choose App…") and Live Check ("Add App…"), so
+        both offer the same searchable list of what is actually installed
+        rather than whatever happens to be running.
+        """
+        skip = {str(value).lower() for value in (existing or set()) if value}
         dialog = QDialog(self)
         dialog.setWindowTitle("Choose App")
         dialog.setModal(True)
@@ -2625,11 +2630,7 @@ class SettingsDialog(QDialog):
 
         apps = self._installed_apps_for_trigger()
         if not apps:
-            layout.addWidget(QLabel("No running applications found."))
-
-        existing_names, existing_bundles = self._triggered_app_identifiers(
-            self._read_automation_rules_from_list(),
-        )
+            layout.addWidget(QLabel("No installed applications found."))
 
         def repopulate(filter_text: str) -> None:
             app_list.clear()
@@ -2637,9 +2638,8 @@ class SettingsDialog(QDialog):
             for app in apps:
                 name = app.get("name") or "Unknown"
                 bundle = app.get("bundle_id") or ""
-                if (
-                    (bundle.lower() and bundle.lower() in existing_bundles)
-                    or name.lower() in existing_names
+                if skip and (
+                    (bundle and bundle.lower() in skip) or name.lower() in skip
                 ):
                     continue
                 haystack = f"{name} {bundle}".lower()
@@ -2676,6 +2676,13 @@ class SettingsDialog(QDialog):
             return None
         app = item.data(Qt.ItemDataRole.UserRole)
         return app if isinstance(app, dict) else None
+
+    def _choose_app_for_trigger(self) -> dict[str, Any] | None:
+        """Automation's 'Choose App…': skip rules that already exist."""
+        existing_names, existing_bundles = self._triggered_app_identifiers(
+            self._read_automation_rules_from_list(),
+        )
+        return self.choose_installed_app(existing_names | existing_bundles)
 
     def _reset_automation_rules(self) -> None:
         from .automation import default_automation_rules
@@ -3885,7 +3892,6 @@ class SettingsDialog(QDialog):
             self._refresh_connect_tab()
 
     def _auto_activate_from_email(self) -> None:
-        from PyQt6.QtWidgets import QInputDialog
 
         title, prompt = activation_prompt()
         value, ok = QInputDialog.getText(
@@ -4577,7 +4583,6 @@ class ProofreaderApp(QMainWindow):
 
     def _ask_user_for_target(self, editor: Any) -> dict[str, Any] | None:
         """Let the user pick the app when automatic detection finds nothing."""
-        from PyQt6.QtWidgets import QInputDialog
 
         apps = editor.running_apps()
         if not apps:
@@ -5187,7 +5192,6 @@ class ProofreaderApp(QMainWindow):
             QMessageBox.warning(self, "Activation Failed", message)
 
     def _prompt_auto_activation(self) -> None:
-        from PyQt6.QtWidgets import QInputDialog
 
         title, prompt = activation_prompt()
         value, ok = QInputDialog.getText(
