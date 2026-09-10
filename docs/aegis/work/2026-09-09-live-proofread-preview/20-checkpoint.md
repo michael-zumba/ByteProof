@@ -458,3 +458,42 @@ Fixed and polished:
 
 A regression test asserts every row is inside the viewport and that neither
 scrollbar appears.
+
+## Checkpoint (2.0.2-beta.11) — hotkeys, silence in Mail/Pages, General page
+
+Four owner requests.
+
+### 1. Hotkey to toggle live suggestions
+`Cmd+Shift+L` (configurable). Flips `live_preview.enabled`, saves, refreshes
+the service, updates the readiness row and shows a toast. Registered with the
+existing hotkey facade, so it works in any app.
+
+### 2. Hotkey to Apply All
+`Cmd+Shift+Return` (configurable) applies every suggestion in the visible
+panel via a new `LivePreviewService.apply_all_now()`, which returns False when
+nothing is on screen so the shortcut stays silent. The hotkey parser now
+understands `<return>`/`<enter>` (matched by keycode, like Escape), the Qt
+round-trip maps Return both ways, and `display_hotkey` renders
+`Cmd+Shift+L` / `Cmd+Shift+↩`.
+
+### 3. No more beeping in Mail and Pages
+Every Command-C posted to read a clipboard-only selection makes the app beep
+when nothing is selected. A copy is now spent only when the user really
+selected something:
+- a new observe-only `_InputWatcher` records the last drag, double-click or
+  Shift/Cmd chord; the read happens only within a short window after one of
+  those and never while typing, reading or clicking around (a click is not a
+  selection). The timing-probe gate remains as the fallback when the monitor
+  cannot be installed.
+- an apply no longer re-reads the selection for clipboard-only apps (the paste
+  consumed it, so the read posted Command-C with nothing selected - the beep);
+  the idle read stays disarmed until the user interacts again.
+- post-paste verification tries the free Accessibility read first and at most
+  one copy.
+
+### 4. General settings page
+Sections reordered by use - Live Suggestions, App & Window, Microsoft Word,
+Hotkeys, Proofreading Style, Proofreading Settings - with a one-line subtitle
+and muted helper text under the live controls (naming the real hotkeys), under
+Track Changes, under the hotkey list, and under the temperature slider. The
+Word options moved out of the mixed "Preferences" card into their own.
