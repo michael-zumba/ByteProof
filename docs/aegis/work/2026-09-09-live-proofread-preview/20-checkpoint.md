@@ -237,3 +237,35 @@ without losing accuracy.
 - The live service is not started for offscreen Qt runs, so the test suite no
   longer drives real Accessibility/AppleScript against the user's apps (this
   was exposing a busy Word and hanging the suite).
+
+## Checkpoint (2.0.2-beta.4) — browser applies fixed
+
+Owner report: in a browser (Safari, typing in a web text box) Apply sometimes
+answered "could not identify the selection, please try again".
+
+`capture.log` showed the cause (the surrounding pid=9 lines were test noise):
+
+```
+[21:02:58] LIVE APPLY ALL: app='Safari' has_range=True count=3
+[21:02:59] LIVE APPLY ALL SYNC FAIL: selection changed: previewed='Also check the log. sometimes ' now=''
+```
+
+The preview read the selection correctly a second earlier; the Accessibility
+re-read at apply time returned an empty string. Web views re-render
+continuously and Safari frequently answers `AXSelectedText` with nothing even
+while the selection is intact, so the pre-apply verification refused a perfectly
+good selection.
+
+Fixes:
+- `_read_selection_state` drops the cached AX element and re-reads once with a
+  freshly discovered element when the first answer is empty (a stale cached
+  element in a re-rendering page was the likely trigger).
+- `_sync_selection` treats an *unreadable* re-read as "ask the app": it copies
+  the selection for real (`get_selection_by_copy`, Cmd+C posted to the target
+  process, clipboard restored). Matching text lets the apply proceed; text that
+  genuinely differs still refuses. Word keeps using AppleScript, which is
+  reliable there.
+- Failure messages now name the app and the remedy ("Click into the text,
+  select it again, and press Apply") instead of a generic retry prompt.
+- Offscreen runs skip the network-backed startup work (update check, remote
+  licence validation); their TLS worker threads were crashing the test process.
