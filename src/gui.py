@@ -1079,8 +1079,6 @@ class SettingsDialog(QDialog):
     lbl_msg: QLabel
     btn_buy: QPushButton
     btn_auto_activate: QPushButton
-    update_icon_btn: QPushButton
-    license_icon_btn: QPushButton
 
     def __init__(self, settings: dict[str, Any], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1122,8 +1120,10 @@ class SettingsDialog(QDialog):
 
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("SettingsSidebar")
-        # License and Updates are real sidebar pages, not just icon-only
-        # shortcuts: buyers could not find where to enter their key.
+        # License and Updates are labelled pages. They previously also had
+        # icon-only duplicates in a small bar underneath, which gave the same
+        # destination two entry points and made the pages harder to find, so
+        # the icons moved onto the rows themselves.
         self.sidebar.addItems(
             [
                 "General",
@@ -1136,40 +1136,8 @@ class SettingsDialog(QDialog):
         )
         self.sidebar.currentRowChanged.connect(self.change_page)
         side_layout.addWidget(self.sidebar, 1)
-
-        icon_bar = QHBoxLayout()
-        icon_bar.setContentsMargins(10, 8, 10, 12)
-        icon_bar.setSpacing(14)
-
-        def make_icon_button(icon_path: str, tooltip: str, callback: Any) -> QPushButton:
-            btn = QPushButton()
-            btn.setFixedSize(34, 34)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(tooltip)
-            btn.setIcon(QIcon(icon_path))
-            btn.setIconSize(btn.size() * 0.86)
-            btn.setStyleSheet(
-                "QPushButton { background-color: transparent; border: none; }"
-                "QPushButton:hover { background-color: transparent; }"
-                "QPushButton:pressed { background-color: transparent; }"
-            )
-            btn.clicked.connect(callback)
-            return btn
-
-        self.update_icon_btn = make_icon_button(
-            resource_path(os.path.join("assets", "update.svg")),
-            "Check for Updates",
-            self._open_updates_icon,
-        )
-        self.license_icon_btn = make_icon_button(
-            resource_path(os.path.join("assets", "license.svg")),
-            "License Status",
-            self._open_license_icon,
-        )
-        icon_bar.addWidget(self.update_icon_btn)
-        icon_bar.addWidget(self.license_icon_btn)
-        icon_bar.addStretch()
-        side_layout.addLayout(icon_bar)
+        self._add_sidebar_status()
+        side_layout.addStretch(1)
 
         main_layout.addWidget(side_container)
 
@@ -1291,6 +1259,84 @@ class SettingsDialog(QDialog):
         """)
         self.sidebar.setCurrentRow(0)
 
+    def _add_sidebar_status(self) -> None:
+        """Give the License/Updates rows their icon and live status.
+
+        The status is what the removed icon buttons were really for: at a
+        glance the user can see whether the licence is active and whether an
+        update is waiting, without a second set of controls.
+        """
+        icons = {
+            4: ("license.svg", "License Status"),
+            5: ("update.svg", "Updates"),
+        }
+        parent = self.parent()
+        self._pending_update_label = str(
+            getattr(parent, "pending_update_version", "") or ""
+        )
+        for row, (filename, tooltip) in icons.items():
+            item = self.sidebar.item(row)
+            if item is None:
+                continue
+            icon_path = resource_path(os.path.join("assets", filename))
+            if os.path.exists(icon_path):
+                item.setIcon(QIcon(icon_path))
+            item.setToolTip(tooltip)
+        self.refresh_sidebar_status()
+
+    def refresh_sidebar_status(self) -> None:
+        """Show licence state and pending updates on the sidebar rows."""
+        license_item = self.sidebar.item(4)
+        updates_item = self.sidebar.item(5)
+        if license_item is not None:
+            license_item.setText(f"License{self._license_badge()}")
+            license_item.setToolTip(self._license_tooltip())
+        if updates_item is not None:
+            pending = str(getattr(self, "_pending_update_label", "") or "")
+            updates_item.setText("Updates •" if pending else "Updates")
+            updates_item.setToolTip(
+                f"Version {pending} is available — open this page to install it."
+                if pending
+                else "Check for a newer version of ByteProof."
+            )
+
+    def _license_badge(self) -> str:
+        try:
+            status = get_access_status()
+        except Exception:
+            return ""
+        tier = status.get("tier")
+        if tier == "licensed":
+            return "  ✓"
+        if tier == "trial":
+            return f"  ({status.get('days_left', 0)}d left)"
+        return "  (free)"
+
+    def _license_tooltip(self) -> str:
+        try:
+            status = get_access_status()
+        except Exception:
+            return "License Status"
+        tier = status.get("tier")
+        if tier == "licensed":
+            provider = ""
+            try:
+                provider = get_license_info().get("provider") or ""
+            except Exception:
+                provider = ""
+            return f"Licensed{(' via ' + provider) if provider else ''}."
+        if tier == "trial":
+            return f"Trial — {status.get('days_left', 0)} days left."
+        return (
+            f"Free mode — {status.get('daily_count', 0)} of "
+            f"{status.get('daily_limit', 0)} proofreads used today."
+        )
+
+    def note_update_available(self, version: str) -> None:
+        """Called when the update check finds a newer version."""
+        self._pending_update_label = version or ""
+        self.refresh_sidebar_status()
+
     def change_page(self, index: int) -> None:
         item = self.sidebar.item(index)
         if item is None:
@@ -1306,15 +1352,6 @@ class SettingsDialog(QDialog):
         page = getattr(self, page_attr, None) if page_attr else None
         if page is not None:
             self.pages.setCurrentWidget(page)
-
-    def _open_updates_icon(self) -> None:
-        if self.updates_page is not None:
-            self.pages.setCurrentWidget(self.updates_page)
-        self._start_update_check()
-
-    def _open_license_icon(self) -> None:
-        if self.license_page is not None:
-            self.pages.setCurrentWidget(self.license_page)
 
     def _start_update_check(self) -> None:
         parent = self.parent()
@@ -4269,6 +4306,10 @@ class ProofreaderApp(QMainWindow):
             self.open_settings()
 
     def _setup_hotkeys(self, show_permission_message: bool = True) -> None:
+        # Offscreen (test/CI) runs must not install global OS input monitors:
+        # they survive the tests that created them and destabilise the process.
+        if getattr(self, "_offscreen_run", False):
+            return
         self.hotkey_timer.start(500)
         try:
             if self.hotkey_manager:
@@ -4639,7 +4680,14 @@ class ProofreaderApp(QMainWindow):
         worker.start()
 
     def _run_cache_cleanup(self) -> None:
-        """Silently tidy logs, partials, and old models in the background."""
+        """Silently tidy logs, partials, and old models in the background.
+
+        Skipped for offscreen runs: a maintenance thread outliving a short
+        test process was destabilising the suite, and there is nothing to
+        clean in a headless run.
+        """
+        if getattr(self, "_offscreen_run", False):
+            return
         active = self.settings.get("local_model", {}).get("active_model")
         worker = CacheCleanupWorker(active)
         self._cache_cleanup_worker = worker
@@ -4695,6 +4743,10 @@ class ProofreaderApp(QMainWindow):
         return answer == QMessageBox.StandardButton.Yes
 
     def _on_activation_done(self, ok: bool, message: str) -> None:
+        dialog = getattr(self, "_active_settings_dialog", None)
+        refresh = getattr(dialog, "refresh_sidebar_status", None)
+        if callable(refresh):
+            refresh()
         if ok:
             self._update_proofread_button()
             if message and "@" in message:
@@ -5939,6 +5991,10 @@ class ProofreaderApp(QMainWindow):
                     f"{APP_NAME} {remote_version} is available — "
                     "open Settings → Updates to install it."
                 )
+                dialog_open = getattr(self, "_active_settings_dialog", None)
+                note = getattr(dialog_open, "note_update_available", None)
+                if callable(note):
+                    note(str(remote_version))
                 try:
                     from .generic_editing import _debug_log as _update_log
 

@@ -39,9 +39,19 @@ jobs:
       - name: Lint (ruff)
         run: python -m ruff check src tests
       - name: Run tests
+        # One process per test file: Qt objects are freed by Python's garbage
+        # collector, so a window from one file can be collected while a later
+        # file builds its own, which intermittently segfaults on macOS.
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest tests -q
+        shell: bash
+        run: |
+          status=0
+          for file in tests/test_*.py; do
+            echo "=== $file"
+            python -m pytest "$file" -q -p no:cacheprovider || status=1
+          done
+          exit $status
 
   windows:
     name: Windows installer (x64)

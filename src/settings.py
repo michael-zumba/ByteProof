@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.0.2-beta.4"
+APP_VERSION = "2.0.2-beta.5"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -156,33 +156,33 @@ PROVIDERS = {
     },
     "Google Gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "model": "gemini-2.5-flash",
+        "model": "gemini-3.8-flash",
         "default_keys": [],
         "max_output_tokens": 65536,
         "install_guide": "Get a free API key at https://aistudio.google.com/apikey",
     },
     "Groq": {
         "base_url": "https://api.groq.com/openai/v1",
-        "model": "llama-3.1-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "default_keys": [],
         "max_output_tokens": 32768,
         "install_guide": "Get a free API key at https://console.groq.com/keys",
     },
     "OpenAI": {
         "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o",
+        "model": "gpt-5.5",
         "default_keys": [],
         "max_output_tokens": 32768,
     },
     "Anthropic": {
         "base_url": "https://api.anthropic.com/v1",
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-5",
         "default_keys": [],
         "max_output_tokens": 64000,
     },
     "xAI": {
         "base_url": "https://api.x.ai/v1",
-        "model": "grok-3-beta",
+        "model": "grok-4.6",
         "default_keys": [],
         "max_output_tokens": 65536,
     },
@@ -193,6 +193,64 @@ PROVIDERS = {
         "max_output_tokens": 32768,
     },
 }
+
+# Models ByteProof shipped as defaults in earlier versions. When a saved
+# provider still points at one of these, it was never customised, so it is
+# refreshed to the current default (a user's own model choice is preserved).
+# Verified 2026-09-10: DeepSeek "deepseek-v4-flash" is retired (served by
+# V4.1-Flash), Groq dropped "llama-3.1-70b-versatile", and Google/OpenAI/
+# Anthropic/xAI have all superseded the listed snapshots.
+SUPERSEDED_DEFAULT_MODELS: dict[str, frozenset[str]] = {
+    "DeepSeek": frozenset(
+        {"deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-chat", "deepseek-reasoner"}
+    ),
+    "Google Gemini": frozenset(
+        {"gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "gemini-1.5-flash"}
+    ),
+    "Groq": frozenset(
+        {
+            "llama-3.1-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama-3.3-70b-versatile",
+            "mixtral-8x7b-32768",
+        }
+    ),
+    "OpenAI": frozenset({"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1", "gpt-5", "gpt-5.1"}),
+    "Anthropic": frozenset(
+        {
+            "claude-sonnet-4-20250514",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-opus-4-20250514",
+        }
+    ),
+    "xAI": frozenset({"grok-3-beta", "grok-3", "grok-3-mini", "grok-4", "grok-4-5"}),
+}
+
+
+def refresh_superseded_models(settings: dict[str, Any]) -> list[str]:
+    """Point never-customised providers at the current default model.
+
+    Only models ByteProof itself used to ship are replaced, so a model the
+    user chose deliberately is never touched. Returns the providers updated
+    (used for logging and tests).
+    """
+    updated: list[str] = []
+    providers = settings.get("providers")
+    if not isinstance(providers, dict):
+        return updated
+    for name, superseded in SUPERSEDED_DEFAULT_MODELS.items():
+        config = providers.get(name)
+        if not isinstance(config, dict):
+            continue
+        current = str(config.get("model", "")).strip()
+        if not current or current not in superseded:
+            continue
+        new_model = PROVIDERS.get(name, {}).get("model")
+        if new_model and new_model != current:
+            config["model"] = new_model
+            updated.append(name)
+    return updated
 
 def resource_path(relative_path: str) -> str:
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -345,8 +403,11 @@ def load_runtime_settings() -> dict[str, Any]:
         settings["live_preview"].update(loaded["live_preview"])
 
     _migrate_mac_hotkeys(settings)
+    refreshed = refresh_superseded_models(settings)
+    if refreshed:
+        print(f"Updated default models for: {', '.join(refreshed)}")
     settings["general"]["temperature"] = max(0.0, min(2.0, settings["general"]["temperature"]))
-    _stamp_version_and_save(settings)
+    _stamp_version_and_save(settings, force=bool(refreshed))
     return settings
 
 
@@ -379,20 +440,21 @@ def _migrate_mac_hotkeys(settings: dict[str, Any]) -> None:
         general["open_hotkey"] = "<cmd>+<shift>+;"
 
 
-def _stamp_version_and_save(settings: dict[str, Any]) -> None:
+def _stamp_version_and_save(settings: dict[str, Any], force: bool = False) -> None:
     """Record the app version that last wrote settings.json.
 
     This lets future releases detect an upgrade and run one-time migrations,
     while never touching the user's hotkeys, license, or other preferences.
+    ``force`` persists the file even when the version is unchanged, which is
+    needed when a migration changed something (e.g. refreshed model defaults).
     """
     stored_version = settings.get("app_version")
     settings["app_version"] = APP_VERSION
-    if stored_version == APP_VERSION:
+    if stored_version == APP_VERSION and not force:
         return
     try:
-        os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
+        # Reuse the atomic, 0600 writer: this file holds provider API keys.
+        save_runtime_settings(settings)
     except OSError:
         pass
 

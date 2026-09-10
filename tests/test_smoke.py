@@ -3325,7 +3325,9 @@ def test_settings_new_pages() -> None:
     labels = [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())]
     assert labels[:4] == ["General", "Automation", "Connect", "Local AI"]
     # License and Updates are first-class pages, not icon-only shortcuts.
-    assert "License" in labels and "Updates" in labels
+    # (The label may carry a status suffix, e.g. "License  ✓" or "Updates •".)
+    assert any(label.startswith("License") for label in labels)
+    assert any(label.startswith("Updates") for label in labels)
     local_item = dialog.sidebar.item(3)
     assert local_item is not None and local_item.text() == "Local AI"
     automation_item = dialog.sidebar.item(1)
@@ -3342,8 +3344,12 @@ def test_settings_new_pages() -> None:
     assert dialog.settings["local_model"]["active_model"] == "qwen3-4b"
     assert dialog.settings["providers"]["ByteProof Local (Qwen3)"]["model"] == "qwen3-4b"
 
-    dialog.update_icon_btn.click()
+    # The Updates page is reached from its sidebar row; the duplicate
+    # icon-only shortcut was removed so there is one entry point per page.
+    dialog.sidebar.setCurrentRow(5)
+    dialog.change_page(5)
     app.processEvents()
+    assert dialog.pages.currentWidget() is dialog.updates_page
     assert dialog.update_check_btn.text() == "Check for Updates"
     assert dialog.version_label.text() == settings.APP_VERSION
     dialog.close()

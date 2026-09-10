@@ -1019,3 +1019,140 @@ def test_sync_message_explains_an_unreadable_selection(monkeypatch):
         )
     ]
     service.stop()
+
+
+# --- provider defaults stay on current models -------------------------------
+
+
+def test_provider_defaults_are_current_models() -> None:
+    """Verified 2026-09-10 against each vendor's own documentation."""
+    from src.settings import PROVIDERS
+
+    expected = {
+        "DeepSeek": "deepseek-flash",
+        "Google Gemini": "gemini-3.8-flash",
+        "Groq": "openai/gpt-oss-120b",
+        "OpenAI": "gpt-5.5",
+        "Anthropic": "claude-sonnet-5",
+        "xAI": "grok-4.6",
+        "Perplexity": "sonar-pro",
+    }
+    for name, model in expected.items():
+        assert PROVIDERS[name]["model"] == model, name
+
+
+def test_provider_base_urls_are_current() -> None:
+    from src.settings import PROVIDERS
+
+    assert PROVIDERS["DeepSeek"]["base_url"] == "https://api.deepseek.com"
+    assert (
+        PROVIDERS["Google Gemini"]["base_url"]
+        == "https://generativelanguage.googleapis.com/v1beta/openai"
+    )
+    assert PROVIDERS["Groq"]["base_url"] == "https://api.groq.com/openai/v1"
+    assert PROVIDERS["OpenAI"]["base_url"] == "https://api.openai.com/v1"
+    assert PROVIDERS["Anthropic"]["base_url"] == "https://api.anthropic.com/v1"
+    assert PROVIDERS["xAI"]["base_url"] == "https://api.x.ai/v1"
+    assert PROVIDERS["Perplexity"]["base_url"] == "https://api.perplexity.ai"
+
+
+def test_superseded_defaults_are_refreshed_but_custom_choices_kept() -> None:
+    from src.settings import PROVIDERS, refresh_superseded_models
+
+    settings = {
+        "providers": {
+            "DeepSeek": {"model": "deepseek-v4-flash"},      # retired name
+            "OpenAI": {"model": "gpt-4o"},                    # old default
+            "Google Gemini": {"model": "gemini-2.5-flash"},   # old default
+            "Groq": {"model": "llama-3.1-70b-versatile"},     # dropped by Groq
+            "Anthropic": {"model": "claude-sonnet-4-20250514"},
+            "xAI": {"model": "grok-3-beta"},
+            "Perplexity": {"model": "sonar-pro"},             # still current
+            "Ollama (Local)": {"model": "my-local-model"},    # user's own
+            "ByteProof Local (Qwen3)": {"model": "qwen3-8b"}, # user's own
+        }
+    }
+    updated = refresh_superseded_models(settings)
+
+    assert set(updated) == {
+        "DeepSeek",
+        "OpenAI",
+        "Google Gemini",
+        "Groq",
+        "Anthropic",
+        "xAI",
+    }
+    providers = settings["providers"]
+    assert providers["DeepSeek"]["model"] == PROVIDERS["DeepSeek"]["model"]
+    assert providers["OpenAI"]["model"] == "gpt-5.5"
+    assert providers["Google Gemini"]["model"] == "gemini-3.8-flash"
+    assert providers["Groq"]["model"] == "openai/gpt-oss-120b"
+    assert providers["Anthropic"]["model"] == "claude-sonnet-5"
+    assert providers["xAI"]["model"] == "grok-4.6"
+    # Untouched: a current model, and anything the user chose themselves.
+    assert providers["Perplexity"]["model"] == "sonar-pro"
+    assert providers["Ollama (Local)"]["model"] == "my-local-model"
+    assert providers["ByteProof Local (Qwen3)"]["model"] == "qwen3-8b"
+
+
+def test_deepseek_config_uses_the_canonical_model_name() -> None:
+    from config.deepseek_config import DEEPSEEK_BASE_URL, DEEPSEEK_CHAT_MODEL
+
+    assert DEEPSEEK_CHAT_MODEL == "deepseek-flash"
+    assert DEEPSEEK_BASE_URL == "https://api.deepseek.com"
+
+
+# --- settings sidebar: one entry point per page -----------------------------
+
+
+def _make_settings_dialog():
+    """Build a SettingsDialog with an owner that outlives the assertions.
+
+    A parentless dialog is destroyed by the garbage collector at an
+    unpredictable moment, which on macOS destabilises whatever runs next; the
+    parent keeps its lifetime under the test's control.
+    """
+    from PyQt6.QtWidgets import QApplication, QWidget
+
+    from src import settings as settings_mod
+    from src.gui import SettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    owner = QWidget()
+    dialog = SettingsDialog(settings_mod.load_runtime_settings(), owner)
+    return app, owner, dialog
+
+
+def _dispose(dialog, owner, app) -> None:
+    dialog.close()
+    dialog.deleteLater()
+    owner.deleteLater()
+    app.processEvents()
+
+
+def test_settings_sidebar_has_no_duplicate_icon_shortcuts() -> None:
+    app, owner, dialog = _make_settings_dialog()
+    labels = [
+        dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())
+    ]
+    assert labels[:4] == ["General", "Automation", "Connect", "Local AI"]
+    # The label may carry a status suffix ("License  ✓" / "Updates •").
+    assert labels[4].startswith("License")
+    assert labels[5].startswith("Updates")
+    # The duplicate icon-only shortcuts are gone.
+    assert not hasattr(dialog, "update_icon_btn")
+    assert not hasattr(dialog, "license_icon_btn")
+    # ...and the rows themselves carry an icon + explanatory tooltip.
+    assert not dialog.sidebar.item(4).icon().isNull()
+    assert not dialog.sidebar.item(5).icon().isNull()
+    assert dialog.sidebar.item(4).toolTip()
+    _dispose(dialog, owner, app)
+
+
+def test_sidebar_shows_a_pending_update() -> None:
+    app, owner, dialog = _make_settings_dialog()
+    dialog.note_update_available("2.0.3")
+    assert dialog.sidebar.item(5).text() == "Updates •"
+    assert "2.0.3" in dialog.sidebar.item(5).toolTip()
+    assert dialog.sidebar.item(5).text().startswith("Updates")
+    _dispose(dialog, owner, app)

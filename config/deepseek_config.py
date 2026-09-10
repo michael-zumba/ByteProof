@@ -12,7 +12,10 @@ import os
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # Model Configurations
-DEEPSEEK_CHAT_MODEL = "deepseek-v4-flash"
+# Canonical model name per https://api-docs.deepseek.com/quick_start/pricing
+# ("deepseek-flash" is DeepSeek-V4.1-Flash; the legacy "deepseek-v4-flash"
+# name resolves to the same model but the model behind it was retired).
+DEEPSEEK_CHAT_MODEL = "deepseek-flash"
 
 # Default safe margin for output tokens (leaves room for input context).
 DEFAULT_MAX_OUTPUT_CHAT = 192000

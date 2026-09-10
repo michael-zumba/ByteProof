@@ -529,6 +529,12 @@ def test_card_pop_in_animation_completes():
     card.pop_in()
     assert card.windowOpacity() < 1.0  # animation started dimmed
     QTest.qWait(350)
+    # Animations are time-based: give a loaded machine a moment to finish
+    # rather than asserting on a single frame.
+    for _ in range(20):
+        if card.windowOpacity() == 1.0:
+            break
+        QTest.qWait(50)
     assert card.windowOpacity() == 1.0
     assert card.geometry() == target
 
