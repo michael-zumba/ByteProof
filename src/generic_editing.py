@@ -58,9 +58,9 @@ RANGE_CONFIRM_DELAY_S = 0.12
 # A paste is consumed asynchronously by the target app. Before restoring the
 # user's clipboard the app must be observed holding the pasted text; the short
 # settle afterwards covers web views that finish the insert a beat later.
-PASTE_CONFIRM_TIMEOUT_S = 1.5
-PASTE_CONFIRM_INTERVAL_S = 0.15
-PASTE_SETTLE_S = 0.35
+PASTE_CONFIRM_TIMEOUT_S = 1.2
+PASTE_CONFIRM_INTERVAL_S = 0.08
+PASTE_SETTLE_S = 0.15
 
 
 def _redact(text: str | None) -> str:
@@ -88,6 +88,17 @@ def _debug_log(msg: str) -> None:
     except Exception:
         pass
 
+
+# The Accessibility subtree walk to find the element that owns the selection is
+# the most expensive part of every poll tick. The element for a given app is
+# stable in practice, so it is cached and only re-discovered when it stops
+# answering or the focused element moves to a different editable field.
+_ax_element_cache: dict[int, tuple[float, Any, Any]] = {}
+AX_ELEMENT_CACHE_S = 2.5
+# Role/settable probes for the editable gate are stable for a given element, so
+# they are cached per (app, element) instead of re-probed on every tick.
+_editable_cache: dict[tuple[int, Any], tuple[float, bool]] = {}
+EDITABLE_CACHE_S = 2.5
 
 _last_logged: dict[str, str] = {}
 
@@ -527,6 +538,17 @@ class GenericTextEditor:
 
     @staticmethod
     def _ax_editable(AS: Any, pid: int, found: Any) -> bool:
+        """Cached wrapper around the editable probe (called every tick)."""
+        key = (pid, id(AS), found)
+        cached = _editable_cache.get(key)
+        if cached is not None and time.monotonic() - cached[0] < EDITABLE_CACHE_S:
+            return cached[1]
+        verdict = GenericTextEditor._ax_editable_probe(AS, pid, found)
+        _editable_cache[key] = (time.monotonic(), verdict)
+        return verdict
+
+    @staticmethod
+    def _ax_editable_probe(AS: Any, pid: int, found: Any) -> bool:
         """Whether the selection context is editable.
 
         Two signals, either of which is enough:
@@ -638,6 +660,29 @@ class GenericTextEditor:
                     pass
             return best[1] if best[0] >= 0 else None
 
+        # 1. The focused element is already the text field in most apps.
+        if focused is not None and element_score(focused) >= 2:
+            GenericTextEditor._cache_ax_element(pid, AS, focused)
+            GenericTextEditor._log_element_once(pid, AS, focused, "text-element")
+            return AS, focused
+
+        # 2. Reuse the element found on a recent tick when it still answers and
+        #    the focus has not moved to a different editable field.
+        cached = _ax_element_cache.get(pid)
+        if cached is not None:
+            stamp, cached_as, cached_el = cached
+            if time.monotonic() - stamp < AX_ELEMENT_CACHE_S:
+                try:
+                    err_role, _role = cached_as.AXUIElementCopyAttributeValue(
+                        cached_el, cached_as.kAXRoleAttribute, None
+                    )
+                    if err_role == 0:
+                        return cached_as, cached_el
+                except Exception:
+                    pass
+            _ax_element_cache.pop(pid, None)
+
+        # 3. Full search (containers, canvases, web views).
         found = search([focused], 60, 24)
         if found is None:
             try:
@@ -655,11 +700,22 @@ class GenericTextEditor:
             except Exception:
                 pass
         if found is not None:
+            GenericTextEditor._cache_ax_element(pid, AS, found)
             GenericTextEditor._log_element_once(
                 pid, AS, found, "text-element"
             )
             return AS, found
         return AS, focused
+
+    @staticmethod
+    def _cache_ax_element(pid: int, AS: Any, element: Any) -> None:
+        _ax_element_cache[pid] = (time.monotonic(), AS, element)
+
+    @staticmethod
+    def clear_ax_caches() -> None:
+        """Drop cached AX elements (used when the frontmost app changes)."""
+        _ax_element_cache.clear()
+        _editable_cache.clear()
 
     @staticmethod
     def _log_element_once(pid: int, AS: Any, element: Any, tag: str) -> None:
@@ -1375,9 +1431,13 @@ class GenericTextEditor:
 
         def _paste() -> None:
             _mac_set_clipboard(new_text)
-            GenericTextEditor._mac_activate(target)
+            # Activating costs ~0.3 s; when the click already left the target
+            # frontmost (the common case) it is skipped entirely.
+            if not GenericTextEditor._mac_is_frontmost(target):
+                GenericTextEditor._mac_activate(target)
+                time.sleep(0.25)
             _post_mac_key(9, target.get("pid") or 0)  # kVK_ANSI_V
-            time.sleep(0.35)
+            time.sleep(0.2)
 
         saved = _mac_clipboard_string()
         try:
@@ -1422,6 +1482,20 @@ class GenericTextEditor:
             _mac_restore_clipboard(saved)
 
     @staticmethod
+    def _mac_is_frontmost(target: dict[str, Any]) -> bool:
+        """Whether the target app already owns the keyboard focus."""
+        pid = target.get("pid")
+        if not pid:
+            return False
+        try:
+            from AppKit import NSWorkspace
+
+            active = NSWorkspace.sharedWorkspace().frontmostApplication()
+            return bool(active and int(active.processIdentifier()) == int(pid))
+        except Exception:
+            return False
+
+    @staticmethod
     def _mac_activate(target: dict[str, Any]) -> bool:
         pid = target.get("pid")
         if not pid:
@@ -1452,9 +1526,10 @@ class GenericTextEditor:
             saved_clipboard = _mac_clipboard_string()
             _mac_set_clipboard(new_text)
             try:
-                if not GenericTextEditor._mac_activate(target):
-                    return False, "Could not activate the target app."
-                time.sleep(0.3)
+                if not GenericTextEditor._mac_is_frontmost(target):
+                    if not GenericTextEditor._mac_activate(target):
+                        return False, "Could not activate the target app."
+                    time.sleep(0.25)
 
                 keycode = 9  # kVK_ANSI_V
                 _post_mac_key(keycode, target.get("pid") or 0)

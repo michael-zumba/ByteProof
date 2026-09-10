@@ -61,6 +61,17 @@ UNDO_STACK_MAX = 5
 # How long the "no changes needed" panel lingers before fading away.
 CLEAN_PANEL_MS = 2600
 
+# If the user switches to another app while suggestions are on screen, the
+# panel is kept (so Apply still works on the captured selection) for this
+# long before it is dismissed as stale.
+PANEL_DETACH_KEEPALIVE_MS = 20000
+# How often the detached panel re-checks that its selection is intact.
+DETACH_REVALIDATE_S = 1.5
+# Selections that appeared during an apply are ignored for this long.
+SUPPRESS_SELECTION_S = 15.0
+# When Word stops answering (modal dialog), stop polling it for this long.
+WORD_BUSY_BACKOFF_S = 5.0
+
 # Word's AppleScript selection read takes a few hundred milliseconds, so
 # polling Word at the full rate keeps the UI thread busy and makes the app
 # feel slow. Word polls at a relaxed cadence; every other app keeps the
@@ -127,6 +138,19 @@ class _EscapeBridge(QObject):
             pass
 
 
+_word_busy_logged_at = 0.0
+
+
+def _log_word_busy_once(exc: Exception) -> None:
+    """Report a busy Word once per back-off window instead of every tick."""
+    global _word_busy_logged_at
+    now = time.monotonic()
+    if now - _word_busy_logged_at < 30.0:
+        return
+    _word_busy_logged_at = now
+    _debug_log(f"LIVE SKIP: Word busy ({exc})")
+
+
 class LivePreviewService(QObject):
     """Shows a suggestion panel for the current selection, nothing more."""
 
@@ -155,6 +179,7 @@ class LivePreviewService(QObject):
         self._selection_target: dict[str, Any] = {}
         self._selection_is_word = False
         self._word_document = ""
+        self._word_busy_until = 0.0
         self._retry_not_before: float | None = None
         self._fail_streak = 0
         self._last_now = 0.0
@@ -175,6 +200,21 @@ class LivePreviewService(QObject):
         self._undo_previous: list[dict[str, Any]] = []
         self._access_checked_at: float | None = None
         self._access_allowed = True
+        # True from the moment the user commits to an apply until it has
+        # finished: the poll loop stays out of the way so a new selection
+        # (or another app coming forward) can neither abort the apply nor
+        # start a second preview.
+        self._applying = False
+        self._apply_started_text = ""
+        self._poll_paused_for_apply = False
+        self._apply_previous_app: dict[str, Any] = {}
+        self._apply_foreign_frontmost: dict[str, Any] = {}
+        self._detach_timer: QTimer | None = None
+        self._detach_checked_at = 0.0
+        # (pid, text) selections that appeared while an apply was running:
+        # the user was reading, not asking for suggestions, so these are not
+        # auto-previewed until the selection changes again.
+        self._suppressed_selections: dict[tuple[int, str], float] = {}
         self._dismissed_at: float | None = None
         self._undo_timer: QTimer | None = None
         self._last_anchor: QPoint | None = None
@@ -235,6 +275,11 @@ class LivePreviewService(QObject):
         self._last_now = now
         if not self._settings.get("live_preview", {}).get("enabled", True):
             return
+        if self._applying:
+            # An apply owns the selection right now. Reading AX state here
+            # would (a) slow the apply down and (b) hide the panel or retarget
+            # the selection while edits are still being written.
+            return
         target = self._editor.frontmost_app()
         if not target:
             return
@@ -255,6 +300,10 @@ class LivePreviewService(QObject):
             if self._timer.interval() != wanted:
                 self._timer.setInterval(wanted)
         permission_ok, _ = self._editor.permission_status()
+        if is_word and now < getattr(self, "_word_busy_until", 0.0):
+            # Word is busy (usually a modal dialog); skip the expensive read
+            # until the back-off expires instead of blocking the UI thread.
+            return
         if is_word:
             from .word_integration import get_word_integration
 
@@ -262,7 +311,12 @@ class LivePreviewService(QObject):
                 text, start, end, before, after = (
                     get_word_integration().get_selection_info()
                 )
-            except Exception:
+            except Exception as exc:
+                # A modal dialog in Word makes every AppleScript call time out.
+                # Backing off keeps the UI responsive and stops the poll from
+                # hammering a busy app; the user is told once.
+                self._word_busy_until = now + WORD_BUSY_BACKOFF_S
+                _log_word_busy_once(exc)
                 return
             details = {
                 "text": text,
@@ -345,8 +399,27 @@ class LivePreviewService(QObject):
             self._last_clipboard_text = ""
             self._last_clipboard_target = {}
 
+        if self._selection_is_suppressed(target, text):
+            # Reading, not requesting: keep the state in sync without
+            # triggering a preview for this particular selection.
+            self._seen_text = text
+            self._previewed_text = text
+            self._candidate_text = ""
+            self._candidate_count = 0
+            # Any panel already on screen belongs to the captured selection
+            # (the keep-alive case), so it is deliberately left alone.
+            return
         if self._selection_target_changed(target):
-            self._hide_panel()
+            # Cached Accessibility elements belong to the previous app.
+            clear_caches = getattr(self._editor, "clear_ax_caches", None)
+            if callable(clear_caches):
+                clear_caches()
+            # The user moved to another app. The suggestions belong to the
+            # selection they captured earlier, and Apply still works on it
+            # (the apply activates that app just long enough to paste), so the
+            # panel is kept for a while instead of vanishing under the cursor.
+            if not self._keep_panel_for_detached_target(target):
+                self._hide_panel()
         if text != self._seen_text:
             # Restart the debounce clock on the first read of a new value,
             # but only commit the change once two consecutive polls agree:
@@ -415,7 +488,7 @@ class LivePreviewService(QObject):
                     (details.get("range") or (0, 0))[1] if is_word else 0
                 )
                 self._selection_is_word = is_word
-                self._word_document = self._read_word_document() if is_word else ""
+                self._word_document = ""
                 self._selection_has_range = (
                     details.get("range") is not None
                 )
@@ -440,7 +513,7 @@ class LivePreviewService(QObject):
         self._selection_start = (details.get("range") or (0, 0))[0]
         self._selection_end = (details.get("range") or (0, 0))[1] if is_word else 0
         self._selection_is_word = is_word
-        self._word_document = self._read_word_document() if is_word else ""
+        self._word_document = ""
         self._selection_has_range = details.get("range") is not None
         key = preview_cache_key(
             bundle,
@@ -461,6 +534,51 @@ class LivePreviewService(QObject):
         return self._selection_target.get("pid") != target.get("pid") or str(
             self._selection_target.get("bundle_id", "")
         ) != str(target.get("bundle_id", ""))
+
+    def _keep_panel_for_detached_target(self, target: dict[str, Any]) -> bool:
+        """Whether the panel should survive the user switching apps.
+
+        Kept only while suggestions are waiting, the captured app is still
+        running, and its selection still matches what was previewed; otherwise
+        the panel is stale and gets dismissed.
+        """
+        if not self._pending:
+            return False
+        if not self._target_still_running():
+            _debug_log("LIVE PANEL: captured app closed; dismissing")
+            return False
+        now = time.monotonic()
+        # While detached, re-validating on every tick would read the other
+        # app's Accessibility tree 4x a second for no benefit.
+        if now - self._detach_checked_at < DETACH_REVALIDATE_S:
+            self._arm_detach_timer()
+            return True
+        self._detach_checked_at = now
+        state = self._read_selection_state()
+        if state is None or state[0] != self._selection_text:
+            _debug_log("LIVE PANEL: captured selection changed; dismissing")
+            return False
+        self._arm_detach_timer()
+        return True
+
+    def _target_still_running(self) -> bool:
+        pid = self._selection_target.get("pid")
+        if not pid:
+            return False
+        try:
+            for app in self._editor.running_apps():
+                if app.get("pid") == pid:
+                    return True
+        except Exception:
+            return True  # cannot tell: do not dismiss on a guess
+        return False
+
+    def _arm_detach_timer(self) -> None:
+        if self._detach_timer is None:
+            self._detach_timer = QTimer(self)
+            self._detach_timer.setSingleShot(True)
+            self._detach_timer.timeout.connect(self._hide_panel)
+        self._detach_timer.start(PANEL_DETACH_KEEPALIVE_MS)
 
     def _delay(self) -> int:
         return int(
@@ -1163,6 +1281,137 @@ class LivePreviewService(QObject):
 
     # --- apply ---
 
+    def _begin_apply(self) -> None:
+        """Mark an apply as running so the poll loop leaves it alone."""
+        self._applying = True
+        self._apply_started_text = self._seen_text
+        try:
+            # Remember where the user actually is: applying activates the
+            # target app for the paste, and they should be returned to their
+            # own window afterwards.
+            self._apply_previous_app = self._editor.frontmost_app() or {}
+            self._apply_foreign_frontmost = {}
+        except Exception:
+            self._apply_previous_app = {}
+        if self._timer is not None and self._timer.isActive():
+            self._timer.stop()
+            self._poll_paused_for_apply = True
+
+    def _end_apply(self) -> None:
+        """Resume polling, without previewing a selection made mid-apply.
+
+        The user may have selected other text while the edits were being
+        written. That selection must not silently trigger a fresh preview, so
+        it is marked as already seen and the normal debounce only restarts on
+        the next deliberate selection change.
+        """
+        self._applying = False
+        try:
+            if not self._selection_target:
+                self._resume_polling_after_apply()
+                return
+            state = self._read_selection_state()
+            if state is not None:
+                text, start, _end = state
+                self._selection_text = text
+                self._seen_text = text
+                self._previewed_text = text
+                self._selection_start = start
+                self._candidate_text = ""
+                self._candidate_count = 0
+                self._changed_at = time.monotonic()
+        except Exception as exc:
+            _debug_log(f"LIVE APPLY END: state re-read failed: {exc}")
+        self._suppress_current_selection()
+        self._restore_user_focus(
+            self._selection_target, getattr(self, "_apply_previous_app", {})
+        )
+        self._resume_polling_after_apply()
+
+    def _suppress_current_selection(self) -> None:
+        """Ignore whatever is selected right now (any app) for a short while.
+
+        If the user selected other text to read while edits were being
+        written, that selection must not be treated as a request for
+        suggestions. Any later selection change still previews normally.
+        """
+        try:
+            target = self._editor.frontmost_app()
+            if not target:
+                return
+            pid = int(target.get("pid") or 0)
+            if not pid or pid == int(self._selection_target.get("pid") or 0):
+                return  # same app: _end_apply already marks the text as seen
+            text = self._editor.get_selection_ax_only(target)
+            if text:
+                now = time.monotonic()
+                self._suppressed_selections[(pid, text)] = now
+                # Bound the store: it is only meaningful for a few seconds.
+                self._suppressed_selections = {
+                    key: stamp
+                    for key, stamp in self._suppressed_selections.items()
+                    if now - stamp < SUPPRESS_SELECTION_S
+                }
+        except Exception as exc:
+            _debug_log(f"LIVE APPLY: selection suppression skipped: {exc}")
+
+    def _selection_is_suppressed(self, target: dict[str, Any], text: str) -> bool:
+        """Whether this (app, selection) was made while an apply was running."""
+        if not self._suppressed_selections or not text:
+            return False
+        pid = int(target.get("pid") or 0)
+        stamp = self._suppressed_selections.get((pid, text))
+        if stamp is None:
+            return False
+        if time.monotonic() - stamp > SUPPRESS_SELECTION_S:
+            self._suppressed_selections.pop((pid, text), None)
+            return False
+        return True
+
+    def _resume_polling_after_apply(self) -> None:
+        if getattr(self, "_poll_paused_for_apply", False):
+            self._poll_paused_for_apply = False
+        if self._timer is not None and not self._timer.isActive():
+            self._timer.start()
+
+    def _note_foreign_frontmost(self) -> None:
+        """Remember the last app the user was in that is not the target.
+
+        The paste briefly activates the target app, so this is what lets the
+        user be returned to their own window - even if they moved to it after
+        clicking Apply.
+        """
+        try:
+            current = self._editor.frontmost_app()
+        except Exception:
+            return
+        if not current:
+            return
+        if current.get("pid") == self._selection_target.get("pid"):
+            return
+        self._apply_foreign_frontmost = current
+
+    def _restore_user_focus(self, target: dict[str, Any], previous: dict[str, Any]) -> None:
+        """Give focus back to the app the user was in before the paste.
+
+        Applying needs the target app frontmost for a moment (a paste has to
+        land in a focused field). If the user had switched to another app
+        while the edits were being prepared, they are returned to it instead
+        of being stranded in the edited window.
+        """
+        try:
+            recent = getattr(self, "_apply_foreign_frontmost", None) or previous
+            previous_pid = recent.get("pid") if recent else None
+            if not previous_pid or previous_pid == target.get("pid"):
+                return
+            previous = recent
+            current = self._editor.frontmost_app()
+            if current and current.get("pid") == previous_pid:
+                return
+            self._editor.activate(previous)
+        except Exception as exc:
+            _debug_log(f"LIVE APPLY: could not restore focus: {exc}")
+
     def _read_word_document(self) -> str:
         """Name of the Word document the current selection belongs to.
 
@@ -1192,12 +1441,17 @@ class LivePreviewService(QObject):
         if self._selection_is_word:
             from .word_integration import get_word_integration
 
+            self._note_foreign_frontmost()
             word = get_word_integration()
             start = self._selection_start + rel_start
             end = start + length
             compensated = self._word_compensated_span(word, rel_start, length)
             if compensated is not None:
                 start, end = compensated
+            if not self._word_document:
+                # One AppleScript read per selection, at apply time (not on
+                # every preview, where it only added latency).
+                self._word_document = self._read_word_document()
             ok, message = word.apply_live_edit(
                 0,
                 start,
@@ -1207,6 +1461,7 @@ class LivePreviewService(QObject):
                 expected_document=self._word_document or None,
             )
             return ok, message, start
+        self._note_foreign_frontmost()
         abs_start = self._selection_start + rel_start
         ok, message = self._editor.ax_replace_range(
             self._selection_target,
@@ -1280,16 +1535,25 @@ class LivePreviewService(QObject):
     def _apply_one(self, index: int) -> None:
         if not (0 <= index < len(self._pending)):
             return
+        if self._applying:
+            return
         _debug_log(
             f"LIVE APPLY ONE: index={index} "
             f"app={self._selection_target.get('name')!r} "
             f"has_range={self._selection_has_range} "
             f"is_word={self._selection_is_word}"
         )
+        self._begin_apply()
+        try:
+            self._apply_one_locked(index)
+        finally:
+            self._end_apply()
+
+    def _apply_one_locked(self, index: int) -> None:
         if not self._selection_has_range:
             # No absolute range available (Mail/Pages clipboard path): paste
             # the fully corrected selection over the current one.
-            self._apply_full_selection()
+            self._apply_full_selection_locked()
             return
         sync_ok, sync_reason = self._sync_selection()
         for _ in range(2):
@@ -1365,13 +1629,22 @@ class LivePreviewService(QObject):
     def _apply_all(self) -> None:
         if not self._pending:
             return
+        if self._applying:
+            return
         _debug_log(
             f"LIVE APPLY ALL: app={self._selection_target.get('name')!r} "
             f"has_range={self._selection_has_range} "
             f"count={len(self._pending)}"
         )
+        self._begin_apply()
+        try:
+            self._apply_all_locked()
+        finally:
+            self._end_apply()
+
+    def _apply_all_locked(self) -> None:
         if not self._selection_has_range:
-            self._apply_full_selection()
+            self._apply_full_selection_locked()
             return
         sync_ok, sync_reason = self._sync_selection()
         for _ in range(2):
@@ -1442,6 +1715,15 @@ class LivePreviewService(QObject):
         Pages) and no absolute range exists, so sub-range replacement is
         impossible. The target app replaces its current selection on paste.
         """
+        if self._applying:
+            return
+        self._begin_apply()
+        try:
+            self._apply_full_selection_locked()
+        finally:
+            self._end_apply()
+
+    def _apply_full_selection_locked(self) -> None:
         _debug_log(
             f"LIVE FULL APPLY: app={self._selection_target.get('name')!r} "
             f"count={len(self._pending)}"

@@ -15,6 +15,9 @@ WD_WITH_IN_TABLE = 12  # Word constant: wdWithInTable
 APPLESCRIPT_TIMEOUT_S = 30.0
 # Short reads (document/selection state) should fail fast rather than freeze.
 APPLESCRIPT_READ_TIMEOUT_S = 10.0
+# The live poll reads the selection on every tick: a busy Word must not
+# stall the loop, so the poll read is bounded much tighter.
+WORD_POLL_READ_TIMEOUT_S = 3.0
 
 # How many characters of a field's visible result the macOS fallback scan may
 # read before giving up. A page of text is roughly 3,000-3,500 characters, so
@@ -793,6 +796,7 @@ class MacOSWordIntegration(WordIntegration):
             raise RuntimeError("Unable to disable Track Changes in Microsoft Word.") from last_error
 
     def get_selection_info(self) -> tuple[str, int, int, str, str]:
+        """Read the current selection (short timeout: this runs every poll)."""
         script = """
         tell application "Microsoft Word"
             if not (exists active document) then error "No active Word document is open."
@@ -837,7 +841,9 @@ class MacOSWordIntegration(WordIntegration):
         end tell
         """
         try:
-            result = self._run_applescript(script)
+            result = self._run_applescript(
+                script, timeout=WORD_POLL_READ_TIMEOUT_S
+            )
             if "###PROOF_SEP###" in result:
                 parts = result.split("###PROOF_SEP###")
                 if len(parts) >= 5:

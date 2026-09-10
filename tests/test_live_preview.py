@@ -29,7 +29,7 @@ def _settings(**live):
     base = {
         "live_preview": {
             "enabled": True,
-            "delay_ms": 900,
+            "delay_ms": 600,
             "max_chars": 1500,
             "use_local_model": True,
         }
@@ -643,7 +643,7 @@ def test_service_decision_flow_skips_unchanged(monkeypatch):
         {
             "live_preview": {
                 "enabled": True,
-                "delay_ms": 900,
+                "delay_ms": 600,
                 "max_chars": 1500,
                 "use_local_model": True,
             }
@@ -799,7 +799,7 @@ def test_load_runtime_settings_includes_live_preview_defaults(monkeypatch, tmp_p
     loaded = settings_mod.load_runtime_settings()
     assert loaded["live_preview"] == {
         "enabled": True,
-        "delay_ms": 900,
+        "delay_ms": 600,
         "max_chars": 1500,
         "use_local_model": True,
         "style": "strict",
@@ -814,14 +814,14 @@ def test_load_runtime_settings_merges_existing_live_preview(monkeypatch, tmp_pat
     monkeypatch.setattr(settings_mod, "SETTINGS_FILE", str(path))
     loaded = settings_mod.load_runtime_settings()
     assert loaded["live_preview"]["enabled"] is False
-    assert loaded["live_preview"]["delay_ms"] == 900
+    assert loaded["live_preview"]["delay_ms"] == 600
 
 
 def _live_settings():
     return {
         "live_preview": {
             "enabled": True,
-            "delay_ms": 900,
+            "delay_ms": 600,
             "max_chars": 1500,
             "use_local_model": True,
         }
@@ -2595,7 +2595,7 @@ def test_refresh_settings_emits_disabled_status():
     states = []
     service.live_status.connect(states.append)
     service.refresh_settings(
-        {"live_preview": {"enabled": False, "delay_ms": 900}}
+        {"live_preview": {"enabled": False, "delay_ms": 600}}
     )
     assert states == ["disabled"]
 
@@ -2641,6 +2641,13 @@ def test_live_test_now_probes_last_user_app(monkeypatch):
     window = ProofreaderApp(1024, loaded)
     try:
         service = window.live_service
+        if service is None:
+            # The live service is not started for offscreen runs (it would
+            # poll the real frontmost app), so attach one for this test.
+            from src.live_service import LivePreviewService
+
+            service = LivePreviewService(window)
+            window.live_service = service
 
         class FakeEditor:
             @staticmethod

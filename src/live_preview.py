@@ -27,7 +27,10 @@ SUPPORTED_BUNDLE_IDS = frozenset(
 
 SELF_BUNDLE_MARKERS = ("bytemind", "byteproof")
 
-DEFAULT_DELAY_MS = 900
+# How long the selection must be stable before the preview is requested.
+# 600 ms still filters out in-progress drags while making the panel feel
+# noticeably quicker; the two-read confirmation is unchanged.
+DEFAULT_DELAY_MS = 600
 MIN_DELAY_MS = 400
 MAX_DELAY_MS = 2000
 DEFAULT_MAX_CHARS = 1500
@@ -35,7 +38,9 @@ MIN_PREVIEW_CHARS = 8
 CONTEXT_CHARS = 200
 PREVIEW_MAX_OUTPUT_TOKENS = 512
 PREVIEW_MAX_EDITS = 12
-POLL_INTERVAL_MS = 350
+# Selection poll cadence. The Accessibility element lookup is cached, so
+# a faster tick costs little and cuts detection latency.
+POLL_INTERVAL_MS = 250
 CACHE_MAX = 64
 UNDERLINE_COLOR_HEX = "#E23A5B"
 

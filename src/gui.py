@@ -3933,7 +3933,14 @@ class ProofreaderApp(QMainWindow):
         self.toast = ToastNotification()
         self._start_app_tracking()
         self.live_service = None
-        if platform.system() == "Darwin":
+        # The poll reads the real frontmost app through Accessibility and
+        # AppleScript, so it is pointless (and disruptive) when the app runs
+        # without a screen - offscreen Qt, i.e. the test suite.
+        offscreen = False
+        _app = QApplication.instance()
+        if _app is not None:
+            offscreen = "offscreen" in _app.platformName()
+        if platform.system() == "Darwin" and not offscreen:
             from .live_service import LivePreviewService
 
             self.live_service = LivePreviewService(self)

@@ -595,3 +595,283 @@ def test_request_completion_resets_stop_reason(monkeypatch) -> None:
     )
     assert text == "corrected"
     assert logic.last_response_was_truncated() is False
+
+
+# --- applies must survive focus changes --------------------------------------
+
+
+def _apply_service(monkeypatch, frontmost: dict[str, Any]):
+    """A service whose captured target is NOT the frontmost app."""
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    applied: list[tuple[int, int, str]] = []
+    frontmost_calls: list[int] = []
+
+    class FakeEditor:
+        def frontmost_app(self):
+            frontmost_calls.append(1)
+            return dict(frontmost)
+
+        def selection_details(self, target):
+            assert target.get("pid") == 4242  # the captured target, not front
+            return {
+                "text": "teh cat",
+                "range": (10, 6),
+                "context_before": "",
+                "context_after": "",
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            assert target.get("pid") == 4242
+            applied.append((start, length, new))
+            return True, "Applied."
+
+        def activate(self, target):
+            return True
+
+    service._editor = FakeEditor()
+    service._selection_target = {"bundle_id": "com.x", "pid": 4242, "name": "X"}
+    service._selection_start = 10
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = "teh cat"
+    service._seen_text = "teh cat"
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    return service, applied, frontmost_calls
+
+
+def test_apply_one_works_while_another_app_is_frontmost(monkeypatch):
+    service, applied, _ = _apply_service(
+        monkeypatch, {"bundle_id": "com.other", "pid": 99, "name": "Other"}
+    )
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_one(0)
+
+    assert applied == [(10, 3, "the")]  # the captured selection was edited
+    assert messages and messages[0] == "Applied."
+    service.stop()
+
+
+def test_apply_all_works_while_another_app_is_frontmost(monkeypatch):
+    from src.live_preview import EditSpan
+
+    service, applied, _ = _apply_service(
+        monkeypatch, {"bundle_id": "com.other", "pid": 99, "name": "Other"}
+    )
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("cat", "dog", "Word choice", 4, 3),
+    ]
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert applied[0] == (10, 3, "the")
+    assert len(applied) == 2
+    assert messages and messages[0].startswith("Applied")
+    service.stop()
+
+
+def test_poll_is_silent_while_an_apply_runs(monkeypatch):
+    """A new selection mid-apply must not spawn a preview or hide the panel."""
+    service, _applied, frontmost_calls = _apply_service(
+        monkeypatch, {"bundle_id": "com.other", "pid": 99, "name": "Other"}
+    )
+    spawned: list[Any] = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawned.append(a))
+    hidden: list[int] = []
+    monkeypatch.setattr(service, "_hide_panel", lambda: hidden.append(1))
+
+    service._applying = True
+    service._sample(now=1000.0)
+    service._sample(now=2000.0)
+
+    assert spawned == []
+    assert hidden == []
+    assert frontmost_calls == []  # the poll did not even read the screen
+    service._applying = False
+    service.stop()
+
+
+def test_selection_made_during_apply_is_not_auto_previewed(monkeypatch):
+    """Text selected while edits were being written is marked as seen.
+
+    The user asked for it explicitly: selecting something else to read during
+    an apply must neither interrupt the apply nor trigger a fresh preview.
+    """
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+
+    class FakeEditor:
+        def frontmost_app(self):
+            return {"bundle_id": "com.example", "pid": 5, "name": "App"}
+
+        def selection_details(self, target):
+            # The selection the user made while the apply was running.
+            return {
+                "text": "other text being read",
+                "range": (0, 21),
+                "context_before": "",
+                "context_after": "",
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+        def activate(self, target):
+            return True
+
+    service._editor = FakeEditor()
+    service._selection_target = {"bundle_id": "com.example", "pid": 5, "name": "App"}
+    service._selection_has_range = True
+    service._seen_text = "the text that was just edited"
+    service._previewed_text = "the text that was just edited"
+    service._applying = True
+
+    service._end_apply()
+
+    assert service._seen_text == "other text being read"
+    assert service._previewed_text == "other text being read"
+    assert service._candidate_text == ""
+    assert service._applying is False
+    service.stop()
+
+
+def test_selection_in_another_app_during_apply_is_suppressed(monkeypatch):
+    """Text selected elsewhere while an apply runs is not auto-previewed."""
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+
+    class FakeEditor:
+        def frontmost_app(self):
+            return {"bundle_id": "com.slack", "pid": 77, "name": "Slack"}
+
+        def get_selection_ax_only(self, target):
+            return "a message the user is reading"
+
+        def activate(self, target):
+            return True
+
+    service._editor = FakeEditor()
+    service._selection_target = {"bundle_id": "com.apple.TextEdit", "pid": 5}
+    service._applying = True
+
+    service._end_apply()
+
+    assert service._selection_is_suppressed(
+        {"pid": 77}, "a message the user is reading"
+    )
+    # A different selection in that app previews normally.
+    assert not service._selection_is_suppressed({"pid": 77}, "something else")
+    # So does the same text in another app.
+    assert not service._selection_is_suppressed(
+        {"pid": 78}, "a message the user is reading"
+    )
+    service.stop()
+
+
+def test_panel_survives_app_switch_while_suggestions_wait(monkeypatch):
+    """Switching apps must not destroy suggestions the user can still apply."""
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+
+    class FakeEditor:
+        def running_apps(self):
+            return [{"pid": 5, "bundle_id": "com.apple.TextEdit"}]
+
+        def selection_details(self, target):
+            return {
+                "text": "teh cat",
+                "range": (0, 6),
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+    service._editor = FakeEditor()
+    service._selection_target = {"bundle_id": "com.apple.TextEdit", "pid": 5}
+    service._selection_text = "teh cat"
+    service._seen_text = "teh cat"
+    service._selection_has_range = True
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+
+    keep = service._keep_panel_for_detached_target(
+        {"bundle_id": "com.other", "pid": 99}
+    )
+    assert keep is True
+
+    # If the captured selection no longer matches, the panel is dismissed.
+    service._selection_text = "teh cat"
+    service._editor.selection_details = lambda target: {
+        "text": "different text now",
+        "range": (0, 18),
+        "found": True,
+        "editable": True,
+        "role": "AXTextArea",
+    }
+    service._detach_checked_at = 0.0
+    assert (
+        service._keep_panel_for_detached_target(
+            {"bundle_id": "com.other", "pid": 99}
+        )
+        is False
+    )
+    service.stop()
+
+
+def test_panel_is_dismissed_when_captured_app_closed(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+
+    class FakeEditor:
+        def running_apps(self):
+            return [{"pid": 42, "bundle_id": "com.other"}]
+
+    service._editor = FakeEditor()
+    service._selection_target = {"bundle_id": "com.apple.TextEdit", "pid": 5}
+    service._selection_text = "teh cat"
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    assert (
+        service._keep_panel_for_detached_target(
+            {"bundle_id": "com.other", "pid": 42}
+        )
+        is False
+    )
+    service.stop()
