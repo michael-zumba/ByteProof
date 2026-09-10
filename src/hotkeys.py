@@ -146,7 +146,10 @@ class _MacOSHotkeyManager:
                 for flags, _char, variants, cb in self.parsed_hotkeys:
                     matches_char = ev_char in variants
                     matches_escape = _char == "\x1b" and event.keyCode() == 53
-                    if ev_flags_masked == flags and (matches_char or matches_escape):
+                    matches_return = _char == "\r" and event.keyCode() in (36, 76)
+                    if ev_flags_masked == flags and (
+                        matches_char or matches_escape or matches_return
+                    ):
                         log_debug(f"Matched hotkey: {variants}")
                         cb()
             except Exception as e:
@@ -190,6 +193,8 @@ class _MacOSHotkeyManager:
                 flags |= self._appkit.NSEventModifierFlagOption
             elif p == "<esc>":
                 char = "\x1b"
+            elif p in ("<return>", "<enter>"):
+                char = "\r"
             else:
                 char = p
         variants = {char}

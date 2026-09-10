@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.0.2-beta.10"
+APP_VERSION = "2.0.2-beta.11"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -301,6 +301,10 @@ def load_runtime_settings() -> dict[str, Any]:
             "context": "General Editing",
             "open_hotkey": "<cmd>+<shift>+;",
             "proofread_hotkey": "<cmd>+<shift>+'",
+            # Turn live suggestions on/off without opening Settings.
+            "live_toggle_hotkey": "<cmd>+<shift>+l",
+            # Apply every suggestion in the visible panel.
+            "apply_all_hotkey": "<cmd>+<shift>+<return>",
         },
         "active_provider": LOCAL_MODEL_PROVIDER,
         "local_model": {

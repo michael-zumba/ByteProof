@@ -1635,3 +1635,184 @@ def test_settings_sidebar_shows_every_page_without_scrolling():
     # A status suffix must not create a horizontal scrollbar either.
     assert bar.horizontalScrollBar().maximum() == 0
     _dispose(dialog, owner, app)
+
+
+# --- hotkeys: toggle live suggestions, apply all ----------------------------
+
+
+def test_new_hotkeys_have_defaults_and_round_trip() -> None:
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import SettingsDialog
+
+    QApplication.instance() or QApplication([])
+    defaults = settings_mod.load_runtime_settings()["general"]
+    assert defaults["live_toggle_hotkey"] == "<cmd>+<shift>+l"
+    assert defaults["apply_all_hotkey"] == "<cmd>+<shift>+<return>"
+
+    # The settings fields must survive a Qt round-trip (Qt calls Return
+    # "Return", pynput calls it "<return>").
+    dialog = SettingsDialog(settings_mod.load_runtime_settings())
+    assert dialog.live_toggle_hotkey_edit.keySequence().toString() == "Ctrl+Shift+L"
+    assert (
+        dialog.apply_all_hotkey_edit.keySequence().toString()
+        == "Ctrl+Shift+Return"
+    )
+    saved = dialog.get_settings()["general"]
+    assert saved["live_toggle_hotkey"] == "<cmd>+<shift>+l"
+    assert saved["apply_all_hotkey"] == "<cmd>+<shift>+<return>"
+    dialog.deleteLater()
+
+
+def test_return_key_is_parsed_for_hotkeys() -> None:
+    """The parser matched Escape by keycode; Return needs the same."""
+    from src import hotkeys
+
+    with open(hotkeys.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert 'p in ("<return>", "<enter>")' in source
+    assert "matches_return" in source
+
+
+def test_apply_all_hotkey_applies_pending_suggestions(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+
+    class FakeEditor:
+        def frontmost_app(self):
+            return {"bundle_id": "com.example", "pid": 5, "name": "App"}
+
+        def selection_details(self, target):
+            return {
+                "text": "teh cat sat",
+                "range": (0, 11),
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            return True, "Applied."
+
+        def activate(self, target):
+            return True
+
+    service._editor = FakeEditor()
+    service._selection_target = {"bundle_id": "com.example", "pid": 5}
+    service._selection_text = "teh cat sat"
+    service._seen_text = "teh cat sat"
+    service._selection_has_range = True
+    service._selection_start = 0
+
+    # Nothing on screen: the shortcut stays quiet.
+    assert service.apply_all_now() is False
+
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+    assert service.apply_all_now() is True
+    assert messages and messages[0].startswith("Applied")
+    service.stop()
+
+
+def test_live_toggle_hotkey_flips_the_setting(monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+
+    from src import gui as gui_mod
+    from src import settings as settings_mod
+
+    QApplication.instance() or QApplication([])
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        gui_mod, "save_runtime_settings", lambda s: saved.append(dict(s))
+    )
+    window = gui_mod.ProofreaderApp(1024, settings_mod.load_runtime_settings())
+    monkeypatch.setattr(window, "_refresh_live_service", lambda: None)
+    monkeypatch.setattr(window, "_apply_live_status", lambda *a, **k: None)
+    toasts: list[tuple] = []
+    monkeypatch.setattr(
+        window, "_show_toast", lambda msg, kind="success": toasts.append((msg, kind))
+    )
+
+    before = window.settings.get("live_preview", {}).get("enabled", True)
+    window._on_live_toggle_hotkey()
+    assert window.settings["live_preview"]["enabled"] is (not before)
+    assert toasts and toasts[0][0] in ("Live suggestions on", "Live suggestions off")
+    assert saved, "the change is persisted"
+    window._on_live_toggle_hotkey()
+    assert window.settings["live_preview"]["enabled"] is before
+    window.close()
+
+
+# --- no beeping: no copy keystrokes after an apply --------------------------
+
+
+def test_no_clipboard_read_after_an_apply_in_mail(monkeypatch):
+    """The paste consumes the selection; re-reading it would make Mail beep."""
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    copies: list[int] = []
+
+    class MailEditor:
+        def is_frontmost(self, target):
+            return True
+
+        def frontmost_app(self):
+            return {"bundle_id": "com.apple.mail", "pid": 9, "name": "Mail"}
+
+        def get_selection_by_copy(self, target, attempts=2):
+            copies.append(attempts)
+            return "Everything else stays where it belongs: "
+
+        def get_selection_light(self, target):
+            return ""
+
+        def replace_selection(self, target, new_text):
+            return True, "Applied."
+
+        def activate(self, target):
+            return True
+
+        def running_apps(self):
+            return [{"pid": 9, "bundle_id": "com.apple.mail"}]
+
+    service._editor = MailEditor()
+    service._pending = [EditSpan("belongs:", "belongs.", "Punctuation", 0, 8)]
+    service._selection_target = {
+        "bundle_id": "com.apple.mail",
+        "pid": 9,
+        "name": "Mail",
+    }
+    service._selection_text = "Everything else stays where it belongs: "
+    service._seen_text = service._selection_text
+    service._selection_has_range = False
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+
+    service._apply_all()
+    copies.clear()
+
+    # After the apply the state is kept without another copy read...
+    service._end_apply()
+    assert copies == []
+    # ...and the idle read stays disarmed until the user works again.
+    assert service._idle_read_done is True
+    service.stop()

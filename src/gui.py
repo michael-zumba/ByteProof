@@ -1415,24 +1415,54 @@ class SettingsDialog(QDialog):
         title = QLabel("General")
         title.setObjectName("SettingsTitle")
         layout.addWidget(title)
-        
-        prefs_group = QGroupBox("Preferences")
-        prefs_layout = QVBoxLayout(prefs_group)
+
+        subtitle = QLabel(
+            "How ByteProof behaves while you write. Changes save when you "
+            "close this window."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet(
+            "color: #6B6259; font-size: 12px; background: transparent;"
+        )
+        layout.addWidget(subtitle)
+
+        def hint(text: str) -> QLabel:
+            """Small muted explanation under a control."""
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setStyleSheet(
+                "color: #6B6259; font-size: 12px; background: transparent;"
+                "padding-left: 24px;"
+            )
+            return label
+
+        app_group = QGroupBox("App & Window")
+        prefs_layout = QVBoxLayout(app_group)
         prefs_layout.setSpacing(12)
-        
+
         self.chk_launch_login = QCheckBox("Launch at login")
         self.chk_launch_login.setChecked(self.settings.get("general", {}).get("launch_at_login", False))
         prefs_layout.addWidget(self.chk_launch_login)
-        
+
         self.chk_keep_top = QCheckBox("Keep window on top")
         self.chk_keep_top.setChecked(self.settings.get("general", {}).get("keep_on_top", True))
         self.chk_keep_top.setToolTip("Tip: use the Quit button or the tray icon menu to close the app.")
         prefs_layout.addWidget(self.chk_keep_top)
 
+        self.chk_sound = QCheckBox("Play a sound when proofreading starts")
+        self.chk_sound.setChecked(
+            self.settings.get("general", {}).get("play_sound_on_proofread", True)
+        )
+        prefs_layout.addWidget(self.chk_sound)
+
+        word_group = QGroupBox("Microsoft Word")
+        word_layout = QVBoxLayout(word_group)
+        word_layout.setSpacing(12)
+
         self.chk_auto_apply = QCheckBox("Auto-apply corrections to Word document")
         self.chk_auto_apply.setChecked(self.settings.get("general", {}).get("auto_apply", True))
         self.chk_auto_apply.setToolTip("When enabled, proofreading changes are applied directly to the Word document. When disabled, suggestions appear as comments instead.")
-        prefs_layout.addWidget(self.chk_auto_apply)
+        word_layout.addWidget(self.chk_auto_apply)
 
         self.chk_track_changes = QCheckBox("Enable Track Changes in Word")
         self.chk_track_changes.setChecked(self.settings.get("general", {}).get("track_changes", True))
@@ -1441,14 +1471,14 @@ class SettingsDialog(QDialog):
             "tracked revisions you can accept or reject. When disabled, ByteProof turns "
             "Track Changes off during proofreading and applies edits directly."
         )
-        prefs_layout.addWidget(self.chk_track_changes)
+        word_layout.addWidget(self.chk_track_changes)
+        word_layout.addWidget(
+            hint(
+                "Track Changes keeps every edit reviewable in Word. Turn it off "
+                "to have ByteProof apply corrections directly instead."
+            )
+        )
 
-        self.chk_sound = QCheckBox("Play sound when proofreading starts")
-        self.chk_sound.setChecked(self.settings.get("general", {}).get("play_sound_on_proofread", True))
-        self.chk_sound.setToolTip("Play a short chime when a proofreading task starts.")
-        prefs_layout.addWidget(self.chk_sound)
-
-        layout.addWidget(prefs_group)
 
         live_group = QGroupBox("Live Suggestions (Beta)")
         live_layout = QVBoxLayout(live_group)
@@ -1467,6 +1497,16 @@ class SettingsDialog(QDialog):
             "selection, or press Escape to dismiss the panel."
         )
         live_layout.addWidget(self.chk_live_preview)
+        live_layout.addWidget(
+            hint(
+                "Select a few words or more in any app and suggestions appear "
+                "next to your text. "
+                f"{self.display_hotkey(self.settings.get('general', {}).get('live_toggle_hotkey', '<cmd>+<shift>+l'))}"
+                " pauses them, "
+                f"{self.display_hotkey(self.settings.get('general', {}).get('apply_all_hotkey', '<cmd>+<shift>+<return>'))}"
+                " applies everything on screen, and Escape dismisses the panel."
+            )
+        )
 
         delay_row = QHBoxLayout()
         delay_label = QLabel("Preview delay")
@@ -1535,7 +1575,11 @@ class SettingsDialog(QDialog):
         style_row.addStretch()
         live_layout.addLayout(style_row)
 
+        # The live controls are the most-used part of this page, so they come
+        # first, followed by the app and Word cards.
         layout.addWidget(live_group)
+        layout.addWidget(app_group)
+        layout.addWidget(word_group)
 
         if platform.system() != "Darwin":
             # The live engine reads selections through the macOS Accessibility
@@ -1578,6 +1622,48 @@ class SettingsDialog(QDialog):
         proofread_seq_str = self.pynput_to_qt(self.settings.get("general", {}).get("proofread_hotkey", "<cmd>+<shift>+'"))
         self.proofread_hotkey_edit.setKeySequence(QKeySequence(proofread_seq_str))
         hotkey_layout.addRow("Proofread Selection:", self.proofread_hotkey_edit)
+
+        self.live_toggle_hotkey_edit = QKeySequenceEdit()
+        try:
+            self.live_toggle_hotkey_edit.setClearButtonEnabled(True)
+        except AttributeError:
+            pass
+        live_seq_str = self.pynput_to_qt(
+            self.settings.get("general", {}).get(
+                "live_toggle_hotkey", "<cmd>+<shift>+l"
+            )
+        )
+        self.live_toggle_hotkey_edit.setKeySequence(QKeySequence(live_seq_str))
+        self.live_toggle_hotkey_edit.setToolTip(
+            "Turn live suggestions on or off from anywhere. Handy when you "
+            "want to write without the panel appearing."
+        )
+        hotkey_layout.addRow("Toggle Live Suggestions:", self.live_toggle_hotkey_edit)
+
+        self.apply_all_hotkey_edit = QKeySequenceEdit()
+        try:
+            self.apply_all_hotkey_edit.setClearButtonEnabled(True)
+        except AttributeError:
+            pass
+        apply_all_seq_str = self.pynput_to_qt(
+            self.settings.get("general", {}).get(
+                "apply_all_hotkey", "<cmd>+<shift>+<return>"
+            )
+        )
+        self.apply_all_hotkey_edit.setKeySequence(QKeySequence(apply_all_seq_str))
+        self.apply_all_hotkey_edit.setToolTip(
+            "While the suggestion panel is on screen, apply every suggestion "
+            "at once without clicking."
+        )
+        hotkey_layout.addRow("Apply All Suggestions:", self.apply_all_hotkey_edit)
+        hotkey_hint = hint(
+            "These work in any app, even while ByteProof stays in the "
+            "background. Click a field and press the keys you want."
+        )
+        hotkey_hint.setStyleSheet(
+            "color: #6B6259; font-size: 12px; background: transparent;"
+        )
+        hotkey_layout.addRow("", hotkey_hint)
         
         layout.addWidget(hotkey_group)
         
@@ -1620,6 +1706,12 @@ class SettingsDialog(QDialog):
         slider_grid.setColumnStretch(1, 1)
         
         temp_layout.addLayout(slider_grid)
+        temp_layout.addWidget(
+            hint(
+                "Lower values keep the edits minimal and conservative; higher "
+                "values let ByteProof rewrite more freely."
+            )
+        )
         
         self.temp_slider.valueChanged.connect(self.update_temp_label)
         self.update_temp_label(self.temp_slider.value())
@@ -2388,6 +2480,8 @@ class SettingsDialog(QDialog):
             elif p == '<ctrl>': qt_parts.append('Meta' if is_macos else 'Ctrl')
             elif p == '<shift>': qt_parts.append('Shift')
             elif p == '<alt>': qt_parts.append('Alt')
+            elif p == '<return>': qt_parts.append('Return')
+            elif p == '<esc>': qt_parts.append('Esc')
             else: qt_parts.append(p.upper() if len(p)==1 else p.capitalize())
         return '+'.join(qt_parts)
 
@@ -2402,20 +2496,28 @@ class SettingsDialog(QDialog):
             elif p == 'Meta': pynput_parts.append('<ctrl>')
             elif p == 'Shift': pynput_parts.append('<shift>')
             elif p == 'Alt': pynput_parts.append('<alt>')
+            elif p.lower() in ('return', 'enter'): pynput_parts.append('<return>')
+            elif p.lower() in ('esc', 'escape'): pynput_parts.append('<esc>')
             else: pynput_parts.append(p.lower())
         return '+'.join(pynput_parts)
 
     @staticmethod
     def display_hotkey(hk: str) -> str:
-        if platform.system() == "Darwin":
-            return (hk.replace('<cmd>', 'Cmd')
-                      .replace('<shift>', 'Shift')
-                      .replace('<ctrl>', 'Ctrl')
-                      .replace('<alt>', 'Option'))
-        return (hk.replace('<cmd>', 'Ctrl')
-                  .replace('<shift>', 'Shift')
-                  .replace('<ctrl>', 'Ctrl')
-                  .replace('<alt>', 'Alt'))
+        """Render a stored hotkey for humans: Cmd+Shift+L, Cmd+Shift+↩."""
+        is_mac = platform.system() == "Darwin"
+        text = hk
+        for token, label in (
+            ('<cmd>', 'Cmd' if is_mac else 'Ctrl'),
+            ('<shift>', 'Shift'),
+            ('<ctrl>', 'Ctrl'),
+            ('<alt>', 'Option' if is_mac else 'Alt'),
+            ('<return>', '↩'),
+            ('<enter>', '↩'),
+            ('<esc>', 'Esc'),
+        ):
+            text = text.replace(token, label)
+        parts = [part.upper() if len(part) == 1 else part for part in text.split('+')]
+        return '+'.join(parts)
 
     def init_connect_tab(self) -> None:
         page = QWidget()
@@ -3638,6 +3740,12 @@ class SettingsDialog(QDialog):
         
         proofread_seq = self.proofread_hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         self.settings["general"]["proofread_hotkey"] = self.qt_to_pynput(proofread_seq)
+
+        live_seq = self.live_toggle_hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        self.settings["general"]["live_toggle_hotkey"] = self.qt_to_pynput(live_seq)
+
+        apply_all_seq = self.apply_all_hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        self.settings["general"]["apply_all_hotkey"] = self.qt_to_pynput(apply_all_seq)
         
         return self.settings
 
@@ -3758,6 +3866,8 @@ class ProofreaderApp(QMainWindow):
     # thread instead of touching widgets from another thread.
     proofread_hotkey_pressed: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
     escape_hotkey_pressed: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
+    live_toggle_hotkey_pressed: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
+    apply_all_hotkey_pressed: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
 
     def __init__(self, max_tokens: int, settings: dict[str, Any]) -> None:
         super().__init__()
@@ -3772,6 +3882,8 @@ class ProofreaderApp(QMainWindow):
         self.request_show.connect(self.show_and_raise)
         self.proofread_hotkey_pressed.connect(self._on_proofread_hotkey)
         self.escape_hotkey_pressed.connect(self._on_escape_hotkey)
+        self.live_toggle_hotkey_pressed.connect(self._on_live_toggle_hotkey)
+        self.apply_all_hotkey_pressed.connect(self._on_apply_all_hotkey)
         
         self.setWindowTitle(APP_NAME)
         self.setGeometry(120, 120, 840, 600)
@@ -4371,6 +4483,20 @@ class ProofreaderApp(QMainWindow):
             hotkeys_dict[open_hk] = lambda: self.request_show.emit()
         if proofread_hk:
             hotkeys_dict[proofread_hk] = lambda: self.proofread_hotkey_pressed.emit()
+        live_toggle_hk = self.settings.get("general", {}).get(
+            "live_toggle_hotkey", "<cmd>+<shift>+l"
+        )
+        if live_toggle_hk and live_toggle_hk not in hotkeys_dict:
+            hotkeys_dict[live_toggle_hk] = (
+                lambda: self.live_toggle_hotkey_pressed.emit()
+            )
+        apply_all_hk = self.settings.get("general", {}).get(
+            "apply_all_hotkey", "<cmd>+<shift>+<return>"
+        )
+        if apply_all_hk and apply_all_hk not in hotkeys_dict:
+            hotkeys_dict[apply_all_hk] = (
+                lambda: self.apply_all_hotkey_pressed.emit()
+            )
             
         if not hotkeys_dict:
             print("No hotkeys defined.")
@@ -4620,6 +4746,36 @@ class ProofreaderApp(QMainWindow):
             worker = getattr(self, attr, None)
             if worker is not None and worker.isRunning():
                 worker.cancel_event.set()
+
+    def _on_live_toggle_hotkey(self) -> None:
+        """Toggle live suggestions on or off from anywhere."""
+        general = self.settings.setdefault("general", {})
+        live = self.settings.setdefault("live_preview", {})
+        enabled = not bool(live.get("enabled", True))
+        live["enabled"] = enabled
+        general["_live_toggled_at"] = time.time()
+        save_runtime_settings(self.settings)
+        self._refresh_live_service()
+        self._apply_live_status("waiting" if enabled else "disabled")
+        self._show_toast(
+            "Live suggestions on" if enabled else "Live suggestions off",
+            kind="success" if enabled else "warning",
+        )
+
+    def _on_apply_all_hotkey(self) -> None:
+        """Apply every suggestion in the panel that is currently on screen."""
+        service = getattr(self, "live_service", None)
+        if service is None:
+            return
+        try:
+            applied = service.apply_all_now()
+        except Exception as exc:
+            print(f"Apply-all hotkey failed: {exc}")
+            return
+        if not applied:
+            # Nothing on screen: stay quiet rather than showing an error for a
+            # shortcut the user may have pressed out of habit.
+            return
 
     def _on_escape_hotkey(self) -> None:
         """Double-Esc cancels the running task (always on the GUI thread)."""

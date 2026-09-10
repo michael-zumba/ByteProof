@@ -58,6 +58,8 @@ SELECTION_MOUSE_WINDOW_S = 1.2
 # A drag must have happened this recently for a mouse selection to count.
 SELECTION_DRAG_WINDOW_S = 3.0
 SELECTION_IDLE_SETTLE_S = 1.2
+# A keyboard selection chord must be this old before a read is worth it.
+CHORD_SETTLE_S = 0.5
 USER_ACTIVE_WINDOW_S = 0.6
 ACCESS_CACHE_TTL_S = 30.0
 # After a refusal, do not re-check on every selection change.
@@ -133,6 +135,106 @@ class PreviewWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class _InputWatcher(QObject):
+    """Notices when the user actually made a text selection.
+
+    Mail and Pages expose no Accessibility selection, so reading one means
+    posting Command-C - which beeps when nothing is selected. This observes
+    (never consumes) the user's own input and records the last moment a
+    selection gesture happened: a drag, a double-click, or a Shift/Cmd chord.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.drag_selection_at = 0.0
+        self.chord_at = 0.0
+        self._dragged_at = 0.0
+        self._last_click_at = 0.0
+        self._monitor: Any = None
+        self._handler: Any = None
+
+    def start(self) -> bool:
+        """Install the observe-only monitor; False when unavailable."""
+        if self._monitor is not None:
+            return True
+        app = QApplication.instance()
+        if app is None or "offscreen" in app.platformName():
+            return False
+        try:
+            import AppKit
+
+            mask = 0
+            for name in (
+                "NSLeftMouseDraggedMask",
+                "NSEventMaskLeftMouseDragged",
+                "NSLeftMouseUpMask",
+                "NSEventMaskLeftMouseUp",
+                "NSKeyDownMask",
+                "NSEventMaskKeyDown",
+            ):
+                value = getattr(AppKit, name, None)
+                if value is not None:
+                    mask |= int(value)
+            if not mask:
+                return False
+            self._handler = self._on_event
+            self._monitor = (
+                AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                    mask, self._handler
+                )
+            )
+            return self._monitor is not None
+        except Exception as exc:
+            _debug_log(f"LIVE WATCHER: could not start ({exc})")
+            self._monitor = None
+            self._handler = None
+            return False
+
+    def stop(self) -> None:
+        if self._monitor is None:
+            return
+        try:
+            import AppKit
+
+            AppKit.NSEvent.removeMonitor_(self._monitor)
+        except Exception:
+            pass
+        self._monitor = None
+        self._handler = None
+
+    def _on_event(self, event: Any) -> None:
+        try:
+            import AppKit
+
+            kind = int(event.type())
+            now = time.monotonic()
+            if kind == int(getattr(AppKit, "NSEventTypeLeftMouseDragged", 6)):
+                self._dragged_at = now
+            elif kind == int(getattr(AppKit, "NSEventTypeLeftMouseUp", 2)):
+                if now - self._dragged_at <= 1.5 or now - self._last_click_at <= 0.45:
+                    self.drag_selection_at = now
+                self._last_click_at = now
+            elif kind == int(getattr(AppKit, "NSEventTypeKeyDown", 10)):
+                shift = int(getattr(AppKit, "NSEventModifierFlagShift", 1 << 17))
+                command = int(
+                    getattr(AppKit, "NSEventModifierFlagCommand", 1 << 20)
+                )
+                if int(event.modifierFlags()) & (shift | command):
+                    self.chord_at = now
+        except Exception:
+            pass
+
+    def drag_selection_age(self) -> float | None:
+        if not self.drag_selection_at:
+            return None
+        return time.monotonic() - self.drag_selection_at
+
+    def chord_age(self) -> float | None:
+        if not self.chord_at:
+            return None
+        return time.monotonic() - self.chord_at
+
+
 class _EscapeBridge(QObject):
     """Receives global key events off the main thread and re-emits them."""
 
@@ -195,6 +297,7 @@ class LivePreviewService(QObject):
         self._last_clipboard_read_at = 0.0
         self._clipboard_empty_streak = 0
         self._idle_read_done = False
+        self._watcher = _InputWatcher()
         self._last_clipboard_text = ""
         self._last_clipboard_target: dict[str, Any] = {}
         self._last_permission_ok: bool | None = None
@@ -242,6 +345,7 @@ class LivePreviewService(QObject):
 
     def start(self) -> None:
         self._cancel_event.clear()
+        self._watcher.start()
         if self._timer is None:
             self._timer = QTimer(self)
             self._timer.setInterval(POLL_INTERVAL_MS)
@@ -249,6 +353,7 @@ class LivePreviewService(QObject):
         self._timer.start()
 
     def stop(self) -> None:
+        self._watcher.stop()
         if self._timer is not None:
             self._timer.stop()
         self._drag_paused_poll = False
@@ -641,6 +746,23 @@ class LivePreviewService(QObject):
         (which also catches keyboard selections) - never in a steady loop while
         they type or read.
         """
+        if self._watcher_active():
+            # Precise path: the monitor saw exactly what the user did.
+            drag_age = self._watcher.drag_selection_age()
+            if drag_age is not None and drag_age <= SELECTION_MOUSE_WINDOW_S:
+                _debug_log("LIVE CLIPBOARD: read after a selection gesture")
+                return True
+            chord_age = self._watcher.chord_age()
+            if (
+                chord_age is not None
+                and CHORD_SETTLE_S <= chord_age <= SELECTION_MOUSE_WINDOW_S
+            ):
+                _debug_log("LIVE CLIPBOARD: read after a keyboard selection")
+                return True
+            # Nothing the user just did selected text, so a copy keystroke
+            # would only make the app beep.
+            return False
+
         idle_reader = getattr(self._editor, "idle_seconds", None)
         mouse_reader = getattr(self._editor, "mouse_up_seconds", None)
         if not callable(idle_reader) or not callable(mouse_reader):
@@ -1064,6 +1186,10 @@ class LivePreviewService(QObject):
                 "Select the text again to get fresh suggestions."
             )
         return "Could not verify the selection — please try again."
+
+    def _watcher_active(self) -> bool:
+        """Whether the input monitor is installed (and authoritative)."""
+        return getattr(self._watcher, "_monitor", None) is not None
 
     def _bring_target_forward(self) -> bool:
         """Activate the captured app so its selection can be read again.
@@ -1522,17 +1648,30 @@ class LivePreviewService(QObject):
         the next deliberate selection change.
         """
         self._applying = False
+        # An apply consumes the selection: the paste replaced it. Reading it
+        # again would post Command-C with nothing selected, which makes Mail
+        # and Pages beep - so the idle read stays disarmed until the user
+        # interacts again.
+        self._idle_read_done = True
         try:
             if not self._selection_target:
                 self._resume_polling_after_apply()
                 return
-            state = self._read_selection_state()
-            if state is not None:
-                text, start, _end = state
-                self._selection_text = text
-                self._seen_text = text
-                self._previewed_text = text
-                self._selection_start = start
+            if self._selection_has_range or self._selection_is_word:
+                # Accessibility or AppleScript read: no keystroke involved.
+                state = self._read_selection_state()
+                if state is not None:
+                    text, start, _end = state
+                    self._selection_text = text
+                    self._seen_text = text
+                    self._previewed_text = text
+                    self._selection_start = start
+                    self._candidate_text = ""
+                    self._candidate_count = 0
+                    self._changed_at = time.monotonic()
+            else:
+                # Clipboard-only app (Mail, Pages): keep the known state; the
+                # next real selection updates it.
                 self._candidate_text = ""
                 self._candidate_count = 0
                 self._changed_at = time.monotonic()
@@ -1843,6 +1982,21 @@ class LivePreviewService(QObject):
             panel.set_spans(remaining)
             panel.show()
 
+    def panel_showing_suggestions(self) -> bool:
+        """Whether the suggestion panel is on screen with something to apply."""
+        return bool(self._pending) and self._panel is not None
+
+    def apply_all_now(self) -> bool:
+        """Apply every pending suggestion (used by the Apply All hotkey).
+
+        Returns False when there is nothing on screen to apply, so the caller
+        can stay silent instead of showing an error.
+        """
+        if not self._pending or self._applying:
+            return False
+        self._apply_all()
+        return True
+
     def _apply_all(self) -> None:
         if not self._pending:
             return
@@ -2074,9 +2228,11 @@ class LivePreviewService(QObject):
         """Read the selection back and report honestly."""
         try:
             time.sleep(0.2)
-            got = self._read_selection_by_copy() or self._editor.get_selection_light(
+            # Accessibility first (free); only fall back to one copy keystroke,
+            # which beeps if the app has nothing selected.
+            got = self._editor.get_selection_light(
                 self._selection_target
-            )
+            ) or self._read_selection_by_copy(attempts=1)
             if got and got.strip() == corrected.strip():
                 _debug_log("LIVE FULL APPLY: verified")
                 return "Applied all suggestions to the selection."
