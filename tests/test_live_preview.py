@@ -2532,3 +2532,67 @@ def test_readiness_row_updates_per_state():
         assert window.live_action_btn.text() == "Open Settings"
     finally:
         window.close()
+
+
+def test_live_test_now_probes_remembered_target(monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+
+    QApplication.instance() or QApplication([])
+    loaded = settings_mod.load_runtime_settings()
+    loaded["general"]["auto_apply"] = False
+    window = ProofreaderApp(1024, loaded)
+    try:
+        service = window.live_service
+
+        class FakeEditor:
+            @staticmethod
+            def frontmost_app():
+                return {
+                    "bundle_id": "nz.co.bytemind.byteproof",
+                    "pid": 999,
+                    "name": "ByteProof",
+                }
+
+            @staticmethod
+            def permission_status():
+                return True, ""
+
+            @staticmethod
+            def selection_details(target):
+                return {
+                    "text": "teh cat sat",
+                    "range": (0, 11),
+                    "context_before": "",
+                    "context_after": "",
+                    "found": True,
+                    "editable": True,
+                    "role": "AXTextArea",
+                }
+
+            @staticmethod
+            def is_word(target):
+                return False
+
+        monkeypatch.setattr(service, "_editor", FakeEditor())
+        service._selection_target = {
+            "bundle_id": "com.microsoft.word",
+            "pid": 5,
+            "name": "Microsoft Word",
+        }
+        toasts = []
+        monkeypatch.setattr(
+            window,
+            "_show_toast",
+            lambda msg, kind="success": toasts.append((msg, kind)),
+        )
+        window._test_live_now()
+        assert toasts
+        message, kind = toasts[0]
+        assert "Microsoft Word" in message  # the editing app, not ByteProof
+        assert "(11 chars)" in message
+        assert kind == "success"
+    finally:
+        window.close()

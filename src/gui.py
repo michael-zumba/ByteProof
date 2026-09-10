@@ -5508,43 +5508,63 @@ class ProofreaderApp(QMainWindow):
             return
         try:
             editor = service._editor
-            target = editor.frontmost_app()
+            # Prefer the app the live service last saw a selection in (the
+            # user just came from it) — the frontmost app here is usually
+            # ByteProof itself. Fall back to the frontmost app otherwise.
+            target = None
+            remembered = getattr(service, "_selection_target", None) or {}
+            if remembered.get("pid"):
+                target = remembered
+            if not target:
+                target = editor.frontmost_app()
             if not target:
                 self._show_toast(
-                    "Couldn't identify the frontmost app.", kind="warning"
+                    "Couldn't identify an app to test.", kind="warning"
                 )
                 return
             permission_ok, _ = editor.permission_status()
-            details = editor.selection_details(target)
-            text = (details.get("text") or "").strip()
             is_word = bool(
                 getattr(editor, "is_word", lambda _t: False)(target)
             )
+            if is_word:
+                from .word_integration import get_word_integration
+
+                try:
+                    text, _s, _e, _b, _a = (
+                        get_word_integration().get_selection_info()
+                    )
+                except Exception:
+                    text = ""
+                details = {"text": text, "found": True, "editable": True}
+            else:
+                details = editor.selection_details(target)
+            text = (details.get("text") or "").strip()
             bundle = str(target.get("bundle_id", "")).lower()
             editable = service._context_is_editable(
                 target, details, is_word, bundle
             )
-            name = target.get("name") or "the frontmost app"
+            name = target.get("name") or "the target app"
             if not permission_ok:
                 message = (
                     f"{name}: Accessibility permission is off — re-enable "
                     "ByteProof in System Settings."
                 )
-            elif is_word and text:
-                message = f"{name}: selection read OK — suggestions should work."
+            elif not text:
+                message = (
+                    f"{name}: no selection found — select some text there "
+                    "first."
+                )
             elif not editable:
                 message = (
                     f"{name}: the selection is in a read-only context — "
                     "no suggestions here."
                 )
-            elif text:
+            else:
                 message = (
                     f"{name}: selection read OK ({len(text)} chars) — "
                     "suggestions should work."
                 )
-            else:
-                message = f"{name}: no text selected right now."
-            ok_state = permission_ok and (editable or is_word) and bool(text)
+            ok_state = permission_ok and editable and bool(text)
             self._show_toast(
                 message, kind="success" if ok_state else "warning"
             )
