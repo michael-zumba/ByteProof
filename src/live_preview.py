@@ -388,6 +388,27 @@ def preview_cache_key(
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def app_allowed(live: dict[str, Any], target: dict[str, Any]) -> bool:
+    """Whether this app may trigger suggestions.
+
+    ``live_preview.app_rules`` maps an app identifier (a bundle id, an app-name
+    fragment, or ``"*"`` for everything else) to enabled/disabled. An empty
+    map means every app is allowed, which is the default.
+    """
+    rules = live.get("app_rules")
+    if not isinstance(rules, dict) or not rules:
+        return True
+    bundle = str(target.get("bundle_id", "")).lower()
+    name = str(target.get("name", "")).lower()
+    for key, enabled in rules.items():
+        marker = str(key).strip().lower()
+        if not marker or marker == "*":
+            continue
+        if marker == bundle or (len(marker) > 3 and marker in name):
+            return bool(enabled)
+    return bool(rules.get("*", True))
+
+
 def evaluate_trigger(
     settings: dict[str, Any],
     target: dict[str, Any],
@@ -400,13 +421,15 @@ def evaluate_trigger(
     """Return (decision, reason). Decisions are lowercase snake_case strings."""
     live = settings.get("live_preview", {})
     if not live.get("enabled", True):
-        return "disabled", "Live suggestions are off in Settings."
+        return "disabled", "Live Check is off in Settings."
     if not has_permission:
         return "no_permission", "Accessibility permission is required."
     bundle = str(target.get("bundle_id", "")).lower()
     name = str(target.get("name", "")).lower()
     if any(marker in bundle or marker in name for marker in SELF_BUNDLE_MARKERS):
-        return "self", "ByteProof itself is excluded from live preview."
+        return "self", "ByteProof itself is excluded from live check."
+    if not app_allowed(live, target):
+        return "app_disabled", "Live Check is turned off for this app."
     if not selected_text or not selected_text.strip():
         return "empty", "No text selected."
     length = len(selected_text.strip())

@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.0.2-beta.11"
+APP_VERSION = "2.0.2-beta.12"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -301,7 +301,7 @@ def load_runtime_settings() -> dict[str, Any]:
             "context": "General Editing",
             "open_hotkey": "<cmd>+<shift>+;",
             "proofread_hotkey": "<cmd>+<shift>+'",
-            # Turn live suggestions on/off without opening Settings.
+            # Turn Live Check on/off without opening Settings.
             "live_toggle_hotkey": "<cmd>+<shift>+l",
             # Apply every suggestion in the visible panel.
             "apply_all_hotkey": "<cmd>+<shift>+<return>",
@@ -329,6 +329,9 @@ def load_runtime_settings() -> dict[str, Any]:
             # Suggestions appear only for selections of at least this many
             # words, so a stray word or two never pings the model.
             "min_words": 3,
+            # Per-app rules: {bundle id | name fragment | "*": enabled}.
+            # Empty means every app may trigger suggestions.
+            "app_rules": {},
             "max_chars": 1500,
             "use_local_model": True,
             "style": "strict",

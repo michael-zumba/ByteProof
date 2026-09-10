@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -1034,6 +1035,38 @@ class UpdateDialog(QDialog):
         self.accept()
 
 
+def info_icon(text: str) -> QLabel:
+    """A small ⓘ whose explanation appears on hover.
+
+    Settings pages stay clean: the rationale for a control lives here instead
+    of as a paragraph of grey text under every option.
+    """
+    label = QLabel("\u24d8")
+    label.setFixedSize(16, 16)
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    label.setCursor(Qt.CursorShape.WhatsThisCursor)
+    label.setToolTip(text)
+    label.setStyleSheet(
+        "color: #9AA0A6; font-size: 12px; font-weight: 700;"
+        "background: transparent;"
+    )
+    return label
+
+
+def labelled_with_info(text: str, explanation: str) -> QWidget:
+    """A checkbox/label row followed by its ⓘ icon."""
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(6)
+    label = QLabel(text)
+    label.setStyleSheet("font-size: 13px; color: #292524;")
+    layout.addWidget(label)
+    layout.addWidget(info_icon(explanation))
+    layout.addStretch(1)
+    return row
+
+
 class SettingsDialog(QDialog):
     settings: dict[str, Any]
     sidebar: QListWidget
@@ -1135,6 +1168,7 @@ class SettingsDialog(QDialog):
         self.sidebar.addItems(
             [
                 "General",
+                "Live Check",
                 "Automation",
                 "Connect",
                 "Local AI",
@@ -1183,11 +1217,12 @@ class SettingsDialog(QDialog):
         main_layout.addWidget(content_container)
 
         self.init_general_tab()
+        self.init_live_check_tab()
+        self.init_automation_tab()
         self.init_connect_tab()
         self.init_local_tab()
         self.init_license_tab()
         self.init_updates_tab()
-        self.init_automation_tab()
         
         self.setStyleSheet("""
             QDialog {
@@ -1286,8 +1321,8 @@ class SettingsDialog(QDialog):
         update is waiting, without a second set of controls.
         """
         icons = {
-            4: ("license.svg", "License Status"),
-            5: ("update.svg", "Updates"),
+            5: ("license.svg", "License Status"),
+            6: ("update.svg", "Updates"),
         }
         parent = self.parent()
         self._pending_update_label = str(
@@ -1305,8 +1340,8 @@ class SettingsDialog(QDialog):
 
     def refresh_sidebar_status(self) -> None:
         """Show licence state and pending updates on the sidebar rows."""
-        license_item = self.sidebar.item(4)
-        updates_item = self.sidebar.item(5)
+        license_item = self.sidebar.item(5)
+        updates_item = self.sidebar.item(6)
         if license_item is not None:
             license_item.setText(f"License{self._license_badge()}")
             license_item.setToolTip(self._license_tooltip())
@@ -1362,6 +1397,7 @@ class SettingsDialog(QDialog):
             return
         page_attr = {
             "General": "general_page",
+            "Live Check": "live_page",
             "Automation": "automation_page",
             "Connect": "connect_page",
             "Local AI": "local_page",
@@ -1416,25 +1452,13 @@ class SettingsDialog(QDialog):
         title.setObjectName("SettingsTitle")
         layout.addWidget(title)
 
-        subtitle = QLabel(
-            "How ByteProof behaves while you write. Changes save when you "
-            "close this window."
-        )
+        subtitle = QLabel("How ByteProof behaves while you write.")
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet(
             "color: #6B6259; font-size: 12px; background: transparent;"
         )
         layout.addWidget(subtitle)
 
-        def hint(text: str) -> QLabel:
-            """Small muted explanation under a control."""
-            label = QLabel(text)
-            label.setWordWrap(True)
-            label.setStyleSheet(
-                "color: #6B6259; font-size: 12px; background: transparent;"
-                "padding-left: 24px;"
-            )
-            return label
 
         app_group = QGroupBox("App & Window")
         prefs_layout = QVBoxLayout(app_group)
@@ -1472,133 +1496,17 @@ class SettingsDialog(QDialog):
             "Track Changes off during proofreading and applies edits directly."
         )
         word_layout.addWidget(self.chk_track_changes)
-        word_layout.addWidget(
-            hint(
-                "Track Changes keeps every edit reviewable in Word. Turn it off "
-                "to have ByteProof apply corrections directly instead."
-            )
+        self.chk_track_changes.setToolTip(
+            "Track Changes keeps every edit reviewable in Word, so you can "
+            "accept or reject each one. Turn it off to have ByteProof apply "
+            "corrections directly instead."
         )
 
 
-        live_group = QGroupBox("Live Suggestions (Beta)")
-        live_layout = QVBoxLayout(live_group)
-        live_layout.setSpacing(12)
-
-        self.chk_live_preview = QCheckBox(
-            "Show live suggestions when text is selected"
-        )
-        self.chk_live_preview.setChecked(
-            self.settings.get("live_preview", {}).get("enabled", True)
-        )
-        self.chk_live_preview.setToolTip(
-            "Show a 'Suggested changes' panel when you select text in Word, "
-            "Pages, Mail, Outlook, or any app that exposes the selection. "
-            "Click Apply to fix one suggestion, Apply all for the whole "
-            "selection, or press Escape to dismiss the panel."
-        )
-        live_layout.addWidget(self.chk_live_preview)
-        live_layout.addWidget(
-            hint(
-                "Select a few words or more in any app and suggestions appear "
-                "next to your text. "
-                f"{self.display_hotkey(self.settings.get('general', {}).get('live_toggle_hotkey', '<cmd>+<shift>+l'))}"
-                " pauses them, "
-                f"{self.display_hotkey(self.settings.get('general', {}).get('apply_all_hotkey', '<cmd>+<shift>+<return>'))}"
-                " applies everything on screen, and Escape dismisses the panel."
-            )
-        )
-
-        delay_row = QHBoxLayout()
-        delay_label = QLabel("Preview delay")
-        self.live_delay_slider = QSlider(Qt.Orientation.Horizontal)
-        self.live_delay_slider.setRange(400, 2000)
-        self.live_delay_slider.setSingleStep(100)
-        self.live_delay_slider.setValue(
-            int(self.settings.get("live_preview", {}).get("delay_ms", 900))
-        )
-        self.live_delay_label = QLabel(f"{self.live_delay_slider.value()} ms")
-        self.live_delay_slider.valueChanged.connect(
-            lambda v: self.live_delay_label.setText(f"{v} ms")
-        )
-        delay_row.addWidget(delay_label)
-        delay_row.addWidget(self.live_delay_slider)
-        delay_row.addWidget(self.live_delay_label)
-        live_layout.addLayout(delay_row)
-
-        words_row = QHBoxLayout()
-        words_label = QLabel("Suggest only for")
-        self.live_min_words_spin = QSpinBox()
-        self.live_min_words_spin.setRange(1, 10)
-        self.live_min_words_spin.setValue(
-            int(self.settings.get("live_preview", {}).get("min_words", 3))
-        )
-        self.live_min_words_spin.setToolTip(
-            "Selections shorter than this are ignored, so a stray word or two "
-            "never triggers a suggestion."
-        )
-        words_suffix = QLabel("words or more")
-        words_row.addWidget(words_label)
-        words_row.addWidget(self.live_min_words_spin)
-        words_row.addWidget(words_suffix)
-        words_row.addStretch()
-        live_layout.addLayout(words_row)
-
-        self.chk_live_local = QCheckBox(
-            "Prefer Local AI for live suggestions (saves cloud tokens)"
-        )
-        self.chk_live_local.setChecked(
-            self.settings.get("live_preview", {}).get("use_local_model", True)
-        )
-        live_layout.addWidget(self.chk_live_local)
-
-        style_row = QHBoxLayout()
-        style_label = QLabel("Suggestion style")
-        self.live_style_combo = QComboBox()
-        self.live_style_combo.addItem(
-            "Corrections only", "strict"
-        )
-        self.live_style_combo.addItem(
-            "Polish language (preserve meaning)", "polish"
-        )
-        style_value = self.settings.get("live_preview", {}).get(
-            "style", "strict"
-        )
-        index = self.live_style_combo.findData(style_value)
-        self.live_style_combo.setCurrentIndex(max(0, index))
-        self.live_style_combo.setToolTip(
-            "'Corrections only' fixes grammar, spelling, and obvious errors. "
-            "'Polish language' also improves flow, word choice, and "
-            "conciseness while retaining the original meaning and tone."
-        )
-        style_row.addWidget(style_label)
-        style_row.addWidget(self.live_style_combo)
-        style_row.addStretch()
-        live_layout.addLayout(style_row)
-
-        # The live controls are the most-used part of this page, so they come
-        # first, followed by the app and Word cards.
-        layout.addWidget(live_group)
+        # Live Check has its own page now; General only keeps the app, Word
+        # and proofreading options.
         layout.addWidget(app_group)
         layout.addWidget(word_group)
-
-        if platform.system() != "Darwin":
-            # The live engine reads selections through the macOS Accessibility
-            # API. Showing live controls on Windows implied a feature that
-            # could never trigger, so they are disabled with a clear reason
-            # (their saved values are preserved).
-            note = QLabel(
-                "Live suggestions are available on macOS only for now. "
-                "On Windows, select text and press the proofread hotkey "
-                "to check it."
-            )
-            note.setWordWrap(True)
-            note.setStyleSheet("color: #57534E; font-size: 13px;")
-            live_layout.insertWidget(0, note)
-            self.chk_live_preview.setEnabled(False)
-            self.chk_live_local.setEnabled(False)
-            self.live_style_combo.setEnabled(False)
-            self.live_delay_slider.setEnabled(False)
-            self.live_delay_label.setEnabled(False)
 
         hotkey_group = QGroupBox("Hotkeys")
         hotkey_layout = QFormLayout(hotkey_group)
@@ -1623,48 +1531,6 @@ class SettingsDialog(QDialog):
         self.proofread_hotkey_edit.setKeySequence(QKeySequence(proofread_seq_str))
         hotkey_layout.addRow("Proofread Selection:", self.proofread_hotkey_edit)
 
-        self.live_toggle_hotkey_edit = QKeySequenceEdit()
-        try:
-            self.live_toggle_hotkey_edit.setClearButtonEnabled(True)
-        except AttributeError:
-            pass
-        live_seq_str = self.pynput_to_qt(
-            self.settings.get("general", {}).get(
-                "live_toggle_hotkey", "<cmd>+<shift>+l"
-            )
-        )
-        self.live_toggle_hotkey_edit.setKeySequence(QKeySequence(live_seq_str))
-        self.live_toggle_hotkey_edit.setToolTip(
-            "Turn live suggestions on or off from anywhere. Handy when you "
-            "want to write without the panel appearing."
-        )
-        hotkey_layout.addRow("Toggle Live Suggestions:", self.live_toggle_hotkey_edit)
-
-        self.apply_all_hotkey_edit = QKeySequenceEdit()
-        try:
-            self.apply_all_hotkey_edit.setClearButtonEnabled(True)
-        except AttributeError:
-            pass
-        apply_all_seq_str = self.pynput_to_qt(
-            self.settings.get("general", {}).get(
-                "apply_all_hotkey", "<cmd>+<shift>+<return>"
-            )
-        )
-        self.apply_all_hotkey_edit.setKeySequence(QKeySequence(apply_all_seq_str))
-        self.apply_all_hotkey_edit.setToolTip(
-            "While the suggestion panel is on screen, apply every suggestion "
-            "at once without clicking."
-        )
-        hotkey_layout.addRow("Apply All Suggestions:", self.apply_all_hotkey_edit)
-        hotkey_hint = hint(
-            "These work in any app, even while ByteProof stays in the "
-            "background. Click a field and press the keys you want."
-        )
-        hotkey_hint.setStyleSheet(
-            "color: #6B6259; font-size: 12px; background: transparent;"
-        )
-        hotkey_layout.addRow("", hotkey_hint)
-        
         layout.addWidget(hotkey_group)
         
         temp_group = QGroupBox("Proofreading Style (Temperature)")
@@ -1706,11 +1572,9 @@ class SettingsDialog(QDialog):
         slider_grid.setColumnStretch(1, 1)
         
         temp_layout.addLayout(slider_grid)
-        temp_layout.addWidget(
-            hint(
-                "Lower values keep the edits minimal and conservative; higher "
-                "values let ByteProof rewrite more freely."
-            )
+        self.temp_slider.setToolTip(
+            "Lower values keep the edits minimal and conservative; higher "
+            "values let ByteProof rewrite more freely."
         )
         
         self.temp_slider.valueChanged.connect(self.update_temp_label)
@@ -1729,22 +1593,10 @@ class SettingsDialog(QDialog):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(16)
 
-            text_col = QVBoxLayout()
-            text_col.setSpacing(2)
-            title_lbl = QLabel(title)
-            title_lbl.setStyleSheet(
-                "font-size: 13px; font-weight: 620; color: #292524; "
-                "background: transparent; border: none;"
+            # The explanation lives in the ⓘ tooltip, so the page stays clean.
+            row_layout.addWidget(
+                labelled_with_info(title, hint), 1
             )
-            hint_lbl = QLabel(hint)
-            hint_lbl.setWordWrap(True)
-            hint_lbl.setStyleSheet(
-                "font-size: 11px; color: #A89F9A; "
-                "background: transparent; border: none;"
-            )
-            text_col.addWidget(title_lbl)
-            text_col.addWidget(hint_lbl)
-            row_layout.addLayout(text_col, 1)
 
             combo.setMinimumWidth(220)
             combo.setMaximumWidth(250)
@@ -1860,6 +1712,379 @@ class SettingsDialog(QDialog):
     def update_temp_label(self, value: int) -> None:
         temp = value / 10.0
         self.temp_label.setText(f"{temp:.1f}")
+
+    # Apps offered as one-click rows on the Live Check page. Anything else can
+    # be added from the running apps.
+    LIVE_CHECK_KNOWN_APPS = (
+        ("com.microsoft.word", "Microsoft Word"),
+        ("com.apple.mail", "Apple Mail"),
+        ("com.microsoft.outlook", "Microsoft Outlook"),
+        ("com.apple.pages", "Apple Pages"),
+        ("com.apple.TextEdit", "TextEdit"),
+        ("com.apple.Notes", "Notes"),
+        ("com.google.Chrome", "Google Chrome"),
+        ("com.apple.Safari", "Safari"),
+        ("com.microsoft.edgemac", "Microsoft Edge"),
+        ("com.openai.chat", "ChatGPT"),
+    )
+
+    def init_live_check_tab(self) -> None:
+        """Live Check: everything about automatic suggestions in one place."""
+        page = QWidget()
+        self.live_page = page
+        self.pages.addWidget(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(content)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setSpacing(16)
+
+        title = QLabel("Live Check")
+        title.setObjectName("SettingsTitle")
+        layout.addWidget(title)
+        subtitle = QLabel(
+            "Suggestions appear next to your text while you write."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
+        layout.addWidget(subtitle)
+
+        # --- the master switch -------------------------------------------
+        main_group = QGroupBox("Live Check")
+        main_layout = QVBoxLayout(main_group)
+        main_layout.setSpacing(10)
+
+        self.chk_live_preview = QCheckBox(
+            "Suggest changes as I select text"
+        )
+        self.chk_live_preview.setChecked(
+            self.settings.get("live_preview", {}).get("enabled", True)
+        )
+        main_layout.addWidget(self.chk_live_preview)
+
+        toggle_row = QWidget()
+        toggle_layout = QHBoxLayout(toggle_row)
+        toggle_layout.setContentsMargins(0, 0, 0, 0)
+        toggle_layout.setSpacing(6)
+        toggle_label = QLabel("Show the apps that trigger it")
+        toggle_label.setStyleSheet("font-size: 13px; color: #292524;")
+        toggle_layout.addWidget(toggle_label)
+        toggle_layout.addWidget(
+            info_icon(
+                "Suggestions never run in ByteProof itself. Turn an app off "
+                "here to write in it without the panel appearing."
+            )
+        )
+        toggle_layout.addStretch(1)
+        main_layout.addWidget(toggle_row)
+
+        self.live_apps_toggle_btn = QPushButton("Show Apps")
+        self.live_apps_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.live_apps_toggle_btn.setStyleSheet(
+            "QPushButton { background-color: #EDF3EF; color: #143024; "
+            "border: 1px solid #A9C7B3; border-radius: 10px; padding: 8px 14px; "
+            "font-weight: 620; }"
+            "QPushButton:hover { background-color: #D6E4DB; }"
+        )
+        self.live_apps_toggle_btn.clicked.connect(self._toggle_live_apps)
+        main_layout.addWidget(
+            self.live_apps_toggle_btn, alignment=Qt.AlignmentFlag.AlignLeft
+        )
+
+        self.live_apps_list = QListWidget()
+        self.live_apps_list.setSpacing(4)
+        self.live_apps_list.setMinimumHeight(220)
+        self.live_apps_list.setVisible(False)
+        main_layout.addWidget(self.live_apps_list)
+
+        apps_buttons = QHBoxLayout()
+        apps_buttons.setSpacing(8)
+        self.live_add_app_btn = QPushButton("Add App…")
+        self.live_add_app_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.live_add_app_btn.clicked.connect(self._add_live_app)
+        apps_buttons.addWidget(self.live_add_app_btn)
+        apps_buttons.addWidget(self.live_other_apps_check())
+        apps_buttons.addStretch(1)
+        self.live_apps_buttons = QWidget()
+        self.live_apps_buttons.setLayout(apps_buttons)
+        self.live_apps_buttons.setVisible(False)
+        main_layout.addWidget(self.live_apps_buttons)
+
+        layout.addWidget(main_group)
+
+        # --- how the suggestions behave -----------------------------------
+        style_group = QGroupBox("Suggestions")
+        style_layout = QVBoxLayout(style_group)
+        style_layout.setSpacing(14)
+
+        style_row = QWidget()
+        style_row_layout = QHBoxLayout(style_row)
+        style_row_layout.setContentsMargins(0, 0, 0, 0)
+        style_row_layout.setSpacing(8)
+        style_label = QLabel("Style")
+        style_label.setStyleSheet("font-size: 13px; color: #292524;")
+        self.live_style_combo = QComboBox()
+        self.live_style_combo.addItem("Corrections only", "strict")
+        self.live_style_combo.addItem(
+            "Polish language (keep meaning)", "polish"
+        )
+        style_value = self.settings.get("live_preview", {}).get("style", "strict")
+        index = self.live_style_combo.findData(style_value)
+        self.live_style_combo.setCurrentIndex(max(0, index))
+        style_row_layout.addWidget(style_label)
+        style_row_layout.addWidget(self.live_style_combo)
+        style_row_layout.addWidget(
+            info_icon(
+                "'Corrections only' fixes grammar, spelling and obvious errors. "
+                "'Polish language' also improves flow, word choice and "
+                "conciseness while keeping your meaning and tone."
+            )
+        )
+        style_row_layout.addStretch(1)
+        style_layout.addWidget(style_row)
+
+        words_row = QWidget()
+        words_layout = QHBoxLayout(words_row)
+        words_layout.setContentsMargins(0, 0, 0, 0)
+        words_layout.setSpacing(8)
+        words_label = QLabel("Suggest for selections of")
+        words_label.setStyleSheet("font-size: 13px; color: #292524;")
+        self.live_min_words_spin = QSpinBox()
+        self.live_min_words_spin.setRange(1, 10)
+        self.live_min_words_spin.setFixedWidth(64)
+        self.live_min_words_spin.setValue(
+            int(self.settings.get("live_preview", {}).get("min_words", 3))
+        )
+        words_suffix = QLabel("words or more")
+        words_suffix.setStyleSheet("font-size: 13px; color: #292524;")
+        words_layout.addWidget(words_label)
+        words_layout.addWidget(self.live_min_words_spin)
+        words_layout.addWidget(words_suffix)
+        words_layout.addWidget(
+            info_icon(
+                "Shorter selections are ignored, so a stray word or two never "
+                "triggers a suggestion."
+            )
+        )
+        words_layout.addStretch(1)
+        style_layout.addWidget(words_row)
+
+        delay_row = QWidget()
+        delay_layout = QHBoxLayout(delay_row)
+        delay_layout.setContentsMargins(0, 0, 0, 0)
+        delay_layout.setSpacing(8)
+        delay_label = QLabel("Wait after selecting")
+        delay_label.setStyleSheet("font-size: 13px; color: #292524;")
+        self.live_delay_slider = QSlider(Qt.Orientation.Horizontal)
+        self.live_delay_slider.setRange(400, 2000)
+        self.live_delay_slider.setSingleStep(100)
+        self.live_delay_slider.setFixedWidth(220)
+        self.live_delay_slider.setValue(
+            int(self.settings.get("live_preview", {}).get("delay_ms", 600))
+        )
+        self.live_delay_label = QLabel(f"{self.live_delay_slider.value()} ms")
+        self.live_delay_label.setFixedWidth(56)
+        self.live_delay_slider.valueChanged.connect(
+            lambda v: self.live_delay_label.setText(f"{v} ms")
+        )
+        delay_layout.addWidget(delay_label)
+        delay_layout.addWidget(self.live_delay_slider)
+        delay_layout.addWidget(self.live_delay_label)
+        delay_layout.addWidget(
+            info_icon(
+                "How long the selection must stay unchanged before suggestions "
+                "are requested. Lower feels faster; higher avoids firing while "
+                "you are still selecting."
+            )
+        )
+        delay_layout.addStretch(1)
+        style_layout.addWidget(delay_row)
+
+        self.chk_live_local = QCheckBox(
+            "Prefer the local AI for suggestions (saves cloud tokens)"
+        )
+        self.chk_live_local.setChecked(
+            self.settings.get("live_preview", {}).get("use_local_model", True)
+        )
+        style_layout.addWidget(self.chk_live_local)
+
+        layout.addWidget(style_group)
+
+        # --- hotkeys -------------------------------------------------------
+        hotkey_group = QGroupBox("Hotkeys")
+        hotkey_layout = QFormLayout(hotkey_group)
+        hotkey_layout.setSpacing(12)
+        hotkey_layout.setContentsMargins(12, 18, 12, 12)
+
+        self.live_toggle_hotkey_edit = QKeySequenceEdit()
+        try:
+            self.live_toggle_hotkey_edit.setClearButtonEnabled(True)
+        except AttributeError:
+            pass
+        self.live_toggle_hotkey_edit.setKeySequence(
+            QKeySequence(
+                self.pynput_to_qt(
+                    self.settings.get("general", {}).get(
+                        "live_toggle_hotkey", "<cmd>+<shift>+l"
+                    )
+                )
+            )
+        )
+        self.live_toggle_hotkey_edit.setToolTip(
+            "Turns Live Check on or off from any app."
+        )
+        hotkey_layout.addRow("Turn Live Check on/off:", self.live_toggle_hotkey_edit)
+
+        self.apply_all_hotkey_edit = QKeySequenceEdit()
+        try:
+            self.apply_all_hotkey_edit.setClearButtonEnabled(True)
+        except AttributeError:
+            pass
+        self.apply_all_hotkey_edit.setKeySequence(
+            QKeySequence(
+                self.pynput_to_qt(
+                    self.settings.get("general", {}).get(
+                        "apply_all_hotkey", "<cmd>+<shift>+<return>"
+                    )
+                )
+            )
+        )
+        self.apply_all_hotkey_edit.setToolTip(
+            "While the suggestion panel is on screen, applies every suggestion "
+            "at once."
+        )
+        hotkey_layout.addRow("Apply all suggestions:", self.apply_all_hotkey_edit)
+        layout.addWidget(hotkey_group)
+
+        if platform.system() != "Darwin":
+            # The engine reads selections through the macOS Accessibility API.
+            note = QLabel(
+                "Live Check is available on macOS only for now. On Windows, "
+                "select text and press the proofread hotkey instead."
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #57534E; font-size: 12px;")
+            layout.addWidget(note)
+            for widget in (
+                self.chk_live_preview,
+                self.live_apps_toggle_btn,
+                self.chk_live_local,
+                self.live_style_combo,
+                self.live_delay_slider,
+                self.live_min_words_spin,
+                self.live_toggle_hotkey_edit,
+                self.apply_all_hotkey_edit,
+            ):
+                widget.setEnabled(False)
+
+        outer.addWidget(scroll)
+        scroll.setWidget(content)
+        self._populate_live_apps()
+
+    def live_other_apps_check(self) -> QCheckBox:
+        """The 'any other app' fallback toggle for the app list."""
+        self.chk_live_other_apps = QCheckBox("Allow other apps")
+        rules = self.settings.get("live_preview", {}).get("app_rules", {})
+        self.chk_live_other_apps.setChecked(
+            bool(rules.get("*", True)) if isinstance(rules, dict) else True
+        )
+        self.chk_live_other_apps.setToolTip(
+            "Apps not listed above (a new editor, a browser, a chat window) "
+            "still get suggestions."
+        )
+        return self.chk_live_other_apps
+
+    def _toggle_live_apps(self) -> None:
+        """Fold or unfold the per-app list, like the Automation triggers.
+
+        The state is tracked explicitly: ``isVisible()`` is always False while
+        the page itself is not the one on screen, which would invert the
+        toggle.
+        """
+        self._live_apps_shown = not getattr(self, "_live_apps_shown", False)
+        showing = self._live_apps_shown
+        self.live_apps_list.setVisible(showing)
+        self.live_apps_buttons.setVisible(showing)
+        self.live_apps_toggle_btn.setText("Hide Apps" if showing else "Show Apps")
+
+    def _populate_live_apps(self) -> None:
+        """Fill the app list from the saved rules plus the known apps."""
+        rules = self.settings.get("live_preview", {}).get("app_rules", {})
+        if not isinstance(rules, dict):
+            rules = {}
+        entries: list[tuple[str, str]] = list(self.LIVE_CHECK_KNOWN_APPS)
+        for key in rules:
+            marker = str(key)
+            if marker == "*" or any(marker == b for b, _ in entries):
+                continue
+            entries.append((marker, marker))
+        self.live_apps_list.clear()
+        for marker, name in entries:
+            item = QListWidgetItem(name)
+            item.setData(Qt.ItemDataRole.UserRole, marker)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if bool(rules.get(marker, True))
+                else Qt.CheckState.Unchecked
+            )
+            self.live_apps_list.addItem(item)
+
+    def _add_live_app(self) -> None:
+        """Add an app to the list from the ones currently running."""
+        existing = {
+            self.live_apps_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.live_apps_list.count())
+        }
+        try:
+            from .generic_editing import get_generic_editor
+
+            running = get_generic_editor().running_apps()
+        except Exception:
+            running = []
+        options = [
+            f"{app.get('name')} ({app.get('bundle_id')})"
+            for app in running
+            if app.get("bundle_id") and app.get("bundle_id") not in existing
+        ]
+        if not options:
+            QMessageBox.information(
+                self, "Add App", "Every running app is already in the list."
+            )
+            return
+        choice, ok = QInputDialog.getItem(
+            self, "Add App", "Suggest changes in:", options, 0, False
+        )
+        if not ok or not choice:
+            return
+        bundle = choice.rsplit("(", 1)[-1].rstrip(")").strip()
+        name = choice.rsplit("(", 1)[0].strip()
+        item = QListWidgetItem(name)
+        item.setData(Qt.ItemDataRole.UserRole, bundle)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        self.live_apps_list.addItem(item)
+        if not getattr(self, "_live_apps_shown", False):
+            self._toggle_live_apps()  # reveal the list so the new app is seen
+
+    def _live_app_rules(self) -> dict[str, bool]:
+        """Read the app list back into the settings format."""
+        rules: dict[str, bool] = {}
+        for index in range(self.live_apps_list.count()):
+            item = self.live_apps_list.item(index)
+            marker = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            if not marker:
+                continue
+            rules[marker] = item.checkState() == Qt.CheckState.Checked
+        if hasattr(self, "chk_live_other_apps"):
+            rules["*"] = self.chk_live_other_apps.isChecked()
+        return rules
 
     def init_automation_tab(self) -> None:
         page = QWidget()
@@ -3493,8 +3718,8 @@ class SettingsDialog(QDialog):
     def open_provider_settings(self, provider_name: str) -> None:
         provider_info = PROVIDERS.get(provider_name, {})
         if provider_info.get("is_local"):
-            self.sidebar.setCurrentRow(3)
-            self.change_page(3)
+            self.sidebar.setCurrentRow(4)  # Local AI
+            self.change_page(4)
             return
 
         dialog = QDialog(self)
@@ -3727,6 +3952,7 @@ class SettingsDialog(QDialog):
         self.settings["live_preview"]["min_words"] = int(
             self.live_min_words_spin.value()
         )
+        self.settings["live_preview"]["app_rules"] = self._live_app_rules()
         self.settings["live_preview"]["use_local_model"] = (
             self.chk_live_local.isChecked()
         )
@@ -3983,7 +4209,7 @@ class ProofreaderApp(QMainWindow):
         
         layout.addWidget(status_container)
 
-        # Live suggestions readiness row (P1): one-glance status plus a
+        # Live Check readiness row: one-glance status plus a
         # contextual action (test now / open System Settings / settings).
         live_container = QFrame()
         live_container.setObjectName("StatusBar")
@@ -3995,7 +4221,7 @@ class ProofreaderApp(QMainWindow):
             "background-color: #9CA3AF; border-radius: 4px;"
         )
         live_layout.addWidget(self.live_dot)
-        self.live_status_label = QLabel("Live suggestions: waiting…")
+        self.live_status_label = QLabel("Live Check: starting…")
         self.live_status_label.setWordWrap(True)
         self.live_status_label.setStyleSheet(
             "font-weight: 500; color: #57534E; font-size: 12px;"
@@ -4160,7 +4386,7 @@ class ProofreaderApp(QMainWindow):
                     QTimer.singleShot(
                         2000,
                         lambda: self._show_toast(
-                            "ByteProof updated — if live suggestions stopped, "
+                            "ByteProof updated — if Live Check stopped, "
                             "toggle ByteProof off and on in System Settings > "
                             "Privacy & Security > Accessibility.",
                             kind="warning",
@@ -4748,7 +4974,7 @@ class ProofreaderApp(QMainWindow):
                 worker.cancel_event.set()
 
     def _on_live_toggle_hotkey(self) -> None:
-        """Toggle live suggestions on or off from anywhere."""
+        """Toggle Live Check on or off from anywhere."""
         general = self.settings.setdefault("general", {})
         live = self.settings.setdefault("live_preview", {})
         enabled = not bool(live.get("enabled", True))
@@ -4758,7 +4984,7 @@ class ProofreaderApp(QMainWindow):
         self._refresh_live_service()
         self._apply_live_status("waiting" if enabled else "disabled")
         self._show_toast(
-            "Live suggestions on" if enabled else "Live suggestions off",
+            "Live Check on" if enabled else "Live Check off",
             kind="success" if enabled else "warning",
         )
 
@@ -5743,6 +5969,7 @@ class ProofreaderApp(QMainWindow):
             )
             if dialog.license_page is not None:
                 dialog.pages.setCurrentWidget(dialog.license_page)
+                dialog.sidebar.setCurrentRow(5)  # License
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.settings = dialog.get_settings()
                 save_runtime_settings(self.settings)
@@ -5764,8 +5991,8 @@ class ProofreaderApp(QMainWindow):
             dialog.finished.connect(
                 lambda _result: setattr(self, "_active_settings_dialog", None)
             )
-            dialog.sidebar.setCurrentRow(3)
-            dialog.change_page(3)
+            dialog.sidebar.setCurrentRow(4)  # Local AI
+            dialog.change_page(4)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 self.settings = dialog.get_settings()
                 save_runtime_settings(self.settings)
@@ -5785,7 +6012,7 @@ class ProofreaderApp(QMainWindow):
             service.stop()
 
     def _on_live_preview_error(self, message: str) -> None:
-        self._show_toast(f"Live suggestions: {message}", kind="warning")
+        self._show_toast(f"Live Check: {message}", kind="warning")
 
     def _apply_live_status(self, state: str) -> None:
         """Update the live-suggestions readiness row (P1)."""
@@ -5794,22 +6021,22 @@ class ProofreaderApp(QMainWindow):
         self._live_status_state = state
         if state == "ready":
             dot = "#059669"
-            text = "Live suggestions ready"
+            text = "Live Check ready"
             action = "Test now"
         elif state == "no_permission":
             dot = "#D97706"
             text = (
-                "Live suggestions need Accessibility permission — open "
+                "Live Check needs Accessibility permission — open "
                 "System Settings and toggle ByteProof off and on."
             )
             action = "Open System Settings"
         elif state == "disabled":
             dot = "#9CA3AF"
-            text = "Live suggestions are off in Settings."
+            text = "Live Check is off in Settings."
             action = "Open Settings"
         else:
             dot = "#9CA3AF"
-            text = "Live suggestions: waiting…"
+            text = "Live Check: starting…"
             action = "Test now"
         self.live_dot.setStyleSheet(
             f"background-color: {dot}; border-radius: 4px;"
@@ -5825,16 +6052,16 @@ class ProofreaderApp(QMainWindow):
         tray = getattr(self, "tray_icon", None)
         if tray is not None:
             tray_labels = {
-                "ready": "Live suggestions: ready",
+                "ready": "Live Check: ready",
                 "no_permission": (
-                    "Live suggestions: needs Accessibility permission"
+                    "Live Check: needs Accessibility permission"
                 ),
-                "disabled": "Live suggestions: off",
-                "waiting": "Live suggestions: starting…",
+                "disabled": "Live Check: off",
+                "waiting": "Live Check: starting…",
             }
             tray.setToolTip(
                 f"{APP_NAME} — "
-                f"{tray_labels.get(state, 'Live suggestions: starting…')}"
+                f"{tray_labels.get(state, 'Live Check: starting…')}"
             )
 
     def _on_live_action(self) -> None:
@@ -5866,7 +6093,7 @@ class ProofreaderApp(QMainWindow):
         service = getattr(self, "live_service", None)
         if service is None:
             self._show_toast(
-                "Live suggestions are unavailable on this system.",
+                "Live Check is unavailable on this system.",
                 kind="warning",
             )
             return

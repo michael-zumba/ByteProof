@@ -49,7 +49,7 @@ from .live_preview import (
 MAIL_COMPOSE_CHECK_INTERVAL_S = 5.0
 
 # How long the Undo pill stays available after an apply.
-# Live suggestions respect the same entitlement as the manual flow. The
+# Live Check respects the same entitlement as the manual flow. The
 # entitlement check is cached so the 350 ms poll never reads licence files.
 # A clipboard read posts Command-C, which makes the app's Edit menu flash.
 # It is therefore only attempted when the user has just made a selection:
@@ -579,7 +579,7 @@ class LivePreviewService(QObject):
             else:
                 self.live_status.emit("no_permission")
                 self.preview_error.emit(
-                    "Live suggestions paused — re-enable ByteProof in "
+                    "Live Check paused — re-enable ByteProof in "
                     "System Settings > Privacy & Security > Accessibility."
                 )
         decision, _reason = evaluate_trigger(
@@ -625,6 +625,9 @@ class LivePreviewService(QObject):
                 "empty",
                 "self",
                 "no_permission",
+                # Turning an app off is a deliberate setting, not a glitch:
+                # do not fill the log with it on every tick.
+                "app_disabled",
             ):
                 _debug_log(f"LIVE SKIP: {decision} app={target.get('name')!r}")
             return
@@ -894,7 +897,7 @@ class LivePreviewService(QObject):
     # --- provider ---
 
     def _access_allows_preview(self) -> bool:
-        """Whether the current licence state still allows live suggestions.
+        """Whether the current licence state still allows Live Check.
 
         The live panel spends provider credits, so it must respect the same
         trial/free limits as the manual flow. The answer is cached briefly: the
@@ -934,7 +937,7 @@ class LivePreviewService(QObject):
             self._hide_panel()
             self._retry_not_before = time.monotonic() + ACCESS_RETRY_S
             self.preview_error.emit(
-                "Live suggestions are paused: the free daily limit or trial has "
+                "Live Check is paused: the free daily limit or trial has "
                 "ended. Open Settings → License to keep them running."
             )
             return
@@ -987,7 +990,7 @@ class LivePreviewService(QObject):
             if status == "limit_reached":
                 message = (
                     "You've used all your free proofreads for today. "
-                    "Live suggestions stay off for this selection."
+                    "Live Check stays off for this selection."
                 )
             else:
                 message = (

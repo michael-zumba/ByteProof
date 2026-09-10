@@ -1135,26 +1135,27 @@ def test_settings_sidebar_has_no_duplicate_icon_shortcuts() -> None:
     labels = [
         dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())
     ]
-    assert labels[:4] == ["General", "Automation", "Connect", "Local AI"]
+    assert labels[:4] == ["General", "Live Check", "Automation", "Connect"]
+    assert labels[4] == "Local AI"
     # The label may carry a status suffix ("License  ✓" / "Updates •").
-    assert labels[4].startswith("License")
-    assert labels[5].startswith("Updates")
+    assert labels[5].startswith("License")
+    assert labels[6].startswith("Updates")
     # The duplicate icon-only shortcuts are gone.
     assert not hasattr(dialog, "update_icon_btn")
     assert not hasattr(dialog, "license_icon_btn")
     # ...and the rows themselves carry an icon + explanatory tooltip.
-    assert not dialog.sidebar.item(4).icon().isNull()
     assert not dialog.sidebar.item(5).icon().isNull()
-    assert dialog.sidebar.item(4).toolTip()
+    assert not dialog.sidebar.item(6).icon().isNull()
+    assert dialog.sidebar.item(5).toolTip()
     _dispose(dialog, owner, app)
 
 
 def test_sidebar_shows_a_pending_update() -> None:
     app, owner, dialog = _make_settings_dialog()
     dialog.note_update_available("2.0.3")
-    assert dialog.sidebar.item(5).text() == "Updates •"
-    assert "2.0.3" in dialog.sidebar.item(5).toolTip()
-    assert dialog.sidebar.item(5).text().startswith("Updates")
+    assert dialog.sidebar.item(6).text() == "Updates •"
+    assert "2.0.3" in dialog.sidebar.item(6).toolTip()
+    assert dialog.sidebar.item(6).text().startswith("Updates")
     _dispose(dialog, owner, app)
 
 
@@ -1623,7 +1624,7 @@ def test_settings_sidebar_shows_every_page_without_scrolling():
     dialog.show()
     app.processEvents()
     bar = dialog.sidebar
-    assert bar.count() == 6
+    assert bar.count() == 7
     labels = [bar.item(i).text() for i in range(bar.count())]
     assert labels[-1].startswith("Updates")
     last_row = bar.visualItemRect(bar.item(bar.count() - 1))
@@ -1751,7 +1752,7 @@ def test_live_toggle_hotkey_flips_the_setting(monkeypatch):
     before = window.settings.get("live_preview", {}).get("enabled", True)
     window._on_live_toggle_hotkey()
     assert window.settings["live_preview"]["enabled"] is (not before)
-    assert toasts and toasts[0][0] in ("Live suggestions on", "Live suggestions off")
+    assert toasts and toasts[0][0] in ("Live Check on", "Live Check off")
     assert saved, "the change is persisted"
     window._on_live_toggle_hotkey()
     assert window.settings["live_preview"]["enabled"] is before
@@ -1816,3 +1817,97 @@ def test_no_clipboard_read_after_an_apply_in_mail(monkeypatch):
     # ...and the idle read stays disarmed until the user works again.
     assert service._idle_read_done is True
     service.stop()
+
+
+# --- Live Check page: per-app triggers in their own menu --------------------
+
+
+def test_live_check_page_owns_the_live_settings() -> None:
+    from PyQt6.QtWidgets import QGroupBox
+
+    app, owner, dialog = _make_settings_dialog()
+    labels = [
+        dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())
+    ]
+    # A top-level menu, right after General.
+    assert labels[1] == "Live Check"
+
+    live_sections = [w.title() for w in dialog.live_page.findChildren(QGroupBox)]
+    assert live_sections == ["Live Check", "Suggestions", "Hotkeys"]
+
+    # Everything about the feature lives here now...
+    assert hasattr(dialog, "chk_live_preview")
+    assert hasattr(dialog, "live_min_words_spin")
+    assert hasattr(dialog, "live_delay_slider")
+    assert hasattr(dialog, "live_style_combo")
+    assert hasattr(dialog, "live_toggle_hotkey_edit")
+    assert hasattr(dialog, "apply_all_hotkey_edit")
+
+    # ...and the General page no longer carries a live section.
+    general_sections = [
+        w.title() for w in dialog.general_page.findChildren(QGroupBox)
+    ]
+    assert not any("Live" in title for title in general_sections)
+    _dispose(dialog, owner, app)
+
+
+def test_live_check_apps_fold_and_unfold() -> None:
+    app, owner, dialog = _make_settings_dialog()
+    dialog.show()
+    dialog.sidebar.setCurrentRow(1)
+    dialog.change_page(1)
+    app.processEvents()
+
+    assert dialog.pages.currentWidget() is dialog.live_page
+    assert dialog.live_apps_list.isHidden()  # folded by default
+    assert dialog.live_apps_toggle_btn.text() == "Show Apps"
+
+    dialog.live_apps_toggle_btn.click()
+    app.processEvents()
+    assert not dialog.live_apps_list.isHidden()
+    assert dialog.live_apps_toggle_btn.text() == "Hide Apps"
+    assert dialog.live_apps_list.count() >= 5  # known apps are listed
+
+    dialog.live_apps_toggle_btn.click()
+    app.processEvents()
+    assert dialog.live_apps_list.isHidden()
+    _dispose(dialog, owner, app)
+
+
+def test_app_rules_decide_where_live_check_runs() -> None:
+    from PyQt6.QtCore import Qt
+
+    from src.live_preview import app_allowed, evaluate_trigger
+
+    app, owner, dialog = _make_settings_dialog()
+    for index in range(dialog.live_apps_list.count()):
+        item = dialog.live_apps_list.item(index)
+        if item.data(Qt.ItemDataRole.UserRole) == "com.apple.mail":
+            item.setCheckState(Qt.CheckState.Unchecked)
+    dialog.chk_live_other_apps.setChecked(False)
+
+    rules = dialog.get_settings()["live_preview"]["app_rules"]
+    assert rules["com.apple.mail"] is False
+    assert rules["*"] is False
+
+    live = {"enabled": True, "max_chars": 1500, "app_rules": rules}
+    mail = {"bundle_id": "com.apple.mail", "name": "Mail"}
+    word = {"bundle_id": "com.microsoft.word", "name": "Microsoft Word"}
+    other = {"bundle_id": "com.example.editor", "name": "Editor"}
+
+    assert app_allowed(live, mail) is False
+    assert app_allowed(live, word) is True
+    assert app_allowed(live, other) is False
+    decision, reason = evaluate_trigger(
+        {"live_preview": live}, mail, "This is a full sentence.", True, True, False, False
+    )
+    assert decision == "app_disabled"
+    assert "turned off" in reason
+    _dispose(dialog, owner, app)
+
+
+def test_live_check_runs_everywhere_by_default() -> None:
+    from src.live_preview import app_allowed
+
+    assert app_allowed({}, {"bundle_id": "com.example", "name": "Editor"}) is True
+    assert app_allowed({"app_rules": {}}, {"bundle_id": "x"}) is True

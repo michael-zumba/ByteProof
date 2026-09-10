@@ -808,6 +808,7 @@ def test_load_runtime_settings_includes_live_preview_defaults(monkeypatch, tmp_p
         "delay_ms": 600,
         "max_chars": 1500,
         "min_words": 3,
+        "app_rules": {},
         "use_local_model": True,
         "style": "strict",
     }

@@ -3323,18 +3323,21 @@ def test_settings_new_pages() -> None:
     app.processEvents()
 
     labels = [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())]
-    assert labels[:4] == ["General", "Automation", "Connect", "Local AI"]
+    assert labels[:4] == ["General", "Live Check", "Automation", "Connect"]
+    assert labels[4] == "Local AI"
     # License and Updates are first-class pages, not icon-only shortcuts.
     # (The label may carry a status suffix, e.g. "License  ✓" or "Updates •".)
     assert any(label.startswith("License") for label in labels)
     assert any(label.startswith("Updates") for label in labels)
-    local_item = dialog.sidebar.item(3)
+    local_item = dialog.sidebar.item(4)
     assert local_item is not None and local_item.text() == "Local AI"
-    automation_item = dialog.sidebar.item(1)
+    automation_item = dialog.sidebar.item(2)
     assert automation_item is not None and automation_item.text() == "Automation"
+    live_item = dialog.sidebar.item(1)
+    assert live_item is not None and live_item.text() == "Live Check"
 
-    dialog.sidebar.setCurrentRow(3)
-    dialog.change_page(3)
+    dialog.sidebar.setCurrentRow(4)
+    dialog.change_page(4)
     app.processEvents()
     assert dialog.local_page is not None
     assert "Recommended" in dialog.local_recommend_label.text()
@@ -3346,8 +3349,8 @@ def test_settings_new_pages() -> None:
 
     # The Updates page is reached from its sidebar row; the duplicate
     # icon-only shortcut was removed so there is one entry point per page.
-    dialog.sidebar.setCurrentRow(5)
-    dialog.change_page(5)
+    dialog.sidebar.setCurrentRow(6)
+    dialog.change_page(6)
     app.processEvents()
     assert dialog.pages.currentWidget() is dialog.updates_page
     assert dialog.update_check_btn.text() == "Check for Updates"
