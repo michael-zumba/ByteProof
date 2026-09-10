@@ -29,6 +29,10 @@ LOG_TAIL_BYTES = 256 * 1024  # keep the last 256 KB
 LOG_PATHS = (
     os.path.join(APP_SUPPORT_DIR, "capture.log"),
     os.path.join(APP_SUPPORT_DIR, "debug_hotkeys.log"),
+    # error.log and citation-mapping.log were never rotated before, so a
+    # long-running install grew them without bound.
+    os.path.join(APP_SUPPORT_DIR, "error.log"),
+    os.path.join(APP_SUPPORT_DIR, "citation-mapping.log"),
     os.path.join(RUNTIME_DIR, "server.log"),
 )
 

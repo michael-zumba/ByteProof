@@ -10,7 +10,9 @@ only for local development and any pre-Polar buyers. It is unreachable while
 ``POLAR_ORGANIZATION_ID`` is configured, which is the production default, and
 should be deleted once no pre-Polar buyer remains.
 
-Known developer emails can always unlock full access locally, without a key.
+Known developer emails can always unlock full access locally, without a key -
+but only when this machine is explicitly configured as a developer machine
+(see ``settings.developer_emails``); shipped builds carry no such identity.
 """
 
 import json
@@ -33,7 +35,12 @@ from .licensing import (
     get_license_info,
     validate_license_key,
 )
-from .settings import APP_NAME, DEVELOPER_EMAILS, POLAR_ORGANIZATION_ID
+from .settings import (
+    APP_NAME,
+    POLAR_ORGANIZATION_ID,
+    SUPPORT_EMAIL,
+    developer_emails,
+)
 
 URL_SCHEME = "byteproof"
 
@@ -127,14 +134,19 @@ def _server_deactivate(email: str) -> dict:
 
 
 def activate_with_key(value: str) -> dict:
-    """Activate with a Polar license key (or legacy email while Polar is off)."""
+    """Activate with a Polar license key.
+
+    An email address is never a licence: the only dev identities that work are
+    configured locally on this machine (see ``settings.developer_emails``), so
+    a published support address cannot unlock a shipped build.
+    """
     value = value.strip()
     if not value:
         return {"ok": False, "error": "Please enter your license key."}
 
     if _looks_like_email(value):
         email = value.lower()
-        if email in {e.lower() for e in DEVELOPER_EMAILS}:
+        if email in {e.lower() for e in developer_emails()}:
             result = activate_dev_license(email)
             if not result.get("valid"):
                 return {
@@ -146,9 +158,11 @@ def activate_with_key(value: str) -> dict:
             return {
                 "ok": False,
                 "error": (
-                    "Your license key was sent to your inbox after purchase - "
-                    "open Settings → License and paste the key instead of "
-                    "your email."
+                    "That looks like an email address, not a license key. "
+                    "Polar emailed your key after purchase - open Settings → "
+                    "License and paste the key itself (it starts with "
+                    "\"polar_\"). Need help? Email "
+                    f"{SUPPORT_EMAIL} and include your Polar receipt."
                 ),
             }
         # Legacy Stripe-era flow: verify the email on the ByteMind server.
@@ -255,7 +269,12 @@ def validate_license_remote() -> dict:
 
 
 def activate_from_url(url: str) -> dict:
-    """Handle byteproof://activate?key=... (or ?email=... for legacy/dev)."""
+    """Handle ``byteproof://activate?key=...`` links from fulfilment emails.
+
+    Only a real licence key activates. The legacy ``?email=`` form is accepted
+    solely when Polar is not configured (local development), so a web page can
+    never silently license a shipped build.
+    """
     parsed = urllib.parse.urlparse(url.strip())
     if parsed.scheme.lower() != URL_SCHEME:
         return {"ok": False, "error": "This is not a ByteProof activation link."}
@@ -266,8 +285,8 @@ def activate_from_url(url: str) -> dict:
         return activate_with_key(key)
 
     email = (params.get("email") or [""])[0].strip()
-    if email:
-        return activate_with_email(email)
+    if email and not POLAR_ORGANIZATION_ID:
+        return activate_with_key(email)
 
     return {
         "ok": False,

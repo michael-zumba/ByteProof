@@ -1057,6 +1057,35 @@ def _clean_local_model_output(text: str) -> str:
     return text.strip()
 
 
+# The last completion's stop reason, so an output-token truncation ("length")
+# can be detected before a partially corrected document is applied.
+_last_finish_reason = ""
+
+
+def _record_finish_reason(reason: str) -> None:
+    global _last_finish_reason
+    _last_finish_reason = reason.strip().lower()
+
+
+def last_response_was_truncated() -> bool:
+    """Whether the most recent completion stopped because it hit the cap."""
+    return _last_finish_reason in ("length", "max_tokens")
+
+
+def _looks_truncated(original: str, corrected: str) -> bool:
+    """Heuristic backstop for providers that omit ``finish_reason``.
+
+    Only a drastic shortening of a long selection counts: ordinary editing
+    (including conciseness rewrites) keeps most of the text, while a reply cut
+    off at the output cap loses the tail entirely.
+    """
+    if not corrected or not original:
+        return False
+    if len(original) < 400:
+        return False
+    return len(corrected) < int(len(original) * 0.35)
+
+
 def _request_completion(
     system_prompt: str,
     user_content: str,
@@ -1069,6 +1098,8 @@ def _request_completion(
     cancel_event: threading.Event | None = None,
 ) -> str:
     """Send one chat completion and return the assistant text."""
+    global _last_finish_reason
+    _last_finish_reason = ""
     headers = {
         "Content-Type": "application/json",
     }
@@ -1129,8 +1160,14 @@ def _request_completion(
 
         try:
             if provider_name == "Anthropic":
-                return response_data["content"][0]["text"].strip()
-            content = response_data["choices"][0]["message"]["content"].strip()
+                text = response_data["content"][0]["text"].strip()
+                stop_reason = str(response_data.get("stop_reason") or "")
+                _record_finish_reason(stop_reason)
+                return text
+            choice = response_data["choices"][0]
+            content = str(choice["message"]["content"]).strip()
+            finish_reason = str(choice.get("finish_reason") or "")
+            _record_finish_reason(finish_reason)
             if PROVIDERS.get(provider_name, {}).get("is_local"):
                 content = _clean_local_model_output(content)
             return content
@@ -1647,8 +1684,23 @@ def proofread_selection_once(
             current_text, extra_spans=mask_spans
         )
         
+        early_access = get_access_status()
+        if early_access.get("tier") == "free" and not early_access.get(
+            "free_mode_allowed"
+        ):
+            return (
+                (
+                    "You have used all your free proofreads for today. "
+                    "Purchase a license to continue."
+                ),
+                None,
+                None,
+                None,
+                0,
+            )
+
         active_provider, api_key, base_url, model = resolve_provider_connection(runtime_settings)
-        
+
         temperature = runtime_settings.get("general", {}).get("temperature", 0.3)
         spelling = runtime_settings.get("general", {}).get("spelling", "UK/AU/NZ")
         style = runtime_settings.get("general", {}).get("style", "Precise (Minimal Changes)")
@@ -1716,7 +1768,11 @@ def proofread_selection_once(
                     cancel_event=cancel_event,
                 )
                 if result and result.strip():
-                    reviewer_comment = result.strip()
+                    reviewer_comment = (
+                        _clean_local_model_output(result.strip())
+                        if PROVIDERS.get(active_provider, {}).get("is_local")
+                        else result.strip()
+                    )
                     print("Reviewer guidance generated.")
                 else:
                     print("Reviewer guidance generated but was empty.")
@@ -1820,8 +1876,17 @@ def proofread_selection_once(
         
         if normalize_for_comparison(corrected) == normalize_for_comparison(current_text):
             result_status = "No changes suggested."
+        elif last_response_was_truncated() or _looks_truncated(current_text, corrected):
+            # The model stopped at its output cap, so the reply is a partial
+            # correction. Applying it would leave the document half-edited, so
+            # the text is returned for review instead.
+            print("Warning: model reply looks truncated; not applying automatically.")
+            result_status = "REVIEW_NEEDED:truncated"
+            return result_status, current_text, corrected, comment_result["text"], start_offset
         else:
-            similarity = difflib.SequenceMatcher(None, current_text, corrected).ratio()
+            similarity = difflib.SequenceMatcher(
+                None, current_text, corrected, autojunk=False
+            ).ratio()
 
             is_creative = style == "Creative (Rewrite)"
             warning_suffix = ""
@@ -2033,7 +2098,9 @@ def polish_selection_once(
         if normalize_selection_text(corrected) == normalize_selection_text(current_text):
             return "No changes suggested.", current_text, corrected, None, 0
 
-        similarity = difflib.SequenceMatcher(None, current_text, corrected).ratio()
+        similarity = difflib.SequenceMatcher(
+            None, current_text, corrected, autojunk=False
+        ).ratio()
         if similarity < 0.30:
             return (
                 f"REVIEW_NEEDED:{similarity}",
@@ -2057,7 +2124,7 @@ def load_preview_prompt(style: str = "strict") -> str:
     choice, and conciseness while retaining meaning and tone.
     """
     key = "preview_edits_polish.txt" if style == "polish" else "preview_edits.txt"
-    content = PROMPT_FILES.get(key)
+    content = _load_prompt_text(key)
     if content:
         return content
     return (

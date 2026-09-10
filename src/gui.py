@@ -118,6 +118,7 @@ from .settings import (
     PRODUCT_URL,
     PROVIDERS,
     SUPPORT_EMAIL,
+    get_app_support_dir,
     note_launch_version,
     resource_path,
     save_runtime_settings,
@@ -306,7 +307,12 @@ def activation_prompt() -> tuple[str, str]:
     """Dialog title/prompt for activating a Polar license key."""
     return (
         "Activate with License Key",
-        "Paste the license key from your Polar receipt email:",
+        (
+            "Paste the licence key from your Polar receipt email.\n\n"
+            "The key starts with \"polar_\" and looks like "
+            "polar_xxxxxxxxxxxxxxxxxxxx.\n"
+            "Your email address is not the key — enter the key itself."
+        ),
     )
 
 
@@ -1116,8 +1122,17 @@ class SettingsDialog(QDialog):
 
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("SettingsSidebar")
+        # License and Updates are real sidebar pages, not just icon-only
+        # shortcuts: buyers could not find where to enter their key.
         self.sidebar.addItems(
-            ["General", "Automation", "Connect", "Local AI"]
+            [
+                "General",
+                "Automation",
+                "Connect",
+                "Local AI",
+                "License",
+                "Updates",
+            ]
         )
         self.sidebar.currentRowChanged.connect(self.change_page)
         side_layout.addWidget(self.sidebar, 1)
@@ -1447,6 +1462,25 @@ class SettingsDialog(QDialog):
         live_layout.addLayout(style_row)
 
         layout.addWidget(live_group)
+
+        if platform.system() != "Darwin":
+            # The live engine reads selections through the macOS Accessibility
+            # API. Showing live controls on Windows implied a feature that
+            # could never trigger, so they are disabled with a clear reason
+            # (their saved values are preserved).
+            note = QLabel(
+                "Live suggestions are available on macOS only for now. "
+                "On Windows, select text and press the proofread hotkey "
+                "to check it."
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #57534E; font-size: 13px;")
+            live_layout.insertWidget(0, note)
+            self.chk_live_preview.setEnabled(False)
+            self.chk_live_local.setEnabled(False)
+            self.live_style_combo.setEnabled(False)
+            self.live_delay_slider.setEnabled(False)
+            self.live_delay_label.setEnabled(False)
 
         hotkey_group = QGroupBox("Hotkeys")
         hotkey_layout = QFormLayout(hotkey_group)
@@ -3642,6 +3676,11 @@ class SettingsDialog(QDialog):
 class ProofreaderApp(QMainWindow):
     request_proofread: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
     request_show: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
+    # Global hotkey callbacks arrive on the OS listener thread (pynput on
+    # Windows, NSEvent on macOS). Emitting a signal hands the work to the GUI
+    # thread instead of touching widgets from another thread.
+    proofread_hotkey_pressed: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
+    escape_hotkey_pressed: pyqtSignal = pyqtSignal() # pyright: ignore[reportAny]
 
     def __init__(self, max_tokens: int, settings: dict[str, Any]) -> None:
         super().__init__()
@@ -3654,9 +3693,12 @@ class ProofreaderApp(QMainWindow):
         
         self.request_proofread.connect(self.run_proofread_task)
         self.request_show.connect(self.show_and_raise)
+        self.proofread_hotkey_pressed.connect(self._on_proofread_hotkey)
+        self.escape_hotkey_pressed.connect(self._on_escape_hotkey)
         
         self.setWindowTitle(APP_NAME)
         self.setGeometry(120, 120, 840, 600)
+        self._restore_window_geometry()
         self.setMinimumSize(640, 500)
         
         if keep_on_top:
@@ -4234,7 +4276,7 @@ class ProofreaderApp(QMainWindow):
         if open_hk:
             hotkeys_dict[open_hk] = lambda: self.request_show.emit()
         if proofread_hk:
-            hotkeys_dict[proofread_hk] = lambda: self._on_proofread_hotkey()
+            hotkeys_dict[proofread_hk] = lambda: self.proofread_hotkey_pressed.emit()
             
         if not hotkeys_dict:
             print("No hotkeys defined.")
@@ -4485,6 +4527,17 @@ class ProofreaderApp(QMainWindow):
             if worker is not None and worker.isRunning():
                 worker.cancel_event.set()
 
+    def _on_escape_hotkey(self) -> None:
+        """Double-Esc cancels the running task (always on the GUI thread)."""
+        now = time.monotonic()
+        if now - self._last_escape_ts < 0.7:
+            self._last_escape_ts = 0.0
+            self._cancel_active_tasks()
+            self.status_label.setText("Cancelling task…")
+        else:
+            self._last_escape_ts = now
+            self.status_label.setText("Press Esc again to cancel.")
+
     def _start_escape_monitor(self) -> None:
         """Temporarily listen for bare Esc presses while a task is running."""
         if self._escape_monitor is not None:
@@ -4496,14 +4549,8 @@ class ProofreaderApp(QMainWindow):
             return
 
         def on_escape() -> None:
-            now = time.monotonic()
-            if now - self._last_escape_ts < 0.7:
-                self._last_escape_ts = 0.0
-                self._cancel_active_tasks()
-                self.status_label.setText("Cancelling task…")
-            else:
-                self._last_escape_ts = now
-                self.status_label.setText("Press Esc again to cancel.")
+            # Runs on the OS listener thread: hand off to the GUI thread.
+            self.escape_hotkey_pressed.emit()
 
         monitor = HotkeyManager({"<esc>": on_escape})
         try:
@@ -4525,6 +4572,7 @@ class ProofreaderApp(QMainWindow):
 
     def _on_about_to_quit(self) -> None:
         """Cancel in-flight tasks before the app exits."""
+        self._save_window_geometry()
         self._stop_escape_monitor()
         self._cancel_active_tasks()
         for worker in (
@@ -4585,7 +4633,9 @@ class ProofreaderApp(QMainWindow):
         worker.start()
 
     def _on_license_validation_result(self, result: dict) -> None:
-        if result.get("valid") is False:
+        # validate_license_remote() reports failure as ok=False; testing for a
+        # "valid" key here meant revoked licenses were never surfaced.
+        if result.get("ok") is False:
             self._show_toast(
                 "Your license could not be verified online. If you deactivated "
                 "this computer or changed hardware, open Settings → License "
@@ -4594,10 +4644,42 @@ class ProofreaderApp(QMainWindow):
             )
 
     def _start_activation(self, kind: str, value: str) -> None:
+        if kind == "url" and not self._confirm_url_activation(value):
+            self._show_toast("Activation cancelled.", kind="warning")
+            return
         worker = ActivationWorker(kind, value)
         self._activation_worker = worker
         worker.done.connect(self._on_activation_done)
         worker.start()
+
+    def _confirm_url_activation(self, value: str) -> bool:
+        """Ask the user before a link activates a licence.
+
+        A ``byteproof://`` link can be opened by any web page, so activation
+        must never happen silently: the user confirms the key being accepted.
+        """
+        try:
+            from urllib.parse import parse_qs, urlparse
+
+            params = parse_qs(urlparse(value).query)
+            key = (params.get("key") or [""])[0].strip()
+        except Exception:
+            key = ""
+        if key:
+            preview = f"{key[:6]}…{key[-4:]}" if len(key) > 12 else key
+        else:
+            preview = "(this link contains no license key)"
+        answer = QMessageBox.question(
+            self,
+            "Activate ByteProof?",
+            "This link is asking ByteProof to activate a licence on this "
+            "computer.\n\n"
+            f"License key: {preview}\n\n"
+            "Only continue if you requested this activation.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _on_activation_done(self, ok: bool, message: str) -> None:
         if ok:
@@ -5777,12 +5859,32 @@ class ProofreaderApp(QMainWindow):
         done_callback: Any = None,
         parent_widget: QWidget | None = None,
     ) -> None:
+        # A check runs in a worker; starting another while one is in flight (or
+        # while the update dialog is open) replaced the worker and re-entered
+        # the dialog from its nested event loop.
+        if getattr(self, "_update_dialog_open", False):
+            if done_callback is not None:
+                done_callback("An update window is already open.")
+            return
+        worker = getattr(self, "update_check_worker", None)
+        if worker is not None and worker.isRunning():
+            if done_callback is not None:
+                done_callback("Already checking for updates…")
+            return
         self._update_check_force = force
         self._update_check_done_callback = done_callback
         self._update_check_parent = parent_widget
         self.update_check_worker = UpdateCheckWorker(APP_VERSION)
         self.update_check_worker.found.connect(self._handle_update_check_result)
         self.update_check_worker.start()
+
+    def _show_update_available_hint(self, remote_version: str) -> None:
+        """Non-blocking 'update available' notification."""
+        self._show_toast(
+            f"{APP_NAME} {remote_version} is available — "
+            "Settings → Updates to install.",
+            kind="success",
+        )
 
     def _set_corrected_for_copy(self, text: str) -> None:
         self.last_corrected = text or ""
@@ -5791,6 +5893,10 @@ class ProofreaderApp(QMainWindow):
     def _handle_update_check_result(
         self, update_available: bool, version_info: dict[str, Any] | None
     ) -> None:
+        if getattr(self, "_update_dialog_open", False):
+            # A modal dialog is already up; its nested event loop must not
+            # open a second one.
+            return
         done_callback = getattr(self, "_update_check_done_callback", None)
         self._update_check_done_callback = None
         parent = getattr(self, "_update_check_parent", None) or self
@@ -5811,6 +5917,24 @@ class ProofreaderApp(QMainWindow):
                 return
             self.pending_update_version = remote_version
 
+            if not force:
+                # The automatic startup check must never interrupt the user
+                # with a modal dialog (it used to appear seconds after launch
+                # and stack on top of onboarding). Point at the Updates page
+                # instead; opening it there shows the full dialog.
+                result_message = (
+                    f"{APP_NAME} {remote_version} is available — "
+                    "open Settings → Updates to install it."
+                )
+                try:
+                    from .generic_editing import _debug_log as _update_log
+
+                    _update_log(f"UPDATE: {remote_version} available (notified)")
+                except Exception:
+                    pass
+                self._show_update_available_hint(remote_version)
+                return
+
             dialog = UpdateDialog(
                 APP_VERSION,
                 remote_version,
@@ -5818,7 +5942,11 @@ class ProofreaderApp(QMainWindow):
                 release_notes,
                 parent=parent,
             )
-            dialog.exec()
+            self._update_dialog_open = True
+            try:
+                dialog.exec()
+            finally:
+                self._update_dialog_open = False
 
             if dialog.result_action != "download":
                 if remote_version:
@@ -5986,8 +6114,35 @@ class ProofreaderApp(QMainWindow):
                 webbrowser.open(PRODUCT_URL)
         self.status_label.setText("Ready")
 
+    def _geometry_file(self) -> str:
+        return os.path.join(get_app_support_dir(), "window-geometry.bin")
+
+    def _restore_window_geometry(self) -> None:
+        """Restore the last window size and position, off-screen safe."""
+        try:
+            from PyQt6.QtCore import QByteArray
+
+            path = self._geometry_file()
+            if not os.path.exists(path):
+                return
+            with open(path, "rb") as handle:
+                data = handle.read()
+            if data:
+                self.restoreGeometry(QByteArray(data))
+        except Exception as e:
+            print(f"Could not restore window geometry: {e}")
+
+    def _save_window_geometry(self) -> None:
+        try:
+            path = self._geometry_file()
+            with open(path, "wb") as handle:
+                handle.write(bytes(self.saveGeometry()))
+        except Exception as e:
+            print(f"Could not save window geometry: {e}")
+
     def closeEvent(self, a0: Any) -> None:
         try:
+            self._save_window_geometry()
             if not QSystemTrayIcon.isSystemTrayAvailable():
                 self._on_about_to_quit()
                 QApplication.quit()
@@ -6609,7 +6764,12 @@ class ProofreaderApp(QMainWindow):
         try:
             folder = get_app_support_dir()
             os.makedirs(folder, exist_ok=True)
-            subprocess.Popen(["open", folder])
+            if platform.system() == "Windows":
+                os.startfile(folder)  # type: ignore[attr-defined]
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
         except Exception as e:
             print(f"Could not open support folder: {e}")
 
@@ -6738,13 +6898,16 @@ class ProofreaderApp(QMainWindow):
         preserved line breaks, keeping both surfaces visually consistent.
         """
         try:
-            from .ui_theme import diff_html
+            from .ui_theme import REVIEW_CONTEXT_STYLE, diff_html
 
             rendered = diff_html(
                 original,
                 corrected,
                 context=100000,  # review view: never truncate
                 preserve_newlines=True,
+                # Full contrast: this pane shows the whole document, so dimming
+                # the unchanged text made the manuscript hard to read.
+                context_style=REVIEW_CONTEXT_STYLE,
             )
             cursor = self.diff_text.textCursor()
             cursor.insertHtml(

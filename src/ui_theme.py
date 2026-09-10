@@ -27,9 +27,13 @@ GREEN_INSERT_BG = "#E6F4EA"
 OLD_STYLE = f"color:{RED_DELETE}; background:{RED_DELETE_BG};"
 NEW_STYLE = (
     f"color:{GREEN_INSERT}; background:{GREEN_INSERT_BG}; font-weight:500;"
+    " text-decoration:underline;"
 )
 ARROW_STYLE = f"color:{TEXT_ARROW};"
 CONTEXT_STYLE = f"color:{TEXT_MUTED};"
+# The review view shows the whole document; its unchanged text must stay
+# readable instead of being dimmed like short inline context.
+REVIEW_CONTEXT_STYLE = f"color:{TEXT_PRIMARY};"
 
 DOT_RED = "#D93025"
 DOT_AMBER = "#F9AB00"
@@ -58,6 +62,7 @@ def diff_html(
     after: str,
     context: int = 24,
     preserve_newlines: bool = False,
+    context_style: str | None = None,
 ) -> str:
     """Render a pinpoint word/character diff, unchanged text left normal.
 
@@ -65,8 +70,11 @@ def diff_html(
     ``context`` characters per side (pass a large context to keep the full
     text, e.g. for the main window's review view). With
     ``preserve_newlines`` the caller must render inside a container that
-    honours whitespace (``white-space:pre-wrap``).
+    honours whitespace (``white-space:pre-wrap``). Pass ``context_style``
+    (e.g. ``REVIEW_CONTEXT_STYLE``) when the whole document is shown, so the
+    unchanged text stays at full contrast.
     """
+    ctx_style = context_style or CONTEXT_STYLE
 
     def escape(text: str) -> str:
         escaped = html.escape(text)
@@ -85,7 +93,7 @@ def diff_html(
                 segment = segment[:context] + "…" + segment[-context:]
             if segment:
                 parts.append(
-                    f"<span style='{CONTEXT_STYLE}'>{segment}</span>"
+                    f"<span style='{ctx_style}'>{segment}</span>"
                 )
         elif tag == "delete":
             parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")

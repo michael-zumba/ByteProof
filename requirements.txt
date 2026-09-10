@@ -1,10 +1,15 @@
-certifi
-cryptography>=41.0.0
-PyQt6
-pyinstaller
-pyobjc-framework-Cocoa; sys_platform == 'darwin'
-pyobjc-framework-ApplicationServices; sys_platform == 'darwin'
-pyobjc-framework-Quartz; sys_platform == 'darwin'
-pynput
+# Runtime dependencies for ByteProof.
+#
+# Versions are pinned: an unpinned PyQt6 or PyInstaller release can change the
+# frozen build with no code change, which made installers non-reproducible.
+# Bump deliberately and re-run the test suite.
+certifi==2026.7.22
+cryptography==50.0.0
+PyQt6==6.11.0
+pyinstaller==6.22.0
+pyobjc-framework-Cocoa==12.2.1; sys_platform == 'darwin'
+pyobjc-framework-ApplicationServices==12.2.1; sys_platform == 'darwin'
+pyobjc-framework-Quartz==12.2.1; sys_platform == 'darwin'
+pynput==1.8.2
 pywin32; sys_platform == 'win32'
 uiautomation; sys_platform == 'win32'

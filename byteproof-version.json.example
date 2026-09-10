@@ -4,5 +4,11 @@
   "release_notes": "Fixed email edits shifting position when the text contains emoji or special characters, and a rare stall in Word after dragging the suggestion panel.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
-  "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"
+  "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
+  "sha256": {
+    "_comment": "Optional but recommended: the app verifies the download against these before installing.",
+    "macos_apple_silicon_url": "PASTE_SHA256_OF_THE_APPLE_SILICON_DMG",
+    "macos_intel_url": "PASTE_SHA256_OF_THE_INTEL_DMG",
+    "windows_url": "PASTE_SHA256_OF_THE_WINDOWS_ZIP"
+  }
 }

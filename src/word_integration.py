@@ -9,12 +9,55 @@ from typing import Any, NamedTuple
 
 WD_WITH_IN_TABLE = 12  # Word constant: wdWithInTable
 
+# Word can block on a modal dialog (file in use, Protected View, password,
+# macro consent). Without a timeout the worker waits forever and the feature
+# silently hangs, so every AppleScript call is bounded.
+APPLESCRIPT_TIMEOUT_S = 30.0
+# Short reads (document/selection state) should fail fast rather than freeze.
+APPLESCRIPT_READ_TIMEOUT_S = 10.0
+
 # How many characters of a field's visible result the macOS fallback scan may
 # read before giving up. A page of text is roughly 3,000-3,500 characters, so
 # 4,000 covers any realistic citation/field result while keeping the scan
 # bounded. The scan normally stops at the field's end character, so this is
 # only a safety net for fields whose visible result is a full page or longer.
 FIELD_RESULT_SCAN_LIMIT = 4000
+
+
+class WordBusyError(RuntimeError):
+    """Word did not respond in time (usually a modal dialog is open)."""
+
+
+def _log_word(message: str) -> None:
+    """Record a Word diagnostic where a windowed build can still see it.
+
+    The frozen app has no console, so the previous ``print()`` calls were
+    invisible in the field. Diagnostics go to the same capture log the live
+    service uses.
+    """
+    try:
+        from .generic_editing import _debug_log
+
+        _debug_log(f"WORD: {message}")
+    except Exception:
+        pass
+
+
+def _normalize_for_compare(text: str) -> str:
+    """Normalise text for Word read-back comparison."""
+    from .utils import normalize_text
+
+    return normalize_text(text or "", collapse_whitespace=True)
+
+
+def _applescript_status(raw: str) -> str:
+    """Extract the status token from a guarded script's output."""
+    return (raw or "").strip().splitlines()[-1].strip() if raw else ""
+
+
+def _applescript_quote(value: str) -> str:
+    """Quote a Python string for safe interpolation into AppleScript."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 class FieldSpan(NamedTuple):
@@ -60,7 +103,13 @@ class WordIntegration:
     """Abstract base class for Microsoft Word interaction."""
 
     def apply_live_edit(
-        self, selection_start: int, rel_start: int, rel_end: int, replacement: str
+        self,
+        selection_start: int,
+        rel_start: int,
+        rel_end: int,
+        replacement: str,
+        before_text: str | None = None,
+        expected_document: str | None = None,
     ) -> tuple[bool, str]:
         raise NotImplementedError
 
@@ -183,6 +232,54 @@ class WindowsWordIntegration(WordIntegration):
         except Exception as e:
             raise RuntimeError(f"Unable to enable Track Changes in Microsoft Word: {e}")
 
+    def apply_live_edit(
+        self,
+        selection_start: int,
+        rel_start: int,
+        rel_end: int,
+        replacement: str,
+        before_text: str | None = None,
+        expected_document: str | None = None,
+    ) -> tuple[bool, str]:
+        """Replace one mapped sub-range on Windows with the same guards.
+
+        Track Changes is suspended for the write (so live edits never record a
+        revision) and restored in a ``finally`` block, the range is checked
+        before the write, and the result is read back before reporting success.
+        """
+        start = selection_start + rel_start
+        end = selection_start + rel_end
+        try:
+            word = self._get_word()
+            if not word.Documents.Count:
+                return False, "No Word document is open."
+            doc = word.ActiveDocument
+            if expected_document and str(doc.Name) != expected_document:
+                _log_word("live edit refused: active document changed")
+                return False, "The active Word document changed — please try again."
+            rng = doc.Range(start, end)
+            if before_text:
+                current = str(rng.Text or "")
+                if _normalize_for_compare(current) != _normalize_for_compare(
+                    before_text
+                ):
+                    _log_word("live edit refused: range text changed")
+                    return False, "The text moved or changed — please try again."
+            old_track = bool(doc.TrackRevisions)
+            try:
+                doc.TrackRevisions = False
+                rng.Text = replacement
+            finally:
+                doc.TrackRevisions = old_track
+            after = str(doc.Range(start, start + len(replacement)).Text or "")
+            if _normalize_for_compare(after) == _normalize_for_compare(replacement):
+                return True, "Applied."
+            _log_word("live edit read-back differs; reporting for review")
+            return True, "Applied — please check the document."
+        except Exception as exc:
+            _log_word(f"live edit failed (Windows): {exc}")
+            return False, "Could not apply the edit in Word."
+
     def ensure_track_changes_disabled(self) -> None:
         try:
             word = self._get_word()
@@ -197,14 +294,14 @@ class WindowsWordIntegration(WordIntegration):
             sel = word.Selection
             sel.Text = new_text
         except Exception as e:
-            print(f"Error replacing selection content (Windows): {e}")
+            _log_word(f"Error replacing selection content (Windows): {e}")
 
     def set_selection_range(self, start: int, end: int) -> None:
         try:
             word = self._get_word()
             word.Selection.SetRange(start, end)
         except Exception as e:
-            print(f"Error restoring selection range (Windows): {e}")
+            _log_word(f"Error restoring selection range (Windows): {e}")
 
     def get_selection_info(self) -> tuple[str, int, int, str, str]:
         try:
@@ -233,7 +330,7 @@ class WindowsWordIntegration(WordIntegration):
                 
             return str(text), int(start_pos), int(end_pos), str(context_before), str(context_after)
         except Exception as e:
-            print(f"Error getting text (Windows): {e}")
+            _log_word(f"Error getting text (Windows): {e}")
             return "", 0, 0, "", ""
 
     def is_selection_in_table(self) -> bool:
@@ -249,7 +346,7 @@ class WindowsWordIntegration(WordIntegration):
             doc = word.ActiveDocument
             doc.Range(abs_start, abs_end).Delete()
         except Exception as e:
-            print(f"Error deleting range (Windows): {e}")
+            _log_word(f"Error deleting range (Windows): {e}")
 
     def insert_at_position(self, abs_pos: int, text: str) -> None:
         try:
@@ -257,7 +354,7 @@ class WindowsWordIntegration(WordIntegration):
             doc = word.ActiveDocument
             doc.Range(abs_pos, abs_pos).InsertAfter(text)
         except Exception as e:
-            print(f"Error inserting at position (Windows): {e}")
+            _log_word(f"Error inserting at position (Windows): {e}")
 
     def replace_range(self, abs_start: int, abs_end: int, text: str) -> None:
         try:
@@ -265,7 +362,7 @@ class WindowsWordIntegration(WordIntegration):
             doc = word.ActiveDocument
             doc.Range(abs_start, abs_end).Text = text
         except Exception as e:
-            print(f"Error replacing range (Windows): {e}")
+            _log_word(f"Error replacing range (Windows): {e}")
 
     def selection_has_fields(self) -> bool:
         try:
@@ -298,7 +395,7 @@ class WindowsWordIntegration(WordIntegration):
             ]
             return spans
         except Exception as e:
-            print(f"Error getting field spans (Windows): {e}")
+            _log_word(f"Error getting field spans (Windows): {e}")
             return []
 
     def get_selection_hidden_spans(
@@ -332,12 +429,12 @@ class WindowsWordIntegration(WordIntegration):
                     continue
             return spans
         except Exception as e:
-            print(f"Error getting hidden spans (Windows): {e}")
+            _log_word(f"Error getting hidden spans (Windows): {e}")
             return []
 
     def add_comment(self, comment_text: str) -> None:
         if not comment_text or not comment_text.strip():
-            print("Skipping empty comment insertion.")
+            _log_word("Skipping empty comment insertion.")
             return
         try:
             word = self._get_word()
@@ -346,22 +443,28 @@ class WindowsWordIntegration(WordIntegration):
             rng = doc.Range(sel.Start, sel.End)
             doc.Comments.Add(rng, comment_text)
         except Exception as e:
-            print(f"Error adding comment (Windows): {e}")
+            _log_word(f"Error adding comment (Windows): {e}")
 
 
 # --- macOS Implementation ---
 
 class MacOSWordIntegration(WordIntegration):
     
-    def _run_applescript(self, script: str, *args: str) -> str:
+    def _run_applescript(
+        self, script: str, *args: str, timeout: float | None = None
+    ) -> str:
         """
         Executes an AppleScript using `osascript`.
         Uses stdin for the script content to avoid command line length limits.
         Ensures binary mode execution to preserve newlines correctly.
+
+        Every call is bounded: a Word modal dialog would otherwise block the
+        caller forever with no way to cancel.
         """
         command = ["osascript", "-"]
         command.extend(args)
-        
+        limit = APPLESCRIPT_TIMEOUT_S if timeout is None else timeout
+
         try:
             completed = subprocess.run(
                 command,
@@ -369,54 +472,127 @@ class MacOSWordIntegration(WordIntegration):
                 check=True,
                 capture_output=True,
                 text=False, # Binary mode
+                timeout=limit,
             )
-            
+
             # Decode and handle trailing newline from osascript
             output = completed.stdout.decode('utf-8')
             output = output.removesuffix("\n")
             return output
+        except subprocess.TimeoutExpired as exc:
+            _log_word(
+                f"AppleScript timed out after {limit:.0f}s; "
+                "Word is probably showing a dialog"
+            )
+            raise WordBusyError(
+                "Microsoft Word is not responding — close any dialog in Word "
+                "and try again."
+            ) from exc
         except subprocess.CalledProcessError as e:
             # Re-raise with stderr context decoded
             stdout_str = e.stdout.decode('utf-8') if e.stdout else ""
             stderr_str = e.stderr.decode('utf-8') if e.stderr else ""
+            if stderr_str.strip():
+                _log_word(f"AppleScript error: {stderr_str.strip()[:300]}")
             raise subprocess.CalledProcessError(e.returncode, e.cmd, output=stdout_str, stderr=stderr_str)
 
     def apply_live_edit(
-        self, selection_start: int, rel_start: int, rel_end: int, replacement: str
+        self,
+        selection_start: int,
+        rel_start: int,
+        rel_end: int,
+        replacement: str,
+        before_text: str | None = None,
+        expected_document: str | None = None,
     ) -> tuple[bool, str]:
         """Replace one mapped sub-range of the current selection.
 
         Live editing must be instant and invisible: Track Changes is
-        temporarily suspended around the replacement (best-effort — the
-        replace still works if the property is unavailable) so the edit
-        never records a revision or slows the document down.
+        temporarily suspended around the replacement so the edit never records
+        a revision or slows the document down.
+
+        The write is guarded the same way the Accessibility path is:
+
+        * the active document must still be the one the offsets came from,
+        * the range must still hold the original text (``before_text``),
+        * Track Changes is restored even when the write fails,
+        * the result is read back before success is reported.
         """
-        from .generic_editing import _mac_set_clipboard
+        from .generic_editing import _debug_log, _mac_set_clipboard
 
         start = selection_start + rel_start
         end = selection_start + rel_end
         _mac_set_clipboard(replacement)
+        expected_doc = _applescript_quote(expected_document or "")
+        expected_text = _applescript_quote(before_text or "")
         script = f"""
         tell application "Microsoft Word"
+            if not running then return "NOT_RUNNING"
+            if not (exists active document) then return "NO_DOCUMENT"
+            if "{expected_doc}" is not "" then
+                if (name of active document) is not "{expected_doc}" then return "DOC_CHANGED"
+            end if
+            set r to create range active document start {start} end {end}
+            if "{expected_text}" is not "" then
+                if (content of r) is not "{expected_text}" then return "TEXT_CHANGED"
+            end if
             set oldTrack to missing value
             try
                 set oldTrack to track revisions of active document
                 set track revisions of active document to false
             end try
-            set r to create range active document start {start} end {end}
-            set content of r to (the clipboard as text)
+            try
+                set content of r to (the clipboard as text)
+            on error errMsg number errNum
+                try
+                    if oldTrack is not missing value then
+                        set track revisions of active document to oldTrack
+                    end if
+                end try
+                return "WRITE_FAILED: " & errMsg
+            end try
             try
                 if oldTrack is not missing value then
                     set track revisions of active document to oldTrack
                 end if
             end try
+            if (content of r) is (the clipboard as text) then return "OK"
+            return "VERIFY_MISMATCH"
         end tell
         """
         try:
-            self._run_applescript(script)
-            return True, "Applied."
-        except Exception as exc:
+            raw = self._run_applescript(script)
+        except WordBusyError as exc:
+            _log_word(f"live edit blocked: {exc}")
             return False, str(exc)
+        except Exception as exc:
+            _log_word(f"live edit failed: {exc}")
+            return False, str(exc)
+
+        status = _applescript_status(raw)
+        if status == "OK":
+            return True, "Applied."
+        if status.startswith("WRITE_FAILED"):
+            _log_word(f"live edit write failed: {status}")
+            return False, "Could not write to the Word document."
+        if status == "DOC_CHANGED":
+            _debug_log("WORD LIVE APPLY: active document changed; refusing")
+            return False, "The active Word document changed — please try again."
+        if status == "TEXT_CHANGED":
+            _debug_log("WORD LIVE APPLY: range no longer holds the original text")
+            return False, "The text moved or changed — please try again."
+        if status == "VERIFY_MISMATCH":
+            # The write landed but Word normalised the text (smart quotes,
+            # autocorrect). Report honestly instead of claiming success.
+            _log_word("live edit read-back differs; reporting for review")
+            return True, "Applied — please check the document."
+        if status == "NOT_RUNNING":
+            return False, "Microsoft Word is not running."
+        if status == "NO_DOCUMENT":
+            return False, "No Word document is open."
+        if status:
+            _log_word(f"live edit unexpected status: {status!r}")
+        return False, "Could not apply the edit in Word."
 
     def set_live_underline(
         self, selection_start: int, rel_start: int, rel_end: int, enable: bool
@@ -432,14 +608,30 @@ class MacOSWordIntegration(WordIntegration):
         if enable:
             script = f"""
             tell application "Microsoft Word"
-                set oldTrack to track revisions of active document
-                set track revisions of active document to false
-                set r to create range active document start {start} end {end}
-                set origUnderline to underline of font object of r
-                set origColor to color of font object of r
-                set underline of font object of r to underline dot dot dash
-                set color of font object of r to {{58082, 14906, 23387}}
-                set track revisions of active document to oldTrack
+                set oldTrack to missing value
+                try
+                    set oldTrack to track revisions of active document
+                    set track revisions of active document to false
+                end try
+                try
+                    set r to create range active document start {start} end {end}
+                    set origUnderline to underline of font object of r
+                    set origColor to color of font object of r
+                    set underline of font object of r to underline dot dot dash
+                    set color of font object of r to {{58082, 14906, 23387}}
+                on error errMsg number errNum
+                    try
+                        if oldTrack is not missing value then
+                            set track revisions of active document to oldTrack
+                        end if
+                    end try
+                    error errMsg number errNum
+                end try
+                try
+                    if oldTrack is not missing value then
+                        set track revisions of active document to oldTrack
+                    end if
+                end try
                 return (origUnderline as text) & "||" & ((item 1 of origColor) as text) & "," & ((item 2 of origColor) as text) & "," & ((item 3 of origColor) as text)
             end tell
             """
@@ -492,12 +684,28 @@ class MacOSWordIntegration(WordIntegration):
         color = (original or {}).get("color") or (0, 0, 0)
         script = f"""
         tell application "Microsoft Word"
-            set oldTrack to track revisions of active document
-            set track revisions of active document to false
-            set r to create range active document start {start} end {end}
-            set underline of font object of r to {underline}
-            set color of font object of r to {{{color[0]}, {color[1]}, {color[2]}}}
-            set track revisions of active document to oldTrack
+            set oldTrack to missing value
+            try
+                set oldTrack to track revisions of active document
+                set track revisions of active document to false
+            end try
+            try
+                set r to create range active document start {start} end {end}
+                set underline of font object of r to {underline}
+                set color of font object of r to {{{color[0]}, {color[1]}, {color[2]}}}
+            on error errMsg number errNum
+                try
+                    if oldTrack is not missing value then
+                        set track revisions of active document to oldTrack
+                    end if
+                end try
+                error errMsg number errNum
+            end try
+            try
+                if oldTrack is not missing value then
+                    set track revisions of active document to oldTrack
+                end if
+            end try
         end tell
         """
         self._run_applescript(script)
@@ -645,7 +853,7 @@ class MacOSWordIntegration(WordIntegration):
                 if len(parts) >= 2:
                     return parts[1], int(parts[0]), 0, "", ""
         except Exception as e:
-            print(f"Error getting text with context: {e}")
+            _log_word(f"Error getting text with context: {e}")
             
         return "", 0, 0, "", ""
 
@@ -670,7 +878,7 @@ class MacOSWordIntegration(WordIntegration):
             res = self._run_applescript(script)
             return res.strip() == "true"
         except Exception as e:
-            print(f"Error checking table status: {e}")
+            _log_word(f"Error checking table status: {e}")
             return False
             
     def delete_range(self, abs_start: int, abs_end: int) -> None:
@@ -808,7 +1016,7 @@ class MacOSWordIntegration(WordIntegration):
         try:
             self._run_applescript(script, str(start), str(end))
         except Exception as e:
-            print(f"Error restoring selection range (macOS): {e}")
+            _log_word(f"Error restoring selection range (macOS): {e}")
 
     def selection_has_fields(self) -> bool:
         script = """
@@ -878,7 +1086,7 @@ class MacOSWordIntegration(WordIntegration):
         try:
             raw = self._run_applescript(list_script)
         except Exception as e:
-            print(f"Error listing Word fields (macOS): {e}")
+            _log_word(f"Error listing Word fields (macOS): {e}")
             return []
 
         parsed: list[tuple[int, int, int, int, str]] = []
@@ -1005,7 +1213,7 @@ class MacOSWordIntegration(WordIntegration):
         try:
             raw = self._run_applescript(script, *args)
         except Exception as e:
-            print(f"Error scanning Word selection (macOS): {e}")
+            _log_word(f"Error scanning Word selection (macOS): {e}")
             return []
 
         spans: list[tuple[int, int]] = []
@@ -1108,7 +1316,7 @@ class MacOSWordIntegration(WordIntegration):
         import subprocess as sp
 
         if not comment_text or not comment_text.strip():
-            print("Skipping empty comment insertion.")
+            _log_word("Skipping empty comment insertion.")
             return
 
         try:
@@ -1132,11 +1340,24 @@ class MacOSWordIntegration(WordIntegration):
                         pass
 
         except Exception as e:
-            print(f"Comment insertion failed: {e}")
+            _log_word(f"Comment insertion failed: {e}")
             raise
+
+    def _comment_count(self) -> int | None:
+        """Number of comments in the active document, or None if unknown."""
+        try:
+            raw = self._run_applescript(
+                'tell application "Microsoft Word" to return '
+                "(count of comments of active document) as text",
+                timeout=APPLESCRIPT_READ_TIMEOUT_S,
+            )
+            return int(str(raw).strip())
+        except Exception:
+            return None
 
     def _trigger_comment_and_paste(self) -> None:
         last_error = "unknown"
+        before_comments = self._comment_count()
         methods = [
             ('menu_insert', '''
                 tell application "Microsoft Word" to activate
@@ -1183,18 +1404,32 @@ class MacOSWordIntegration(WordIntegration):
                 result = self._run_applescript(method_script)
                 if result and "ERROR" in result:
                     last_error = f"{method_name}: {result}"
-                    print(f"  Comment method '{method_name}' failed: {result}")
+                    _log_word(f"  Comment method '{method_name}' failed: {result}")
                     continue
                 triggered = True
-                print(f"  Comment triggered via '{method_name}'")
+                _log_word(f"  Comment triggered via '{method_name}'")
                 break
             except Exception as ex:
                 last_error = f"{method_name}: {ex}"
-                print(f"  Comment method '{method_name}' exception: {ex}")
+                _log_word(f"  Comment method '{method_name}' exception: {ex}")
                 continue
 
         if not triggered:
             raise RuntimeError(f"No comment trigger method worked. Last error: {last_error}")
+
+        # Only paste once Word has actually opened a comment box. Without this
+        # check a menu click that Word ignored made the paste land in the
+        # document body, typing the reviewer note into the manuscript.
+        after_comments = self._comment_count()
+        if (
+            before_comments is not None
+            and after_comments is not None
+            and after_comments <= before_comments
+        ):
+            raise RuntimeError(
+                "Word did not open a comment box, so the comment text was not "
+                "inserted (it would otherwise be typed into the document)."
+            )
 
         paste_script = '''
             delay 0.5
@@ -1213,9 +1448,9 @@ class MacOSWordIntegration(WordIntegration):
         if res:
             res = res.strip()
             if res == "ERROR_OBJECT_NOT_FOUND":
-                print(f"  ! Warning: Could not {context} (Object not found). Skipping.")
+                _log_word(f"  ! Warning: Could not {context} (Object not found). Skipping.")
             elif res == "ERROR_WRITE_DENIED":
-                print(f"  ! Warning: Write denied for {context}. Skipping.")
+                _log_word(f"  ! Warning: Write denied for {context}. Skipping.")
 
 
 # --- Factory ---

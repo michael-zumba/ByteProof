@@ -9,7 +9,7 @@ import time
 import uuid
 from typing import Any, cast
 
-from .settings import DEVELOPER_EMAILS, get_app_support_dir
+from .settings import developer_emails, get_app_support_dir
 
 TRIAL_DAYS = 7
 FREE_MODE_DAILY_PROOFREAD_LIMIT = 3
@@ -217,8 +217,15 @@ def _load_license_data() -> dict[str, Any] | None:
 
 def _save_license_data(data: dict[str, Any]) -> None:
     path = _get_license_path()
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        # The file carries the licence payload; keep it user-private.
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp_path, path)
     _secure_store_set(json.dumps(data, ensure_ascii=False))
 
 
@@ -397,7 +404,7 @@ def activate_polar_license(result: dict[str, Any]) -> dict[str, Any]:
 def activate_dev_license(email: str) -> dict[str, Any]:
     """Activate full access for a known developer email (no Polar required)."""
     email = email.strip().lower()
-    if email not in {e.lower() for e in DEVELOPER_EMAILS}:
+    if email not in {e.lower() for e in developer_emails()}:
         return {
             "valid": False,
             "error": "This email is not registered for developer access.",
@@ -448,7 +455,7 @@ def _validated_license_data() -> dict[str, Any] | None:
 
         if provider == "dev":
             email = str(data.get("email", "")).strip().lower()
-            if email not in {e.lower() for e in DEVELOPER_EMAILS}:
+            if email not in {e.lower() for e in developer_emails()}:
                 return None
             return data
 

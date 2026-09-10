@@ -1290,7 +1290,67 @@ def test_service_apply_all_reports_partial_failure(monkeypatch):
     messages = []
     service.apply_done.connect(messages.append)
     service._apply_all()
+    # The first failure aborts the batch: every later span's offsets assume the
+    # earlier writes landed, so continuing could target shifted text. The real
+    # reason is reported instead of a bare "0 of 2".
+    assert messages == ["Could not apply."]
+    assert service._undo_state is None
+
+
+def test_service_apply_all_reports_partial_success(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    text = "teh cat sat"
+
+    class FakeEditor:
+        def __init__(self):
+            self.calls = 0
+
+        def selection_details(self, target):
+            return {
+                "text": text,
+                "range": (0, len(text)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            self.calls += 1
+            if self.calls == 2:  # the second suggestion fails
+                return False, "Could not apply."
+            return True, "Applied."
+
+    editor = FakeEditor()
+    service._editor = editor
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("cat", "dog", "Word choice", 4, 7),
+    ]
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_text = text
+    service._seen_text = text
+    messages = []
+    service.apply_done.connect(messages.append)
+    service._apply_all()
     assert messages == ["Applied 1 of 2 suggestions."]
+    assert service._undo_state is not None  # the applied span stays undoable
 
 
 def test_preview_worker_cancel_event_aborts_and_signals(monkeypatch):
@@ -1343,7 +1403,15 @@ def test_service_word_apply_compensates_hidden_characters(monkeypatch):
             self.hidden_calls += 1
             return [(104, 107)]
 
-        def apply_live_edit(self, selection_start, rel_start, rel_end, replacement):
+        def apply_live_edit(
+            self,
+            selection_start,
+            rel_start,
+            rel_end,
+            replacement,
+            before_text=None,
+            expected_document=None,
+        ):
             self.applied.append((rel_start, rel_end, replacement))
             return True, "Applied."
 
@@ -1394,7 +1462,15 @@ def test_service_word_apply_skips_compensation_without_evidence(monkeypatch):
             self.hidden_calls += 1
             return []
 
-        def apply_live_edit(self, selection_start, rel_start, rel_end, replacement):
+        def apply_live_edit(
+            self,
+            selection_start,
+            rel_start,
+            rel_end,
+            replacement,
+            before_text=None,
+            expected_document=None,
+        ):
             self.applied.append((rel_start, rel_end, replacement))
             return True, "Applied."
 
@@ -2174,7 +2250,7 @@ def test_apply_one_arms_undo_and_undo_restores(monkeypatch):
     service._apply_one(0)
     assert applied == [(100, 3, "the")]
     assert service._undo_state is not None
-    assert service._undo_state["steps"] == [(100, 3, "teh")]
+    assert service._undo_state["steps"] == [(100, "the", "teh")]
     service._perform_undo()
     assert applied[-1] == (100, 3, "teh")  # restored the original
 

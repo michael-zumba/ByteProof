@@ -273,14 +273,27 @@ def test_polar_activate_parses_top_level_activation() -> None:
 
 
 def test_developer_email_activation() -> None:
+    """Developer access works only from local configuration, never a public
+    address (the shipped default is empty)."""
     from src import activation, licensing
-    from src.settings import DEVELOPER_EMAILS
 
     tmpdir = tempfile.mkdtemp()
     originals = _patch_license_storage(tmpdir)
     original_org = activation.POLAR_ORGANIZATION_ID
+    original_dev_lic = licensing.developer_emails
+    original_dev_act = activation.developer_emails
     try:
-        dev = activation.activate_with_key(DEVELOPER_EMAILS[0])
+        # No local developer configuration -> even a known address is refused.
+        licensing.developer_emails = lambda: ()
+        activation.developer_emails = lambda: ()
+        refused = activation.activate_with_key("owner@example.test")
+        assert not refused["ok"]
+        assert not licensing.is_licensed()
+
+        # With this machine configured as a developer machine, it works.
+        licensing.developer_emails = lambda: ("owner@example.test",)
+        activation.developer_emails = lambda: ("owner@example.test",)
+        dev = activation.activate_with_key("owner@example.test")
         assert dev["ok"], dev
         assert licensing.is_licensed()
         assert licensing.get_license_info()["provider"] == "dev"
@@ -291,6 +304,8 @@ def test_developer_email_activation() -> None:
         assert not stranger["ok"]
         assert "license key" in stranger["error"].lower()
     finally:
+        licensing.developer_emails = original_dev_lic
+        activation.developer_emails = original_dev_act
         activation.POLAR_ORGANIZATION_ID = original_org
         _restore_license_storage(originals)
 
@@ -3058,6 +3073,7 @@ def test_download_update_progress() -> None:
     import socketserver
     import threading
 
+    from src import app_version
     from src.app_version import download_update
 
     payload = b"fake-installer-content"
@@ -3076,6 +3092,8 @@ def test_download_update_progress() -> None:
         port = server.server_address[1]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        original_allow = app_version._is_allowed_url
+        app_version._is_allowed_url = lambda url: True  # local test server
         try:
             tmpdir = tempfile.mkdtemp()
             calls = []
@@ -3089,6 +3107,7 @@ def test_download_update_progress() -> None:
                 assert f.read() == payload
             assert calls and calls[-1][0] == len(payload)
         finally:
+            app_version._is_allowed_url = original_allow
             server.shutdown()
 
 
@@ -3303,7 +3322,10 @@ def test_settings_new_pages() -> None:
     dialog.show()
     app.processEvents()
 
-    assert dialog.sidebar.count() == 4
+    labels = [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())]
+    assert labels[:4] == ["General", "Automation", "Connect", "Local AI"]
+    # License and Updates are first-class pages, not icon-only shortcuts.
+    assert "License" in labels and "Updates" in labels
     local_item = dialog.sidebar.item(3)
     assert local_item is not None and local_item.text() == "Local AI"
     automation_item = dialog.sidebar.item(1)

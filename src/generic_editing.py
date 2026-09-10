@@ -14,6 +14,7 @@ Windows reads/applies through the clipboard with simulated Ctrl+C/Ctrl+V and
 verifies the foreground window before applying.
 """
 
+import hashlib
 import os
 import platform
 import subprocess
@@ -53,6 +54,27 @@ BROWSER_BUNDLE_IDS = frozenset(
 # up, and also accepts a selected-text match on the original span.
 RANGE_CONFIRM_RETRIES = 6
 RANGE_CONFIRM_DELAY_S = 0.12
+
+# A paste is consumed asynchronously by the target app. Before restoring the
+# user's clipboard the app must be observed holding the pasted text; the short
+# settle afterwards covers web views that finish the insert a beat later.
+PASTE_CONFIRM_TIMEOUT_S = 1.5
+PASTE_CONFIRM_INTERVAL_S = 0.15
+PASTE_SETTLE_S = 0.35
+
+
+def _redact(text: str | None) -> str:
+    """Describe loggable text without storing the user's words.
+
+    Diagnostics need to tell "the same text" from "different text" and to see
+    sizes, but capture.log is a support artifact and must not accumulate the
+    contents of the user's document. Length plus a short digest is enough to
+    compare two reads.
+    """
+    if text is None:
+        return "<unreadable>"
+    digest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:8]
+    return f"<len={len(text)} sha={digest}>"
 
 
 def _debug_log(msg: str) -> None:
@@ -100,8 +122,8 @@ def _verify_range_write(
                     return "ok"
                 _debug_log(
                     "ax_replace_range verify: value slice "
-                    f"{value[start : start + len(new_text)][:40]!r} "
-                    f"expected {new_text[:40]!r}"
+                    f"{_redact(value[start : start + len(new_text)])} "
+                    f"expected {_redact(new_text)}"
                 )
         except Exception:
             continue
@@ -119,7 +141,7 @@ def _verify_range_write(
                 if got:
                     _debug_log(
                         "ax_replace_range verify: selected text "
-                        f"{got[:40]!r} expected {new_text[:40]!r}"
+                        f"{_redact(got)} expected {_redact(new_text)}"
                     )
                     return "mismatch"
         except Exception:
@@ -134,8 +156,63 @@ def _verify_range_write(
 def _log_paste_verdict(verdict: str, new_text: str) -> None:
     _debug_log(
         "ax_replace_range paste verify: "
-        f"{verdict} expected={new_text[:40]!r}"
+        f"{verdict} expected={_redact(new_text)}"
     )
+
+
+def _mac_ax_field_value(AS: Any, pid: int) -> str:
+    """Read the focused text element's AXValue (empty string when unreadable)."""
+    try:
+        _as, focused = GenericTextEditor._mac_ax_text_element(pid)
+        if focused is None:
+            return ""
+        err, value = AS.AXUIElementCopyAttributeValue(
+            focused, AS.kAXValueAttribute, None
+        )
+        return str(value) if err == 0 and isinstance(value, str) else ""
+    except Exception:
+        return ""
+
+
+def _wait_for_paste_consumed(
+    AS: Any,
+    target: dict[str, Any],
+    new_text: str,
+    timeout: float = PASTE_CONFIRM_TIMEOUT_S,
+) -> str:
+    """Wait until the pasted text is visible in the target app.
+
+    Returns ``"ok"`` when the text is observed, ``"mismatch"`` when the app's
+    text is readable but does not contain it, and ``"unreadable"`` when the app
+    exposes nothing to compare against. A clipboard paste is delivered
+    asynchronously - the keystroke returns long before a busy app has read the
+    pasteboard - so waiting here is what stops the app from pasting the user's
+    restored clipboard instead.
+    """
+    readable = False
+    deadline = time.monotonic() + timeout
+    while True:
+        pid = target.get("pid") or 0
+        texts: list[str] = []
+        try:
+            selection = GenericTextEditor._mac_ax_selection(pid)
+            if selection:
+                texts.append(selection)
+        except Exception:
+            pass
+        try:
+            value = _mac_ax_field_value(AS, pid)
+            if value:
+                texts.append(value)
+        except Exception:
+            pass
+        if any(new_text in text for text in texts):
+            return "ok"
+        if texts:
+            readable = True
+        if time.monotonic() >= deadline:
+            return "mismatch" if readable else "unreadable"
+        time.sleep(PASTE_CONFIRM_INTERVAL_S)
 
 
 def normalize_selection_text(text: str) -> str:
@@ -688,6 +765,25 @@ class GenericTextEditor:
         return GenericTextEditor._mac_copy_selection(pid, target.get("name") or "")
 
     @staticmethod
+    def _is_secure_field(pid: int) -> bool:
+        """Whether the focused element is a secure (password) text field."""
+        try:
+            AS, focused = GenericTextEditor._mac_ax_focused(pid)
+            if AS is None or focused is None:
+                return False
+            subrole_attr = getattr(AS, "kAXSubroleAttribute", "AXSubrole")
+            err, subrole = AS.AXUIElementCopyAttributeValue(
+                focused, subrole_attr, None
+            )
+            if err == 0 and str(subrole) == "AXSecureTextField":
+                return True
+            err, role = AS.AXUIElementCopyAttributeValue(
+                focused, AS.kAXRoleAttribute, None
+            )
+            return err == 0 and str(role) == "AXSecureTextField"
+        except Exception:
+            return False
+
     def _mac_ax_selection(pid: int) -> str:
         """Read selected text via the Accessibility API only (no clipboard)."""
         try:
@@ -732,10 +828,7 @@ class GenericTextEditor:
                     _mac_system_events_key("c", value)
                 time.sleep(0.4)
                 text = _mac_clipboard_string() or ""
-                _debug_log(
-                    f"copy attempt '{label}' -> "
-                    f"{len(text)} chars, first={text[:40]!r}"
-                )
+                _debug_log(f"copy attempt '{label}' -> {_redact(text)}")
                 if text:
                     break
             _mac_restore_clipboard(saved)
@@ -821,6 +914,14 @@ class GenericTextEditor:
         if not pid:
             return result
         bundle = str(target.get("bundle_id", "")).lower()
+        if GenericTextEditor._is_secure_field(pid):
+            # Never read (or send to a provider) the contents of a password
+            # or other secure text field.
+            _log_once(
+                f"{bundle}:secure-field",
+                f"AX selection_details: skipping secure text field pid={pid}",
+            )
+            return result
         AS, focused = GenericTextEditor._mac_ax_text_element(pid)
         if AS is None:
             _log_once(
@@ -1003,7 +1104,7 @@ class GenericTextEditor:
         _debug_log(
             f"ax_replace_range: pid={target.get('pid')} start={start} "
             f"length={length} direct_paste={allow_direct_paste} "
-            f"text={new_text[:40]!r}"
+            f"text={_redact(new_text)}"
         )
         try:
             import ApplicationServices as AS
@@ -1077,8 +1178,16 @@ class GenericTextEditor:
         ) and hasattr(AS, "kAXReplaceRangeWithTextParameterizedAttribute"):
             for el in elements:
                 try:
+                    # The parameterized attribute takes the same UTF-16 range
+                    # as AXSelectedTextRange; passing code points would write
+                    # to the wrong offset whenever the text contains astral
+                    # characters (emoji). Success is only trusted once the
+                    # read-back shows the new text.
+                    cu_start, cu_len = _set_range(el)
+                    if cu_start is None:
+                        continue
                     param = AS.AXValueCreate(
-                        AS.kAXValueTypeCFRange, (start, length)
+                        AS.kAXValueTypeCFRange, (cu_start, cu_len)
                     )
                     err = AS.AXUIElementSetParameterizedAttributeValue(
                         el,
@@ -1086,11 +1195,21 @@ class GenericTextEditor:
                         param,
                         new_text,
                     )
-                    if err == 0:
+                    if err != 0:
+                        _debug_log(
+                            f"ax_replace_range parameterized err={err} "
+                            f"pid={target.get('pid')}"
+                        )
+                        continue
+                    verdict = _verify_range_write(AS, elements, start, new_text)
+                    _log_paste_verdict(verdict, new_text)
+                    if verdict == "ok":
                         return True, "Applied."
+                    if verdict == "unreadable":
+                        return True, "Applied — please check the document."
                     _debug_log(
-                        f"ax_replace_range parameterized err={err} "
-                        f"pid={target.get('pid')}"
+                        "ax_replace_range: parameterized write unverified; "
+                        "continuing with the guarded paths"
                     )
                 except Exception as exc:
                     _debug_log(f"ax_replace_range parameterized error: {exc}")
@@ -1183,7 +1302,7 @@ class GenericTextEditor:
                         if held != before_text:
                             _debug_log(
                                 "ax_replace_range: range no longer holds the "
-                                f"original text ({held[:40]!r}); skipping "
+                                f"original text ({_redact(held)}); skipping "
                                 "the AX write"
                             )
                             continue
@@ -1215,7 +1334,7 @@ class GenericTextEditor:
         old_text = _range_slice()
         if old_text is not None:
             _debug_log(
-                f"ax_replace_range: range holds {old_text[:40]!r} before apply"
+                f"ax_replace_range: range holds {_redact(old_text)} before apply"
             )
         expected_before = before_text if before_text is not None else old_text
 
@@ -1250,7 +1369,7 @@ class GenericTextEditor:
                 return True, "Applied."
             _debug_log(
                 "ax_replace_range: range no longer holds the original text "
-                f"({current[:40]!r}); refusing to paste"
+                f"({_redact(current)}); refusing to paste"
             )
             return False, "Could not apply the edit in this app."
 
@@ -1292,7 +1411,7 @@ class GenericTextEditor:
                 else:
                     _debug_log(
                         "ax_replace_range: range changed after paste "
-                        f"({still_original!r}); refusing retry"
+                        f"({_redact(still_original)}); refusing retry"
                     )
             if verdict == "ok":
                 return True, "Applied."
@@ -1339,9 +1458,31 @@ class GenericTextEditor:
 
                 keycode = 9  # kVK_ANSI_V
                 _post_mac_key(keycode, target.get("pid") or 0)
-                time.sleep(0.4)
+                # Wait for the app to actually consume the paste BEFORE the
+                # user's clipboard is restored. Restoring too early let a slow
+                # app paste the OLD clipboard contents into the document while
+                # the UI reported success.
+                verdict = _wait_for_paste_consumed(AS, target, new_text)
+                if verdict == "mismatch":
+                    _debug_log(
+                        "mac_replace: paste was not observed in the target; "
+                        "reporting for review"
+                    )
+                    return (
+                        False,
+                        "Could not confirm the paste — please check the document.",
+                    )
+                if verdict == "unreadable":
+                    _debug_log(
+                        "mac_replace: target exposes no text to verify the paste"
+                    )
+                    return True, "Applied — please check the document."
                 return True, "Applied."
             finally:
+                # The paste event is delivered; a web view may resolve it a
+                # moment later, so leave the new text in place briefly before
+                # flipping the user's clipboard back.
+                time.sleep(PASTE_SETTLE_S)
                 if saved_clipboard is not None:
                     _mac_set_clipboard(saved_clipboard)
         except Exception as e:

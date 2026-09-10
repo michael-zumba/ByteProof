@@ -331,6 +331,48 @@ def download_file(
         raise DownloadCancelledError("Download cancelled by user.")
 
     os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+    # Two callers (live preview and the manual flow) can request the same
+    # model at once. Without serialising, both would append to one .part file
+    # and the SHA-256 check would then delete a multi-gigabyte download.
+    lock = _download_lock_for(dest_path)
+    with lock:
+        return _download_file_locked(
+            url,
+            dest_path,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+            timeout=timeout,
+        )
+
+
+_download_locks: dict[str, threading.Lock] = {}
+_download_locks_guard = threading.Lock()
+
+
+def _download_lock_for(dest_path: str) -> threading.Lock:
+    """One lock per destination file, so unrelated downloads stay parallel."""
+    with _download_locks_guard:
+        lock = _download_locks.get(dest_path)
+        if lock is None:
+            lock = threading.Lock()
+            _download_locks[dest_path] = lock
+        return lock
+
+
+def _download_file_locked(
+    url: str,
+    dest_path: str,
+    *,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    timeout: int = 60,
+) -> str:
+    if cancel_event is not None and cancel_event.is_set():
+        raise DownloadCancelledError("Download cancelled by user.")
     part_path = dest_path + ".part"
     downloaded = os.path.getsize(part_path) if os.path.exists(part_path) else 0
     headers = {"User-Agent": "ByteProof-Downloader/1.0"}
@@ -748,6 +790,11 @@ class LocalModelServer:
 
 
 _global_server: LocalModelServer | None = None
+# The live-preview worker and the manual proofread worker can both ask for the
+# local engine at the same moment. Without a lock each would spawn its own
+# llama-server, the second would overwrite the singleton, and the first would
+# be orphaned (only the current process is ever stopped).
+_server_lock = threading.RLock()
 
 
 def get_local_server() -> LocalModelServer | None:
@@ -761,19 +808,23 @@ def start_local_server(
 ) -> str:
     global _global_server
     model_id = resolve_model_id(model_id)
-    if _global_server is None:
-        _global_server = LocalModelServer(model_id)
-    elif _global_server.model_id != model_id:
-        _global_server.stop()
-        _global_server = LocalModelServer(model_id)
-    return _global_server.start(progress_callback, cancel_event=cancel_event)
+    with _server_lock:
+        if _global_server is None:
+            _global_server = LocalModelServer(model_id)
+        elif _global_server.model_id != model_id:
+            _global_server.stop()
+            _global_server = LocalModelServer(model_id)
+        return _global_server.start(
+            progress_callback, cancel_event=cancel_event
+        )
 
 
 def stop_local_server() -> None:
     global _global_server
-    if _global_server is not None:
-        _global_server.stop()
-        _global_server = None
+    with _server_lock:
+        if _global_server is not None:
+            _global_server.stop()
+            _global_server = None
 
 
 def local_server_info() -> dict[str, Any]:

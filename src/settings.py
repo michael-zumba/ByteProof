@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.0.1-beta.2"
+APP_VERSION = "2.0.2-beta.1"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -32,11 +32,63 @@ POLAR_CHECKOUT_URL = os.environ.get(
     "https://buy.polar.sh/polar_cl_m1VuSWJu14vqCyvzt13bLpTfKEV20qfRTdaNy1ApIIR"
 )
 
-# Developer-only email addresses that unlock full access without a Polar key.
-# These are for the app owner / beta testers; customers always use Polar keys.
-DEVELOPER_EMAILS: tuple[str, ...] = (
-    "bytemind.nz@gmail.com",
-)
+# Developer-only identities that unlock full access without a Polar key.
+#
+# Shipped builds carry NONE: a published address must never be a master key.
+# Access is granted only when the machine has an explicit local configuration,
+# either an environment variable or a dev-access.json file in the support
+# folder (see developer_emails()). Customers always use Polar keys.
+DEVELOPER_EMAILS: tuple[str, ...] = ()
+DEV_ACCESS_FILE = "dev-access.json"
+DEV_EMAILS_ENV = "BYTEPROOF_DEV_EMAILS"
+
+_dev_emails_cache: tuple[tuple[Any, ...], tuple[str, ...]] | None = None
+
+
+def developer_emails() -> tuple[str, ...]:
+    """Return locally-configured developer identities (usually none).
+
+    Sources, in order: the ``BYTEPROOF_DEV_EMAILS`` environment variable and
+    ``dev-access.json`` in the app support directory. The file is created by
+    the owner with ``scripts/dev_access.py`` and is never shipped, so knowing
+    an email address is not enough to unlock an installed build.
+
+    The result is memoised against the environment value and the file's
+    modification time so licence checks stay cheap.
+    """
+    global _dev_emails_cache
+
+    env_value = os.environ.get(DEV_EMAILS_ENV, "")
+    found: list[str] = []
+    for value in env_value.split(","):
+        text = value.strip().lower()
+        if text and "@" in text:
+            found.append(text)
+
+    path = os.path.join(get_app_support_dir(), DEV_ACCESS_FILE)
+    try:
+        stamp: Any = os.stat(path).st_mtime_ns
+    except OSError:
+        stamp = None
+    key = (env_value, stamp)
+    if _dev_emails_cache is not None and _dev_emails_cache[0] == key:
+        return tuple(dict.fromkeys(found + list(_dev_emails_cache[1])))
+
+    file_emails: list[str] = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        values = data.get("emails", []) if isinstance(data, dict) else data
+        if isinstance(values, list):
+            for value in values:
+                text = str(value).strip().lower()
+                if text and "@" in text:
+                    file_emails.append(text)
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        file_emails = []
+
+    _dev_emails_cache = (key, tuple(dict.fromkeys(file_emails)))
+    return tuple(dict.fromkeys(found + file_emails))
 
 LOCAL_MODEL_PROVIDER = "ByteProof Local (Qwen3)"
 
@@ -67,7 +119,11 @@ PROVIDERS = {
         "is_free": True,
         "is_local": True,
         "badge": "LOCAL",
-        "max_output_tokens": 8192,
+        # llama-server runs with a total --ctx-size of 8192 (prompt +
+        # completion), so an 8192-token output cap could never fit. 2048 leaves
+        # room for the prompt; a reply that still hits the cap is refused by
+        # the truncation guard instead of being half-applied.
+        "max_output_tokens": 2048,
         "install_guide": (
             "ByteProof downloads a small local model (Phi-4 Mini or Qwen3) to "
             "your computer and runs it privately — no API key, no account, "
@@ -348,6 +404,13 @@ def save_runtime_settings(settings: dict[str, Any]) -> None:
             if key not in settings:
                 settings[key] = defaults[key]
     settings.setdefault("local_model", {"active_model": None, "auto_download": True})
-        
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+
+    # The file holds provider API keys, so keep it readable only by the user.
+    tmp_path = SETTINGS_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp_path, SETTINGS_FILE)
