@@ -7470,18 +7470,16 @@ class ProofreaderApp(QMainWindow):
         Reuses the suggestion panel's renderer (struck original → arrow →
         green replacement, dimmed unchanged context) with the full text and
         preserved line breaks, keeping both surfaces visually consistent.
+        The unchanged words stay dimmed so the pinpoint edits stand out.
         """
         try:
-            from .ui_theme import REVIEW_CONTEXT_STYLE, diff_html
+            from .ui_theme import diff_html
 
             rendered = diff_html(
                 original,
                 corrected,
                 context=100000,  # review view: never truncate
                 preserve_newlines=True,
-                # Full contrast: this pane shows the whole document, so dimming
-                # the unchanged text made the manuscript hard to read.
-                context_style=REVIEW_CONTEXT_STYLE,
             )
             cursor = self.diff_text.textCursor()
             cursor.insertHtml(
