@@ -67,10 +67,13 @@
       (1.9.0-beta.14): loading pill while the AI works, undo pill after
       every apply (10 s, restores at the recorded absolute range; the
       full-selection variant verifies the selection first)
-- [ ] UI/UX Step 2: onboarding & trust readiness card
-- [ ] UI/UX Step 3: shared design tokens + diff-view reuse
-- [ ] UI/UX Step 4: reason color dots, status chip, quit flow
-- [ ] Integrate branch (user decision: merge / PR / keep)
+- [x] UI/UX Step 2: onboarding & trust readiness card
+- [x] UI/UX Step 3: shared design tokens + diff-view reuse
+- [x] UI/UX Step 4: reason color dots, status chip, quit flow
+- [x] Backlog: P2.3 dismiss-per-suggestion, P2.5 panel position memory
+      (P4.4 per-app filter deferred)
+- [x] Released as ByteProof 2.0.0 (branch merged to main, installers
+      published, update feed live)
 
 ## Completed evidence
 
