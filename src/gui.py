@@ -559,6 +559,11 @@ class ToastNotification(QFrame):
         """Raise the pill above other windows without stealing focus (macOS)."""
         if platform.system() != "Darwin":
             return
+        app = QApplication.instance()
+        if app is not None and "offscreen" in app.platformName():
+            # No window server to talk to: winId()/orderFrontRegardless() block
+            # or fail there, which hung the test suite on a headless runner.
+            return
         try:
             import ctypes
 
@@ -2609,7 +2614,7 @@ class SettingsDialog(QDialog):
             # match against what is actually installed first.
             wanted_id = str(app.get("bundle_id") or "").strip().lower()
             wanted_name = str(app.get("name") or "").strip().lower()
-            if wanted_id or wanted_name:
+            if platform.system() == "Darwin" and (wanted_id or wanted_name):
                 for installed in self._installed_apps_for_trigger():
                     found_id = str(installed.get("bundle_id") or "").lower()
                     found_name = str(installed.get("name") or "").lower()
