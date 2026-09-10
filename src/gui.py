@@ -1119,6 +1119,13 @@ class SettingsDialog(QDialog):
         side_layout.setContentsMargins(0, 0, 0, 0)
         side_layout.setSpacing(0)
 
+        side_heading = QLabel("SETTINGS")
+        side_heading.setStyleSheet(
+            "color: #8A8177; font-size: 11px; font-weight: 700;"
+            "letter-spacing: 1px; padding: 18px 0 6px 22px;"
+        )
+        side_layout.addWidget(side_heading)
+
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("SettingsSidebar")
         # License and Updates are labelled pages. They previously also had
@@ -1136,9 +1143,20 @@ class SettingsDialog(QDialog):
             ]
         )
         self.sidebar.currentRowChanged.connect(self.change_page)
+        self.sidebar.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        # A long status suffix ("License  (5d left)") must never introduce a
+        # horizontal scrollbar.
+        self.sidebar.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.sidebar.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.sidebar.setFrameShape(QFrame.Shape.NoFrame)
+        # Stretch 1 and nothing below it: every page must be reachable without
+        # scrolling, which is what the previous trailing stretch broke.
         side_layout.addWidget(self.sidebar, 1)
         self._add_sidebar_status()
-        side_layout.addStretch(1)
 
         main_layout.addWidget(side_container)
 
@@ -1237,14 +1255,14 @@ class SettingsDialog(QDialog):
                 background-color: #F2EDE6;
                 border: none;
                 font-size: 13px;
-                padding: 16px 0;
+                padding: 2px 0 12px 0;
                 outline: 0;
             }
             QListWidget::item {
-                height: 46px;
-                padding-left: 20px;
-                padding-right: 14px;
-                margin: 3px 10px;
+                height: 42px;
+                padding-left: 18px;
+                padding-right: 12px;
+                margin: 2px 10px;
                 color: #57534E;
                 border-radius: 10px;
                 font-weight: 520;

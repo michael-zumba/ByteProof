@@ -1615,3 +1615,23 @@ def test_mail_apply_brings_the_app_forward_before_reading(monkeypatch):
     assert calls["activated"] == 1  # brought forward before reading
     assert pasted, "the apply went ahead once the window was active"
     service.stop()
+
+
+def test_settings_sidebar_shows_every_page_without_scrolling():
+    """Regression: a stray stretch left the last rows scrolled out of view."""
+    app, owner, dialog = _make_settings_dialog()
+    dialog.show()
+    app.processEvents()
+    bar = dialog.sidebar
+    assert bar.count() == 6
+    labels = [bar.item(i).text() for i in range(bar.count())]
+    assert labels[-1].startswith("Updates")
+    last_row = bar.visualItemRect(bar.item(bar.count() - 1))
+    assert last_row.bottom() <= bar.viewport().height(), (
+        f"the last page is cut off ({last_row.bottom()} > "
+        f"{bar.viewport().height()})"
+    )
+    assert bar.verticalScrollBar().maximum() == 0
+    # A status suffix must not create a horizontal scrollbar either.
+    assert bar.horizontalScrollBar().maximum() == 0
+    _dispose(dialog, owner, app)
