@@ -338,3 +338,33 @@ Fixes:
 
 Covered by three tests: the reported case applies, a changed range refuses, and
 the bring-forward path activates the app before verifying. 276 tests pass.
+
+## Checkpoint (2.0.2-beta.7) — Mail apply path fixed
+
+Reported as "some bugs when using it in Mail". The log showed two separate
+defects:
+
+1. **Refusing when one clipboard read missed.**
+   `[06:46:14] copy attempt 'process' -> <len=0>` followed by
+   `LIVE FULL APPLY: selection read failed` - though the same read had returned
+   178 characters two seconds earlier. Mail selections can only be read by
+   copying, and Mail intermittently ignores a process-targeted Command-C.
+   `_apply_full_selection` now retries through every copy strategy before
+   refusing, the poll's clipboard read gets one retry, and a genuine failure
+   reports the actionable message.
+
+2. **Possible double paste.**
+   `[06:46:26] mac_replace: paste was not observed in the target` followed by
+   `[06:46:27] LIVE FULL APPLY: system-events paste sent`. Mail exposes no
+   Accessibility text, so an unconfirmed paste is not proof that nothing
+   happened - yet the old code pasted a second time over a selection that had
+   probably already been replaced, which could duplicate the paragraph.
+
+   The fallback now requires evidence from a real copy taken after the attempt:
+   the ORIGINAL text (nothing happened -> retry), the CORRECTED text (already
+   applied -> no retry), or nothing readable (unknown -> report for review and
+   never paste again). Verification also uses the copy read rather than the
+   single-attempt AX read.
+
+Tests: flaky read retried, no second paste after a successful one, retry when
+the text is provably unchanged, and the actionable refusal message.
