@@ -4711,7 +4711,21 @@ class ProofreaderApp(QMainWindow):
                 self.hotkey_retry_tick = 0
                 self._setup_hotkeys(show_permission_message=False)
 
+    def _interactive_ui(self) -> bool:
+        """False when no human can answer a dialog (offscreen tests, CI).
+
+        The welcome dialogs below are modal, so in an offscreen run nobody can
+        dismiss them and the caller blocks forever - that is exactly how the
+        test suite hung on the CI runner for the full job timeout.
+        """
+        app = QApplication.instance()
+        if app is None:
+            return False
+        return "offscreen" not in app.platformName().lower()
+
     def check_api_keys(self) -> None:
+        if getattr(self, "_offscreen_run", False) or not self._interactive_ui():
+            return
         active = self.settings.get("active_provider", LOCAL_MODEL_PROVIDER)
         provider_data = self.settings.get("providers", {}).get(active, {})
         provider_info = PROVIDERS.get(active, {})

@@ -3386,7 +3386,7 @@ def test_resolve_local_provider_without_api_key() -> None:
         logic.start_local_server = original_start
 
 
-def test_local_download_worker_anchored_to_main_window() -> None:
+def test_local_download_worker_anchored_to_main_window(monkeypatch) -> None:
     """The QThread must outlive the Settings dialog or Qt aborts."""
     import time
 
@@ -3395,6 +3395,11 @@ def test_local_download_worker_anchored_to_main_window() -> None:
     app = QApplication.instance() or QApplication([])
     assert app is not None
     from src import gui, settings
+
+    # Keep the startup "download a local AI model" welcome dialog out of the
+    # way: it is modal, so on a machine with no installed model it would block
+    # this test forever (which is exactly what happened on the CI runner).
+    monkeypatch.setattr(gui, "is_model_installed", lambda *_args, **_kwargs: True)
 
     window = gui.ProofreaderApp(1024, settings.load_runtime_settings())
     dialog = gui.SettingsDialog(settings.load_runtime_settings(), window)
