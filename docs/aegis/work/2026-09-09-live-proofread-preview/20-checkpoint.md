@@ -436,3 +436,25 @@ once.
 3. **Hard guard:** `MIN_COPY_INTERVAL_S` (0.5 s) between any two copy
    keystrokes in `generic_editing`, whatever code path asks. Per-attempt wait
    reduced from 0.4 s to 0.25 s.
+
+## Checkpoint (2.0.2-beta.10) — Settings sidebar half height
+
+Owner report: the Settings menu column showed only about half its height, so
+"Updates" was cut off and needed scrolling.
+
+Cause: a regression from removing the duplicate License/Updates icon buttons.
+Their bar sat under the page list, and when it went, a trailing
+`addStretch(1)` remained - the list and the stretch each claimed half of the
+column, so only four of six rows were visible.
+
+Fixed and polished:
+- the list fills the column; at the dialog's default size the last row ends at
+  275 px inside a 509 px viewport, with no scrollbar
+- small "SETTINGS" heading above the list
+- tighter rows (42 px) and margins so six rows plus the heading sit comfortably
+- explicit policies: vertical scrollbar only when needed, never horizontal
+  (a status suffix such as "License  (5d left)" must not spawn one), text
+  elided, no frame
+
+A regression test asserts every row is inside the viewport and that neither
+scrollbar appears.
