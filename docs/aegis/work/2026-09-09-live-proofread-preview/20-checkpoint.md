@@ -571,3 +571,30 @@ Fixed by removing the fragile coupling:
   License/Updates icons, the Local AI shortcuts and the License shortcut
 - a regression test clicks every row and asserts the expected page appears,
   including with a licence badge and a pending-update dot present
+
+## Checkpoint (2.0.2-beta.15) — File/Edit menus: no more beeping in Mail/Pages
+
+Owner report: opening Mail or Pages produced two or three beeps in the
+background. Same root cause as before - a Mail/Pages selection can only be
+read by copying, and posting Command-C to an app with **nothing selected**
+makes it beep. The previous rounds reduced *when* that happened; this removes
+the keystroke entirely.
+
+macOS exposes a running app's menu bar through Accessibility, including each
+item's key equivalent and whether it is enabled:
+
+- `_mac_copy_menu_item()` finds Edit ▸ **Copy** by its *key equivalent*
+  (Command-C with no extra modifiers), so it is language-independent and skips
+  lookalikes such as Safari's "Copy Search Terms".
+- `AXEnabled == False` ⇒ the app has nothing selected: the read returns
+  immediately **without sending anything** - no beep, no menu flash, and about
+  0.05 s instead of up to 1.2 s of attempts.
+- Otherwise the item is performed with `AXPress`, which runs the app's own Copy
+  command. Again no key equivalent, so nothing can beep or flash.
+- Posting Command-C is kept only as a fallback for apps whose menu cannot be
+  read.
+
+Verified live: Safari with no selection returned "" in 0.05 s with the log line
+"copy selection skipped: the app reports nothing selected"; TextEdit with a
+selection returned the text via "copy selection used the app's Copy menu
+command".
