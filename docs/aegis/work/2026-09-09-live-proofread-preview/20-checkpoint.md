@@ -534,3 +534,23 @@ Settings.
 ### Fold state
 `_toggle_live_apps` tracks its state explicitly: `isVisible()` is always False
 while a page is not the one on screen, which inverted the toggle.
+
+## Checkpoint (2.0.2-beta.13) — Live Check "Add App" lists installed apps
+
+Owner report: Add App showed a long list of contexts. It listed *running*
+processes; it now uses the same chooser as Automation's "Choose App…".
+
+- `SettingsDialog.choose_installed_app(existing=…)` is the shared picker:
+  applications from `~/Applications`, `/Applications` and
+  `/System/Applications` (105 on this machine), each with its **real icon**
+  from the bundle, a search field, and double-click to choose.
+- `_choose_app_for_trigger` (Automation) wraps it with the existing-rule
+  filter; Live Check passes the markers already in its list.
+- The chosen app is added to the list with its icon and checked; the list
+  folds out so the new row is visible; the value lands in
+  `live_preview.app_rules` as its bundle id.
+- Rows for the known apps also show real icons when those apps are installed.
+
+Tests: the scanner returns named apps with real icons; Add App appends the
+chosen app with the right marker, checkbox state and rule; list rows carry
+icons when installed.
