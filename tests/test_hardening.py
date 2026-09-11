@@ -2625,14 +2625,50 @@ def test_live_check_rows_do_not_paint_twice() -> None:
         assert widget.findChild(QCheckBox) is not None
         assert widget.isVisible()
 
-    # A window resize must keep the rows covering their items.
+    def rows_cover_their_items() -> None:
+        for index in range(dialog.live_apps_list.count()):
+            item = dialog.live_apps_list.item(index)
+            widget = dialog.live_apps_list.itemWidget(item)
+            assert widget is not None, f"row {index} lost its widget"
+            assert widget.geometry() == dialog.live_apps_list.visualItemRect(
+                item
+            ), f"row {index} no longer covers its item"
+
+    # The hint is derived from the viewport, so every way the width can change
+    # has to re-apply it: a resize while the page is visible, a resize while it
+    # is not, adding a row, deleting one, and folding the list.
     dialog.resize(dialog.width() + 120, dialog.height())
     app.processEvents()
-    for index in range(min(3, dialog.live_apps_list.count())):
-        item = dialog.live_apps_list.item(index)
-        widget = dialog.live_apps_list.itemWidget(item)
-        assert widget is not None
-        assert widget.geometry() == dialog.live_apps_list.visualItemRect(item)
+    rows_cover_their_items()
+
+    dialog.sidebar.setCurrentRow(0)
+    dialog.change_page(0)
+    app.processEvents()
+    dialog.resize(dialog.width() - 80, dialog.height() + 40)
+    app.processEvents()
+    dialog.sidebar.setCurrentRow(1)
+    dialog.change_page(1)
+    app.processEvents()
+    rows_cover_their_items()
+
+    dialog.choose_installed_app = lambda existing=None: {
+        "bundle_id": "com.example.layout",
+        "name": "Layout Example",
+    }  # type: ignore[assignment]
+    dialog._add_live_app()
+    app.processEvents()
+    rows_cover_their_items()
+
+    added = _live_row_for(dialog, "com.example.layout")
+    assert added is not None
+    dialog._remove_live_app(added)
+    app.processEvents()
+    rows_cover_their_items()
+
+    dialog.live_apps_toggle_btn.click()
+    dialog.live_apps_toggle_btn.click()
+    app.processEvents()
+    rows_cover_their_items()
 
     _dispose(dialog, owner, app)
 
