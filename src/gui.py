@@ -58,6 +58,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
@@ -2137,6 +2138,15 @@ class SettingsDialog(QDialog):
         sync.
         """
         row = QWidget()
+        row.setObjectName("LiveAppRow")
+        # The hover cue needs both: WA_Hover enables the pseudo-state and
+        # WA_StyledBackground lets a plain QWidget actually paint it.
+        row.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        row.setStyleSheet(
+            "#LiveAppRow { background: transparent; border-radius: 6px; }"
+            "#LiveAppRow:hover { background-color: #FAFAF9; }"
+        )
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(8, 0, 6, 0)
         row_layout.setSpacing(10)
@@ -2159,10 +2169,16 @@ class SettingsDialog(QDialog):
             icon_label.setPixmap(icon.pixmap(QSize(22, 22)))
             row_layout.addWidget(icon_label)
 
-        name_label = QLabel(name)
+        # A very long name must not push the delete button off the row: the
+        # label yields space and the full name stays in the tooltip.
+        display = name if len(name) <= 48 else name[:47] + "…"
+        name_label = QLabel(display)
+        name_label.setToolTip(name)
         name_label.setStyleSheet("font-size: 13px; color: #292524;")
-        row_layout.addWidget(name_label)
-        row_layout.addStretch(1)
+        name_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        row_layout.addWidget(name_label, stretch=1)
 
         remove = QToolButton()
         remove.setText("✕")
