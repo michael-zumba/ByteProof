@@ -1,7 +1,7 @@
 {
-  "version": "2.0.2",
-  "release_date": "2026-09-10",
-  "release_notes": "Live Check is now its own settings menu with per-app triggers, plus two new hotkeys: Cmd+Shift+L turns suggestions on or off, Cmd+Shift+Return applies everything on screen. Mail and Pages no longer beep in the background, applies keep working when you switch apps, every provider defaults to its current model (DeepSeek deepseek-flash, Gemini 3.8 Flash, GPT-5.5, Claude Sonnet 5, Grok 4.6, Groq GPT-OSS 120B), and the settings window is cleaner and faster.",
+  "version": "2.1.0",
+  "release_date": "2026-09-11",
+  "release_notes": "Live Check is faster and finishes the job. Applying suggestions in a chat window like Teams now places every edit it can and keeps the rest for a retry instead of stopping at the first one, and Word with tracked changes is quick again - a five-suggestion review that took 40 seconds now lands in under a second. The in-app updater works again (GitHub moved its release downloads and the app refused the redirect), Word's Live Check poll can no longer freeze the window, and every provider defaults to its current model.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
