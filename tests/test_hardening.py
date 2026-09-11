@@ -12,12 +12,21 @@ Each group exercises a specific defect found in the 2026-09-10 full-app review:
 import hashlib
 import http.server
 import os
+import platform
 import socketserver
 import tempfile
 import threading
 from typing import Any
 
 import pytest
+
+# Live Check ships on macOS only: on Windows the settings page renders with
+# its controls disabled, so the interactions below are asserted on macOS and
+# skipped elsewhere.
+DARWIN_ONLY = pytest.mark.skipif(
+    platform.system() != "Darwin",
+    reason="Live Check controls are macOS-only",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -163,10 +172,13 @@ def test_download_update_verifies_published_checksum(monkeypatch) -> None:
         good = hashlib.sha256(payload).hexdigest()
         target = os.path.join(tempfile.mkdtemp(), "ByteProof.dmg")
         url = f"http://127.0.0.1:{port}/ByteProof.dmg"
+        # The updater only downloads this platform's artifact, so the feed has
+        # to name the field the running platform actually reads.
+        artifact = app_version._artifact_key({})
 
         # Matching checksum: the file is kept.
         path = app_version.download_update(
-            {"macos_apple_silicon_url": url, "sha256": {"macos_apple_silicon_url": good}},
+            {artifact: url, "sha256": {artifact: good}},
             os.path.dirname(target),
         )
         assert path and os.path.exists(path)
@@ -175,7 +187,7 @@ def test_download_update_verifies_published_checksum(monkeypatch) -> None:
 
         # Mismatching checksum: the download is discarded.
         path = app_version.download_update(
-            {"macos_apple_silicon_url": url, "sha256": {"macos_apple_silicon_url": "0" * 64}},
+            {artifact: url, "sha256": {artifact: "0" * 64}},
             tempfile.mkdtemp(),
         )
         assert path is None
@@ -528,8 +540,12 @@ def test_settings_file_is_user_private(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "APP_SUPPORT_DIR", str(tmp_path))
     monkeypatch.setattr(settings, "SETTINGS_FILE", str(tmp_path / "settings.json"))
     settings.save_runtime_settings({"providers": {"DeepSeek": {"api_keys": ["k"]}}})
-    mode = stat.S_IMODE(os.stat(tmp_path / "settings.json").st_mode)
-    assert mode == 0o600
+    written = tmp_path / "settings.json"
+    assert written.exists()
+    if platform.system() != "Windows":
+        # POSIX permissions: Windows has no modes and inherits profile ACLs.
+        mode = stat.S_IMODE(os.stat(written).st_mode)
+        assert mode == 0o600
 
 
 # --- truncated model replies must never be auto-applied ----------------------
@@ -1664,8 +1680,14 @@ def test_new_hotkeys_have_defaults_and_round_trip() -> None:
         == "Ctrl+Shift+Return"
     )
     saved = dialog.get_settings()["general"]
-    assert saved["live_toggle_hotkey"] == "<cmd>+<shift>+l"
-    assert saved["apply_all_hotkey"] == "<cmd>+<shift>+<return>"
+    if platform.system() == "Darwin":
+        assert saved["live_toggle_hotkey"] == "<cmd>+<shift>+l"
+        assert saved["apply_all_hotkey"] == "<cmd>+<shift>+<return>"
+    else:
+        # Windows has no Command key, so the stored default is normalised to
+        # Ctrl the first time settings are saved.
+        assert saved["live_toggle_hotkey"] == "<ctrl>+<shift>+l"
+        assert saved["apply_all_hotkey"] == "<ctrl>+<shift>+<return>"
     dialog.deleteLater()
 
 
@@ -1855,6 +1877,8 @@ def test_live_check_page_owns_the_live_settings() -> None:
 
 
 def test_live_check_apps_fold_and_unfold() -> None:
+    if platform.system() != "Darwin":
+        pytest.skip("Live Check controls are macOS-only")
     app, owner, dialog = _make_settings_dialog()
     dialog.show()
     dialog.sidebar.setCurrentRow(1)
@@ -1878,6 +1902,8 @@ def test_live_check_apps_fold_and_unfold() -> None:
 
 
 def test_app_rules_decide_where_live_check_runs() -> None:
+    if platform.system() != "Darwin":
+        pytest.skip("Live Check controls are macOS-only")
     from PyQt6.QtCore import Qt
 
     from src.live_preview import app_allowed, evaluate_trigger
