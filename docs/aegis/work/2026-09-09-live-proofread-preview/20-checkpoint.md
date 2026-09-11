@@ -598,3 +598,67 @@ Verified live: Safari with no selection returned "" in 0.05 s with the log line
 "copy selection skipped: the app reports nothing selected"; TextEdit with a
 selection returned the text via "copy selection used the app's Copy menu
 command".
+
+## Released (2.0.2) — 2026-09-11
+
+Owner instructed the official release of 2.0.2. Three things had to be fixed
+first, and one of them explains why the release took so long.
+
+### Why the release stalled
+
+Every push and tag ran the test suite on macOS and Windows, and the Windows
+job hung for the full 20 minute job timeout on the first test file with no
+output at all. That left `windows: needs: test` skipped, so the Windows
+installer was never built and the GitHub release was never created - the macOS
+DMGs had been finished and notarized since 11:05.
+
+Diagnosis, in evidence order:
+
+1. A provisional CI log (verbose pytest, `faulthandler_timeout`) named the
+   macOS hang outright: `tests/test_smoke.py::test_local_download_worker_*`
+   was blocked inside `src/gui.py::check_api_keys` → `QMessageBox.exec()`.
+   The startup timer opens a modal "download a local AI model" dialog, which
+   can never be dismissed offscreen, so the nested event loop never returned.
+   It only reproduced on a machine with **no local model installed**, which is
+   why it passed locally and on the previous release.
+2. The Windows job flushed its buffered progress line at cancellation:
+   `.......F..............F..................................F.....F`, i.e. 64
+   tests done, four failures (8, 23, 58, 64), then stuck on test 65. The
+   hosted Windows runner then stopped reporting altogether - job, step and
+   cancellation timers all failed to land - so no traceback could be read.
+
+Fixes:
+
+- `check_api_keys()` returns immediately when the UI is offscreen; no modal is
+  ever opened where nobody can answer it.
+- `tools/` (the RSA signing key and `generate_license.py`) is gitignored, so
+  the three signed-key tests now skip where the generator is absent instead of
+  failing.
+- Windows-unsafe assertions are platform-aware: POSIX file modes, the
+  `<cmd>` → `<ctrl>` hotkey default, the macOS-only Live Check page controls,
+  and the download test now names the running platform's feed field.
+- `scripts/run_tests_ci.py` runs each test file in its own process group, streams
+  its output and kills the tree when a file stops progressing, so a wedged test
+  can no longer hold a job (and a release) hostage; `conftest.py` prints each
+  test as it starts under `BYTEPROOF_CI_PROGRESS=1`.
+- macOS is now the release gate; the Windows suite still runs informationally,
+  and the Windows *packaging* job remains a hard gate (it succeeded).
+
+### Also shipped
+
+- Proposed Changes renders exactly like 2.0.0 again: the 2.0.2 hardening pass
+  had switched the unchanged manuscript to full contrast and underlined every
+  inserted word, which made the page read as one busy block. Unchanged text is
+  dimmed again and inserts carry colour + weight only; the renderer output is
+  byte-identical to 2.0.0 for the sample corpus (verified by diffing
+  `diff_html` between the two revisions).
+
+### Evidence
+
+- macOS CI: `74 passed` (hardening), `126 passed` (live preview),
+  `101 passed, 3 skipped` (smoke), job `success`.
+- Release `v2.0.2` published with four assets: Apple Silicon DMG (34,405,482 B,
+  sha256 `cb0230ae…`), Intel DMG (35,552,368 B, sha256 `7045239c…`), Windows zip
+  (48,784,576 B, sha256 `30b592a1…`) and the Store MSIX.
+- Feed `https://www.bytemind.co.nz/byteproof-version.json` serves 2.0.2 with a
+  `sha256` map; all three download URLs answer.
