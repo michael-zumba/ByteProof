@@ -2715,7 +2715,10 @@ def test_apply_one_arms_undo_and_undo_restores(monkeypatch):
     service._apply_one(0)
     assert applied == [(100, 3, "the")]
     assert service._undo_state is not None
-    assert service._undo_state["steps"] == [(100, "the", "teh")]
+    steps = service._undo_state["steps"]
+    assert [(s.abs_start, s.applied, s.original) for s in steps] == [
+        (100, "the", "teh")
+    ]
     service._perform_undo()
     assert applied[-1] == (100, 3, "teh")  # restored the original
 

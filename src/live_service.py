@@ -17,7 +17,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from PyQt6.QtCore import QObject, QPoint, QRect, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
@@ -66,7 +66,10 @@ USER_ACTIVE_WINDOW_S = 0.6
 ACCESS_CACHE_TTL_S = 30.0
 # After a refusal, do not re-check on every selection change.
 ACCESS_RETRY_S = 60.0
-UNDO_AVAILABLE_MS = 10000
+# How long the Undo pill stays offered. Ten seconds was too short to be
+# reliable when the target app takes a moment to settle; the pill is small and
+# disappears as soon as a new selection replaces the panel.
+UNDO_AVAILABLE_MS = 30000
 # How many previous applies can still be undone.
 UNDO_STACK_MAX = 5
 
@@ -86,6 +89,10 @@ WORD_BUSY_BACKOFF_S = 5.0
 # Undo re-locates the text it wrote, but only within this distance of the
 # recorded offset: further away is a different edit, not the same one reflowed.
 UNDO_RELOCATE_WINDOW = 64
+# Characters of context kept on each side of an applied edit. Undo looks for
+# that block rather than trusting the recorded offset, which drifts as soon as
+# the app re-renders or normalises what it inserted.
+UNDO_CONTEXT_CHARS = 32
 # After an applied edit the document has moved, so the next suggestion's
 # offset is only a hint. Its original text is searched for around that hint
 # before anything is written; nothing is written when it cannot be found.
@@ -268,6 +275,16 @@ def _log_word_busy_once(exc: Exception) -> None:
         return
     _word_busy_logged_at = now
     _debug_log(f"LIVE SKIP: Word busy ({exc})")
+
+
+class UndoStep(NamedTuple):
+    """One applied edit, plus enough context to find it again later."""
+
+    abs_start: int
+    applied: str
+    original: str
+    needle: str = ""
+    needle_offset: int = 0
 
 
 class LivePreviewService(QObject):
@@ -1646,6 +1663,67 @@ class LivePreviewService(QObject):
         if self._undo_pill is not None:
             self._undo_pill.hide()
 
+    def _undo_step(
+        self, abs_start: int, applied: str, original: str
+    ) -> UndoStep:
+        """An undo step that records the text around the edit.
+
+        The offset alone is not enough: apps reflow, re-render and normalise
+        what they inserted, so by the time the user presses Undo the text may
+        have moved. The surrounding block is what makes the undo land in the
+        right place (or refuse honestly when the text is gone).
+        """
+        live = self._live_edit_text()
+        if not live:
+            return UndoStep(abs_start, applied, original)
+        start = abs_start
+        if live[start : start + len(applied)] != applied:
+            located = self._locate_span(live, applied, abs_start)
+            if located is None:
+                return UndoStep(abs_start, applied, original)
+            start = located
+        left = max(0, start - UNDO_CONTEXT_CHARS)
+        right = min(len(live), start + len(applied) + UNDO_CONTEXT_CHARS)
+        return UndoStep(
+            abs_start,
+            applied,
+            original,
+            needle=live[left:right],
+            needle_offset=start - left,
+        )
+
+    def _undo_target(self, step: UndoStep, live: str) -> int | None:
+        """Where the edit is now: the text around it first, then the offset.
+
+        Returns None when there is nothing safe to restore - the text that was
+        written is not in the document any more, so an undo would be guessing.
+        """
+        if not live:
+            # No readable document (Word is read through AppleScript, and some
+            # editors expose no value): fall back to the recorded offset and let
+            # the editor's own guard decide.
+            return step.abs_start
+        if step.needle:
+            index = live.find(step.needle)
+            if index >= 0 and live.find(step.needle, index + 1) == -1:
+                candidate = index + step.needle_offset
+                if (
+                    live[candidate : candidate + len(step.applied)]
+                    == step.applied
+                ):
+                    return candidate
+                _debug_log(
+                    "LIVE UNDO: the surrounding text moved but does not hold "
+                    f"the applied text at {candidate}"
+                )
+        located = self._locate_span(live, step.applied, step.abs_start)
+        if (
+            located is not None
+            and abs(located - step.abs_start) <= UNDO_RELOCATE_WINDOW
+        ):
+            return located
+        return None
+
     def _perform_undo(self) -> None:
         state = self._undo_state
         if not state:
@@ -1673,53 +1751,50 @@ class LivePreviewService(QObject):
                 return
             restored = 0
             total = 0
-            for abs_start, applied, original in state.get("steps") or []:
+            for raw_step in state.get("steps") or []:
+                step = (
+                    raw_step
+                    if isinstance(raw_step, UndoStep)
+                    else UndoStep(*raw_step)
+                )
                 total += 1
                 if state.get("is_word"):
                     from .word_integration import get_word_integration
 
                     ok, _ = get_word_integration().apply_live_edit(
                         0,
-                        abs_start,
-                        abs_start + len(applied),
-                        original,
-                        before_text=applied,
+                        step.abs_start,
+                        step.abs_start + len(step.applied),
+                        step.original,
+                        before_text=step.applied,
                         expected_document=state.get("document") or None,
                     )
-                else:
-                    # The recorded offset is a hint, not a fact: apps reflow,
-                    # normalise and re-render between the apply and the undo, so
-                    # the text that was written is located in the live field
-                    # first (field coordinates, like abs_start). before_text
-                    # then makes the undo refuse when the document really has
-                    # moved on, instead of overwriting whatever now sits there.
-                    target_start = abs_start
-                    live = self._live_edit_text()
-                    if live:
-                        located = self._locate_span(live, applied, abs_start)
-                        # Only a *near* match is the same edit after a reflow:
-                        # accepting a match further away could restore the
-                        # original text over an identical phrase somewhere else
-                        # (the before-text guard cannot tell them apart when the
-                        # text is the same).
-                        if located is not None and (
-                            abs(located - abs_start) <= UNDO_RELOCATE_WINDOW
-                        ):
-                            target_start = located
-                        else:
-                            _debug_log(
-                                "LIVE UNDO: the applied text is no longer where "
-                                "it was written; trying the recorded offset"
-                            )
-                    ok, _ = self._editor.ax_replace_range(
-                        state.get("target") or {},
-                        target_start,
-                        len(applied),
-                        original,
-                        before_text=applied,
+                    if ok:
+                        restored += 1
+                    continue
+                live = self._live_edit_text()
+                target = self._undo_target(step, live)
+                if target is None:
+                    _debug_log(
+                        "LIVE UNDO: the edited text is no longer where it was "
+                        f"written (offset {step.abs_start}); leaving it alone"
                     )
-                if ok:
-                    restored += 1
+                    continue
+                ok, message = self._editor.ax_replace_range(
+                    state.get("target") or {},
+                    target,
+                    len(step.applied),
+                    step.original,
+                    before_text=step.applied,
+                )
+                if not ok:
+                    _debug_log(
+                        f"LIVE UNDO: the app refused the restore ({message!r}) "
+                        f"at {target}"
+                    )
+                    continue
+                restored += 1
+            _debug_log(f"LIVE UNDO: restored {restored} of {total}")
             if total == 0:
                 self.apply_done.emit("Could not undo.")
             elif restored == total:
@@ -2291,7 +2366,9 @@ class LivePreviewService(QObject):
                 "target": dict(self._selection_target),
                 "is_word": self._selection_is_word,
                 "document": self._word_document,
-                "steps": [(abs_start, span.after, span.before)],
+                "steps": [
+                    self._undo_step(abs_start, span.after, span.before)
+                ],
             }
         )
         delta = len(span.after) - (span.end - span.start)
@@ -2440,7 +2517,9 @@ class LivePreviewService(QObject):
                 continue
             applied += 1
             delta = rel_start + len(span.after) - span.start - len(before_text)
-            undo_steps.append((abs_start, span.after, span.before))
+            undo_steps.append(
+                self._undo_step(abs_start, span.after, span.before)
+            )
             refreshed = self._live_edit_text()
             if refreshed:
                 live_text = refreshed

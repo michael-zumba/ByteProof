@@ -62,6 +62,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QStyle,
+    QStyledItemDelegate,
     QSystemTrayIcon,
     QTextEdit,
     QToolButton,
@@ -343,6 +344,37 @@ def evaluate_apply_verification(
 def is_update_dismissed(remote_version: str, settings: dict[str, Any]) -> bool:
     """True when the user already dismissed this exact update version."""
     return bool(remote_version) and settings.get("general", {}).get("skipped_update_version") == remote_version
+
+
+class LiveAppsList(QListWidget):
+    """The Live Check app list: one full-width widget per row.
+
+    Rows are real widgets (checkbox, icon, name, delete), and the item holds
+    only data. The size hint has to follow the viewport, otherwise Qt lays the
+    row widget out inside the item's decoration area - which is what drew the
+    item's own text and checkbox *underneath* the row widget and turned the
+    list into overlapping text.
+    """
+
+    ROW_HEIGHT = 34
+
+    def refresh_row_widths(self) -> None:
+        width = self.viewport().width()
+        for index in range(self.count()):
+            item = self.item(index)
+            if item is not None and item.sizeHint().width() != width:
+                item.setSizeHint(QSize(width, self.ROW_HEIGHT))
+
+    def resizeEvent(self, event: Any) -> None:  # pyright: ignore[reportAny]
+        super().resizeEvent(event)
+        self.refresh_row_widths()
+
+
+class BlankRowDelegate(QStyledItemDelegate):
+    """Paint nothing for an item: its row widget is the whole visual."""
+
+    def paint(self, painter: Any, option: Any, index: Any) -> None:  # pyright: ignore[reportAny]
+        return
 
 
 class WaveformBars(QWidget):
@@ -1153,6 +1185,9 @@ class SettingsDialog(QDialog):
             marker: bool(saved_rules.get(marker, True))
             for marker in self._live_hidden_apps
         }
+        # Icons live in the row widget, not on the item; kept here so the tests
+        # and the picker can ask what an app's row shows.
+        self._live_app_icons: dict[str, QIcon] = {}
 
         self.provider_buttons = {}
         self.provider_status_labels = {}
@@ -1766,6 +1801,12 @@ class SettingsDialog(QDialog):
     )
 
     # Identifiers written by earlier builds, mapped to the real bundle ids.
+    # Live Check app rows keep their data on the list item and their visuals
+    # in a row widget, so the item itself never paints.
+    LIVE_APP_MARKER_ROLE = Qt.ItemDataRole.UserRole
+    LIVE_APP_NAME_ROLE = Qt.ItemDataRole.UserRole + 1
+    LIVE_APP_CHECKED_ROLE = Qt.ItemDataRole.UserRole + 2
+
     APP_ID_ALIASES: ClassVar[dict[str, str]] = {
         "com.apple.pages": "com.apple.iWork.Pages",
         "com.apple.iwork.pages": "com.apple.iWork.Pages",
@@ -1817,36 +1858,43 @@ class SettingsDialog(QDialog):
         toggle_layout = QHBoxLayout(toggle_row)
         toggle_layout.setContentsMargins(0, 0, 0, 0)
         toggle_layout.setSpacing(6)
-        toggle_label = QLabel("Show the apps that trigger it")
-        toggle_label.setStyleSheet("font-size: 13px; color: #292524;")
+        toggle_label = QLabel("Apps that trigger it")
+        toggle_label.setStyleSheet(
+            "font-size: 13px; font-weight: 600; color: #292524;"
+        )
         toggle_layout.addWidget(toggle_label)
         toggle_layout.addWidget(
             info_icon(
                 "Suggestions never run in ByteProof itself. Turn an app off "
-                "here to write in it without the panel appearing."
+                "here to write in it without the panel appearing. The ✕ takes "
+                "an app out of the list; Add App brings it back."
             )
         )
         toggle_layout.addStretch(1)
-        main_layout.addWidget(toggle_row)
-
         self.live_apps_toggle_btn = QPushButton("Show Apps")
         self.live_apps_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.live_apps_toggle_btn.setMinimumWidth(104)
         self.live_apps_toggle_btn.setStyleSheet(
             "QPushButton { background-color: #EDF3EF; color: #143024; "
-            "border: 1px solid #A9C7B3; border-radius: 10px; padding: 8px 14px; "
-            "font-weight: 620; }"
+            "border: 1px solid #A9C7B3; border-radius: 8px; padding: 6px 12px; "
+            "font-size: 12px; font-weight: 620; }"
             "QPushButton:hover { background-color: #D6E4DB; }"
         )
         self.live_apps_toggle_btn.clicked.connect(self._toggle_live_apps)
-        main_layout.addWidget(
-            self.live_apps_toggle_btn, alignment=Qt.AlignmentFlag.AlignLeft
-        )
+        toggle_layout.addWidget(self.live_apps_toggle_btn)
+        main_layout.addWidget(toggle_row)
 
-        self.live_apps_list = QListWidget()
-        self.live_apps_list.setSpacing(4)
+        self.live_apps_list = LiveAppsList()
+        self.live_apps_list.setItemDelegate(BlankRowDelegate(self.live_apps_list))
+        self.live_apps_list.setSpacing(0)
         self.live_apps_list.setMinimumHeight(220)
         self.live_apps_list.setVisible(False)
-        self.live_apps_list.itemChanged.connect(self._on_live_app_item_changed)
+        self.live_apps_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.live_apps_list.setStyleSheet(
+            "QListWidget { background-color: #FFFFFF; border: 1px solid #E8E4E0;"
+            " border-radius: 10px; padding: 4px; }"
+            "QListWidget::item { border: none; }"
+        )
         main_layout.addWidget(self.live_apps_list)
 
         apps_buttons = QHBoxLayout()
@@ -2059,29 +2107,49 @@ class SettingsDialog(QDialog):
         self.live_apps_buttons.setVisible(showing)
         self.live_apps_toggle_btn.setText("Hide Apps" if showing else "Show Apps")
 
+    def live_app_marker(self, item: QListWidgetItem) -> str:
+        return str(item.data(self.LIVE_APP_MARKER_ROLE) or "")
+
+    def live_app_name(self, item: QListWidgetItem) -> str:
+        return str(item.data(self.LIVE_APP_NAME_ROLE) or "")
+
+    def live_app_checked(self, item: QListWidgetItem) -> bool:
+        return bool(item.data(self.LIVE_APP_CHECKED_ROLE))
+
+    def live_app_row(self, marker: str) -> QWidget | None:
+        """The row widget for an app, by marker (used by the tests)."""
+        for index in range(self.live_apps_list.count()):
+            item = self.live_apps_list.item(index)
+            if self.live_app_marker(item) == marker:
+                return self.live_apps_list.itemWidget(item)
+        return None
+
+    def live_app_icon(self, marker: str) -> QIcon:
+        return self._live_app_icons.get(marker, QIcon())
+
     def _live_app_row(
         self, item: QListWidgetItem, name: str, icon: QIcon
     ) -> QWidget:
         """One app row: checkbox, icon, name, and a delete button.
 
-        The list item keeps the marker and the check state (that is what the
-        settings are read from); the widget only presents them, so removing a
-        row is a single ``takeItem`` and nothing can drift out of sync.
+        The item carries only data (marker, name, on/off); the widget is the
+        whole visual, so nothing is drawn twice and nothing can drift out of
+        sync.
         """
         row = QWidget()
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(6, 2, 6, 2)
-        row_layout.setSpacing(8)
+        row_layout.setContentsMargins(8, 0, 6, 0)
+        row_layout.setSpacing(10)
 
         check = QCheckBox()
-        check.setChecked(item.checkState() == Qt.CheckState.Checked)
+        check.setChecked(self.live_app_checked(item))
         check.setToolTip(
             f"Suggest changes in {name}. Turn it off to write there without "
             "the panel appearing."
         )
         check.toggled.connect(
-            lambda checked, target=item: target.setCheckState(
-                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            lambda checked, target=item: target.setData(
+                self.LIVE_APP_CHECKED_ROLE, bool(checked)
             )
         )
         row_layout.addWidget(check)
@@ -2115,10 +2183,15 @@ class SettingsDialog(QDialog):
         self, item: QListWidgetItem, name: str, icon: QIcon
     ) -> None:
         row = self._live_app_row(item, name, icon)
-        hint = row.sizeHint()
-        # The widget has not been laid out yet, so its hint can be tiny; the
-        # floor keeps every row tall enough for the 22px icon.
-        item.setSizeHint(QSize(0, max(32, hint.height())))
+        # Full width: the row widget must cover the whole item, otherwise Qt
+        # lays it out inside the item's decoration area and the row appears
+        # indented and clipped.
+        item.setSizeHint(
+            QSize(
+                self.live_apps_list.viewport().width(),
+                LiveAppsList.ROW_HEIGHT,
+            )
+        )
         self.live_apps_list.setItemWidget(item, row)
 
     def _remembered_app_state(self, marker: str, fallback: bool) -> bool:
@@ -2142,8 +2215,8 @@ class SettingsDialog(QDialog):
 
     def _remove_live_app(self, item: QListWidgetItem) -> None:
         """Take an app out of the list; Add App can bring it back."""
-        marker = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
-        enabled = item.checkState() == Qt.CheckState.Checked
+        marker = self.live_app_marker(item).strip()
+        enabled = self.live_app_checked(item)
         row = self.live_apps_list.row(item)
         if row >= 0:
             # The button that emitted this click lives in the row widget, so the
@@ -2165,20 +2238,6 @@ class SettingsDialog(QDialog):
         from .generic_editing import _debug_log
 
         _debug_log(f"LIVE CHECK: removed app {marker!r} from the list")
-
-    def _on_live_app_item_changed(self, item: QListWidgetItem) -> None:
-        """Mirror a programmatic check-state change into the row's checkbox."""
-        widget = self.live_apps_list.itemWidget(item)
-        if widget is None:
-            return
-        check = widget.findChild(QCheckBox)
-        if check is None:
-            return
-        wanted = item.checkState() == Qt.CheckState.Checked
-        if check.isChecked() != wanted:
-            check.blockSignals(True)
-            check.setChecked(wanted)
-            check.blockSignals(False)
 
     def _populate_live_apps(self) -> None:
         """Fill the app list from the saved rules plus the known apps."""
@@ -2209,32 +2268,29 @@ class SettingsDialog(QDialog):
                 continue
             entries.append((marker, marker))
         self.live_apps_list.clear()
-        self.live_apps_list.setIconSize(QSize(26, 26))
+        self._live_app_icons = {}
         for marker, name in entries:
-            item = QListWidgetItem(name)
-            item.setData(Qt.ItemDataRole.UserRole, marker)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if bool(rules.get(marker, True))
-                else Qt.CheckState.Unchecked
+            item = QListWidgetItem()
+            item.setData(self.LIVE_APP_MARKER_ROLE, marker)
+            item.setData(self.LIVE_APP_NAME_ROLE, name)
+            item.setData(
+                self.LIVE_APP_CHECKED_ROLE, bool(rules.get(marker, True))
             )
-            icon = self._app_icon(
-                {"bundle_id": marker, "name": name}
-            )
+            icon = self._app_icon({"bundle_id": marker, "name": name})
             if not icon.isNull():
-                item.setIcon(icon)
+                self._live_app_icons[marker] = icon
             self.live_apps_list.addItem(item)
             self._attach_live_app_row(item, name, icon)
+        self.live_apps_list.refresh_row_widths()
 
     def _add_live_app(self) -> None:
         """Add an installed app to the list (same picker as Automation)."""
         existing = {
-            str(self.live_apps_list.item(i).data(Qt.ItemDataRole.UserRole) or "")
+            self.live_app_marker(self.live_apps_list.item(i))
             for i in range(self.live_apps_list.count())
         }
         existing |= {
-            str(self.live_apps_list.item(i).text() or "")
+            self.live_app_name(self.live_apps_list.item(i))
             for i in range(self.live_apps_list.count())
         }
         app = self.choose_installed_app(existing)
@@ -2243,23 +2299,24 @@ class SettingsDialog(QDialog):
         marker = str(app.get("bundle_id") or app.get("name") or "").strip()
         if not marker:
             return
-        item = QListWidgetItem(str(app.get("name") or marker))
-        item.setData(Qt.ItemDataRole.UserRole, marker)
-        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        name = str(app.get("name") or marker)
+        item = QListWidgetItem()
+        item.setData(self.LIVE_APP_MARKER_ROLE, marker)
+        item.setData(self.LIVE_APP_NAME_ROLE, name)
         # An app that was switched off, deleted and added back returns the way
         # it was rather than silently switching itself on.
-        item.setCheckState(
-            Qt.CheckState.Checked
-            if self._remembered_app_state(marker, True)
-            else Qt.CheckState.Unchecked
+        item.setData(
+            self.LIVE_APP_CHECKED_ROLE,
+            self._remembered_app_state(marker, True),
         )
         icon = self._app_icon(app)
         if not icon.isNull():
-            item.setIcon(icon)
+            self._live_app_icons[marker] = icon
         self.live_apps_list.addItem(item)
         # Adding an app that was removed earlier puts it back in the list.
         self._live_hidden_apps.discard(marker)
-        self._attach_live_app_row(item, str(app.get("name") or marker), icon)
+        self._attach_live_app_row(item, name, icon)
+        self.live_apps_list.refresh_row_widths()
         if not getattr(self, "_live_apps_shown", False):
             self._toggle_live_apps()  # reveal the list so the new app is seen
 
@@ -2268,10 +2325,10 @@ class SettingsDialog(QDialog):
         rules: dict[str, bool] = {}
         for index in range(self.live_apps_list.count()):
             item = self.live_apps_list.item(index)
-            marker = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            marker = self.live_app_marker(item)
             if not marker:
                 continue
-            rules[marker] = item.checkState() == Qt.CheckState.Checked
+            rules[marker] = self.live_app_checked(item)
         if hasattr(self, "chk_live_other_apps"):
             rules["*"] = self.chk_live_other_apps.isChecked()
         return rules

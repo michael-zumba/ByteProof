@@ -2050,15 +2050,16 @@ def test_live_check_apps_fold_and_unfold() -> None:
 def test_app_rules_decide_where_live_check_runs() -> None:
     if platform.system() != "Darwin":
         pytest.skip("Live Check controls are macOS-only")
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QCheckBox
 
     from src.live_preview import app_allowed, evaluate_trigger
 
     app, owner, dialog = _make_settings_dialog()
-    for index in range(dialog.live_apps_list.count()):
-        item = dialog.live_apps_list.item(index)
-        if item.data(Qt.ItemDataRole.UserRole) == "com.apple.mail":
-            item.setCheckState(Qt.CheckState.Unchecked)
+    mail_item = _live_row_for(dialog, "com.apple.mail")
+    assert mail_item is not None
+    dialog.live_apps_list.itemWidget(mail_item).findChild(QCheckBox).setChecked(
+        False
+    )
     dialog.chk_live_other_apps.setChecked(False)
 
     rules = dialog.get_settings()["live_preview"]["app_rules"]
@@ -2090,7 +2091,6 @@ def test_live_check_runs_everywhere_by_default() -> None:
 
 def test_live_check_add_app_uses_the_installed_app_picker() -> None:
     """Add App lists installed applications (with icons), like Automation."""
-    from PyQt6.QtCore import Qt
 
     app, owner, dialog = _make_settings_dialog()
     dialog.show()
@@ -2116,9 +2116,9 @@ def test_live_check_add_app_uses_the_installed_app_picker() -> None:
 
     assert dialog.live_apps_list.count() == before + 1
     added = dialog.live_apps_list.item(dialog.live_apps_list.count() - 1)
-    assert added.text() == "Example Editor"
-    assert added.data(Qt.ItemDataRole.UserRole) == "com.example.editor"
-    assert added.checkState() == Qt.CheckState.Checked
+    assert dialog.live_app_name(added) == "Example Editor"
+    assert dialog.live_app_marker(added) == "com.example.editor"
+    assert dialog.live_app_checked(added) is True
     rules = dialog.get_settings()["live_preview"]["app_rules"]
     assert rules["com.example.editor"] is True
     _dispose(dialog, owner, app)
@@ -2201,6 +2201,80 @@ def test_single_apply_keeps_the_rest_when_the_selection_is_unreadable():
     service.stop()
 
 
+def test_undo_finds_the_edit_after_the_document_moves_far():
+    """The reliability fix: an app can re-render the text far from the offset.
+
+    Undo used to accept a match only within 64 characters of the recorded
+    offset and otherwise fall back to that offset, so a re-render that moved
+    the text made the undo refuse - or restore the wrong place. It now looks
+    for the text *around* the edit, which does not move relative to the edit.
+    """
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    original = "teh cat sat on the mat"
+    state = {"text": original}
+    calls: list[tuple[int, int, str, str]] = []
+
+    class Editor:
+        def selection_details(self, target):
+            return {
+                "text": original,
+                "range": (0, len(original)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return state["text"]
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            current = state["text"]
+            if before_text is not None and (
+                current[start : start + length] != before_text
+            ):
+                return False, "range no longer holds the original text"
+            calls.append((start, length, new, before_text or ""))
+            state["text"] = current[:start] + new + current[start + length :]
+            return True, "Applied."
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    service._editor = Editor()
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 8,
+        "name": "Safari",
+    }
+    service._selection_start = 0
+    service._selection_text = original
+    service._seen_text = original
+    service._selection_has_range = True
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    service._apply_all()
+    assert state["text"] == "the cat sat on the mat"
+
+    # The app re-renders: a long block appears before the edit, so the recorded
+    # offset is now 500 characters away from the text it wrote.
+    state["text"] = ("X" * 500) + state["text"]
+
+    service._perform_undo()
+
+    assert calls[-1][0] == 500, calls
+    assert state["text"] == ("X" * 500) + original
+    service.stop()
+
+
 def test_undo_never_restores_far_from_where_it_wrote():
     """A distant match is a different phrase, not the edit reflowed.
 
@@ -2252,8 +2326,9 @@ def test_undo_never_restores_far_from_where_it_wrote():
 
     service._perform_undo()
 
-    # It tried the recorded offset, not the "the" at 0.
-    assert calls == [(200, 3, "teh", "the")]
+    # Nothing is written: the text it edited is gone, and "the" at the start of
+    # the document is a different phrase, not the edit moved.
+    assert calls == []
     service.stop()
 
 
@@ -2404,11 +2479,9 @@ def test_apply_then_undo_restores_the_browser_text_exactly():
 
 
 def _live_row_for(dialog, marker: str):
-    from PyQt6.QtCore import Qt
-
     for index in range(dialog.live_apps_list.count()):
         item = dialog.live_apps_list.item(index)
-        if item.data(Qt.ItemDataRole.UserRole) == marker:
+        if dialog.live_app_marker(item) == marker:
             return item
     return None
 
@@ -2423,7 +2496,7 @@ def test_live_check_unchecking_an_app_persists_and_takes_effect() -> None:
         pytest.skip("Live Check controls are macOS-only")
     app, owner, dialog = _make_settings_dialog()
     item = _live_row_for(dialog, "com.apple.mail")
-    assert item is not None and item.checkState().value == 2  # checked by default
+    assert item is not None and dialog.live_app_checked(item) is True
     widget = dialog.live_apps_list.itemWidget(item)
     checkbox = widget.findChild(QCheckBox)
     assert checkbox is not None and checkbox.isChecked()
@@ -2431,7 +2504,7 @@ def test_live_check_unchecking_an_app_persists_and_takes_effect() -> None:
     # Click it off the way a user does, through the row's own checkbox.
     checkbox.setChecked(False)
 
-    assert item.checkState().value == 0
+    assert dialog.live_app_checked(item) is False
     live = dialog.get_settings()["live_preview"]
     assert live["app_rules"]["com.apple.mail"] is False
     mail = {"bundle_id": "com.apple.mail", "name": "Mail"}
@@ -2499,7 +2572,7 @@ def test_live_check_app_can_be_deleted_and_added_back() -> None:
     reopened._add_live_app()
     restored = _live_row_for(reopened, bundle)
     assert restored is not None
-    assert restored.checkState().value == 0  # unchecked, as it was
+    assert reopened.live_app_checked(restored) is False  # unchecked, as it was
     live = reopened.get_settings()["live_preview"]
     assert bundle not in live["hidden_apps"]
     assert live["app_rules"][bundle] is False
@@ -2508,21 +2581,75 @@ def test_live_check_app_can_be_deleted_and_added_back() -> None:
     dialog.deleteLater()
 
 
-def test_live_check_app_rows_show_icons_when_installed() -> None:
+def test_live_check_rows_do_not_paint_twice() -> None:
+    """The row widget must cover its item exactly, and the item paint nothing.
+
+    Qt lays an item widget out inside the item's decoration area. With the
+    item's own text, icon and checkbox still set, the delegate drew them
+    *underneath* the row widget: doubled names, a second checkbox, an indented
+    and clipped row - the owner's "the UI is in a mass". The list now uses a
+    delegate that paints nothing, data-only items, and a size hint as wide as
+    the viewport.
+    """
     from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QCheckBox
+
+    from src.gui import BlankRowDelegate, LiveAppsList
+
+    if platform.system() != "Darwin":
+        pytest.skip("Live Check controls are macOS-only")
+    app, owner, dialog = _make_settings_dialog()
+    dialog.show()
+    dialog.sidebar.setCurrentRow(1)
+    dialog.change_page(1)
+    dialog.live_apps_toggle_btn.click()
+    app.processEvents()
+
+    assert isinstance(dialog.live_apps_list, LiveAppsList)
+    assert isinstance(dialog.live_apps_list.itemDelegate(), BlankRowDelegate)
+    assert dialog.live_apps_list.count() >= 5
+
+    for index in range(dialog.live_apps_list.count()):
+        item = dialog.live_apps_list.item(index)
+        # Nothing for the delegate to draw, so nothing can be drawn twice.
+        assert item.text() == ""
+        assert item.icon().isNull()
+        assert item.checkState() == Qt.CheckState.Unchecked
+        rect = dialog.live_apps_list.visualItemRect(item)
+        widget = dialog.live_apps_list.itemWidget(item)
+        assert widget is not None, f"row {index} has no widget"
+        assert widget.geometry() == rect, (
+            f"row {index}: widget {widget.geometry().getRect()} does not cover "
+            f"the item {rect.getRect()}"
+        )
+        assert widget.findChild(QCheckBox) is not None
+        assert widget.isVisible()
+
+    # A window resize must keep the rows covering their items.
+    dialog.resize(dialog.width() + 120, dialog.height())
+    app.processEvents()
+    for index in range(min(3, dialog.live_apps_list.count())):
+        item = dialog.live_apps_list.item(index)
+        widget = dialog.live_apps_list.itemWidget(item)
+        assert widget is not None
+        assert widget.geometry() == dialog.live_apps_list.visualItemRect(item)
+
+    _dispose(dialog, owner, app)
+
+
+def test_live_check_app_rows_show_icons_when_installed() -> None:
 
     app, owner, dialog = _make_settings_dialog()
     icons = 0
     for index in range(dialog.live_apps_list.count()):
-        item = dialog.live_apps_list.item(index)
-        if not item.icon().isNull():
+        marker = dialog.live_app_marker(dialog.live_apps_list.item(index))
+        if not dialog.live_app_icon(marker).isNull():
             icons += 1
     # Every row whose app is installed must have its icon; a runner without
     # those apps simply has none, which is not a failure.
     assert dialog.live_apps_list.count() >= 1
     assert icons >= 0
-    marker = dialog.live_apps_list.item(0).data(Qt.ItemDataRole.UserRole)
-    assert marker
+    assert dialog.live_app_marker(dialog.live_apps_list.item(0))
     _dispose(dialog, owner, app)
 
 
@@ -2684,7 +2811,6 @@ def test_every_installed_app_row_has_an_icon() -> None:
     import platform
 
     import pytest
-    from PyQt6.QtCore import Qt
 
     if platform.system() != "Darwin":
         pytest.skip("app icons come from macOS bundles")
@@ -2693,8 +2819,10 @@ def test_every_installed_app_row_has_an_icon() -> None:
     missing: list[str] = []
     for index in range(dialog.live_apps_list.count()):
         item = dialog.live_apps_list.item(index)
-        bundle = str(item.data(Qt.ItemDataRole.UserRole) or "")
-        icon = dialog._app_icon({"bundle_id": bundle, "name": item.text()})
+        bundle = dialog.live_app_marker(item)
+        icon = dialog._app_icon(
+            {"bundle_id": bundle, "name": dialog.live_app_name(item)}
+        )
         if icon.isNull():
             # Only a problem when the app really is installed here.
             path = dialog._app_icon  # noqa: F841  (kept for readability)
@@ -2732,5 +2860,5 @@ def test_saved_pages_identifier_is_migrated() -> None:
     for index in range(dialog.live_apps_list.count()):
         item = dialog.live_apps_list.item(index)
         if item.data(Qt.ItemDataRole.UserRole) == "com.apple.iWork.Pages":
-            assert item.checkState() == Qt.CheckState.Unchecked
+            assert dialog.live_app_checked(item) is False
     _dispose(dialog, owner, app)
