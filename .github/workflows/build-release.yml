@@ -65,7 +65,7 @@ jobs:
             # whole job timeout: faulthandler dumps every thread after 25s and
             # pytest-timeout fails the test so the file still finishes.
             python -m pytest "$file" -v -p no:cacheprovider \
-              --timeout=45 -o faulthandler_timeout=25 --tb=short || status=1
+              --timeout=45 -o faulthandler_timeout=25 --tb=short --maxfail=4 || status=1
           done
           exit $status
 
