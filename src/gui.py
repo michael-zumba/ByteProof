@@ -1143,6 +1143,16 @@ class SettingsDialog(QDialog):
         self._live_hidden_apps: set[str] = {
             str(marker) for marker in hidden if str(marker).strip()
         }
+        # The on/off state each hidden app had when it was removed, seeded from
+        # the saved rules so it survives a restart. Without this the state would
+        # be read from the saved settings, which only change on Save.
+        saved_rules = self.settings.get("live_preview", {}).get("app_rules")
+        if not isinstance(saved_rules, dict):
+            saved_rules = {}
+        self._live_hidden_states: dict[str, bool] = {
+            marker: bool(saved_rules.get(marker, True))
+            for marker in self._live_hidden_apps
+        }
 
         self.provider_buttons = {}
         self.provider_status_labels = {}
@@ -2111,9 +2121,29 @@ class SettingsDialog(QDialog):
         item.setSizeHint(QSize(0, max(32, hint.height())))
         self.live_apps_list.setItemWidget(item, row)
 
+    def _remembered_app_state(self, marker: str, fallback: bool) -> bool:
+        """The switch an app had when it was last in the list."""
+        if marker in self._live_hidden_states:
+            return bool(self._live_hidden_states[marker])
+        rules = self.settings.get("live_preview", {}).get("app_rules")
+        if isinstance(rules, dict):
+            canonical = self.APP_ID_ALIASES.get(marker.lower(), marker)
+            for key in (marker, canonical):
+                if key in rules:
+                    return bool(rules[key])
+        return fallback
+
+    def _hidden_app_rules(self) -> dict[str, bool]:
+        """Rules for apps that were deleted, so saving keeps their state."""
+        return {
+            marker: bool(self._live_hidden_states.get(marker, True))
+            for marker in self._live_hidden_apps
+        }
+
     def _remove_live_app(self, item: QListWidgetItem) -> None:
         """Take an app out of the list; Add App can bring it back."""
         marker = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        enabled = item.checkState() == Qt.CheckState.Checked
         row = self.live_apps_list.row(item)
         if row >= 0:
             # The button that emitted this click lives in the row widget, so the
@@ -2126,10 +2156,12 @@ class SettingsDialog(QDialog):
                 widget.deleteLater()
             self.live_apps_list.takeItem(row)
         if marker:
+            # Hidden, not unconfigured: the app keeps its on/off rule so that
+            # tidying the list cannot silently change whether Live Check runs
+            # there (a deleted app used to fall through to "allow other apps"),
+            # and so Add App can bring it back the way it was.
             self._live_hidden_apps.add(marker)
-            rules = self.settings.get("live_preview", {}).get("app_rules")
-            if isinstance(rules, dict):
-                rules.pop(marker, None)
+            self._live_hidden_states[marker] = enabled
         from .generic_editing import _debug_log
 
         _debug_log(f"LIVE CHECK: removed app {marker!r} from the list")
@@ -2214,7 +2246,13 @@ class SettingsDialog(QDialog):
         item = QListWidgetItem(str(app.get("name") or marker))
         item.setData(Qt.ItemDataRole.UserRole, marker)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setCheckState(Qt.CheckState.Checked)
+        # An app that was switched off, deleted and added back returns the way
+        # it was rather than silently switching itself on.
+        item.setCheckState(
+            Qt.CheckState.Checked
+            if self._remembered_app_state(marker, True)
+            else Qt.CheckState.Unchecked
+        )
         icon = self._app_icon(app)
         if not icon.isNull():
             item.setIcon(icon)
@@ -4137,7 +4175,11 @@ class SettingsDialog(QDialog):
         self.settings["live_preview"]["min_words"] = int(
             self.live_min_words_spin.value()
         )
-        self.settings["live_preview"]["app_rules"] = self._live_app_rules()
+        app_rules = self._live_app_rules()
+        # Apps that were deleted keep the rule they had, so a delete is only a
+        # list change and never a silent behaviour change.
+        app_rules.update(self._hidden_app_rules())
+        self.settings["live_preview"]["app_rules"] = app_rules
         self.settings["live_preview"]["hidden_apps"] = sorted(
             self._live_hidden_apps
         )

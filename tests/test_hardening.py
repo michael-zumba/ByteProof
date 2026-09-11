@@ -2201,6 +2201,128 @@ def test_single_apply_keeps_the_rest_when_the_selection_is_unreadable():
     service.stop()
 
 
+def test_undo_never_restores_far_from_where_it_wrote():
+    """A distant match is a different phrase, not the edit reflowed.
+
+    The undo looks for the text it wrote, but the same words can appear
+    elsewhere in the document; accepting a match far from the recorded offset
+    restored the original text over an unrelated identical phrase.
+    """
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    # "the" appears at the start, but the edit was written at 200 and has since
+    # been changed by the user.
+    field = "the rest of a long document. " + ("x" * 170) + " something else"
+    calls: list[tuple[int, int, str, str]] = []
+
+    class Editor:
+        def field_value(self, target):
+            return field
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            calls.append((start, length, new, before_text or ""))
+            return True, "Applied."
+
+    service._editor = Editor()
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 5,
+        "name": "Safari",
+    }
+    service._selection_start = 0
+    service._selection_text = field
+    service._undo_state = {
+        "mode": "range",
+        "target": dict(service._selection_target),
+        "is_word": False,
+        "steps": [(200, "the", "teh")],
+    }
+
+    service._perform_undo()
+
+    # It tried the recorded offset, not the "the" at 0.
+    assert calls == [(200, 3, "teh", "the")]
+    service.stop()
+
+
+def test_detached_panel_never_copies_from_another_app():
+    """A copy while detached would read the frontmost app's selection."""
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    copies: list[int] = []
+
+    class Editor:
+        def selection_details(self, target):
+            # The captured app answers nothing through AX (a web view in the
+            # background), which is the case that fell through to a copy.
+            return {
+                "text": "",
+                "range": None,
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def is_frontmost(self, target):
+            return False  # the user is in another app
+
+        def get_selection_by_copy(self, target, attempts=1):
+            copies.append(1)
+            return "a paragraph the user selected in another app"
+
+    service._editor = Editor()
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 6,
+        "name": "Safari",
+    }
+    service._selection_text = "teh cat sat on the mat"
+    service._seen_text = "teh cat sat on the mat"
+    service._selection_start = 0
+    service._selection_has_range = True
+    service._pending = [EditSpan("teh", "the", "Spelling", 0, 3)]
+    service._detach_checked_at = 0.0
+
+    kept = service._keep_panel_for_detached_target(
+        {"bundle_id": "com.apple.pages", "pid": 7, "name": "Pages"}
+    )
+
+    assert kept is True
+    assert copies == [], "no copy may be sent while another app is frontmost"
+    service.stop()
+
+
+def test_a_bundle_rule_never_decides_another_app_by_name():
+    """A bundle id is not a name fragment for someone else's app."""
+    from src.live_preview import app_allowed
+
+    # "Mail" from a third party, while Apple's Mail is switched off: the
+    # switch for the third-party app is what counts.
+    rules = {"com.apple.mail": False, "*": True}
+    third_party = {"bundle_id": "com.example.mymail", "name": "Mail"}
+    assert app_allowed({"app_rules": rules}, third_party) is True
+    # A plain name rule still applies to apps that have no rule of their own.
+    assert (
+        app_allowed({"app_rules": {"mail": False}}, third_party) is False
+    )
+
+
 def test_apply_then_undo_restores_the_browser_text_exactly():
     """The reported mismatch: after a browser apply, Undo left the text altered.
 
@@ -2330,11 +2452,12 @@ def test_live_check_unchecking_an_app_persists_and_takes_effect() -> None:
 
 
 def test_live_check_app_can_be_deleted_and_added_back() -> None:
-    """Delete takes a row out of the list; Add App brings it back."""
+    """Delete hides a row without changing how Live Check behaves there."""
     from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import QToolButton
+    from PyQt6.QtWidgets import QCheckBox, QToolButton
 
     from src.gui import SettingsDialog
+    from src.live_preview import app_allowed
 
     if platform.system() != "Darwin":
         pytest.skip("Live Check controls are macOS-only")
@@ -2343,6 +2466,9 @@ def test_live_check_app_can_be_deleted_and_added_back() -> None:
     item = _live_row_for(dialog, bundle)
     assert item is not None
     before = dialog.live_apps_list.count()
+    # Turn it off first, so the delete has a state to preserve.
+    dialog.live_apps_list.itemWidget(item).findChild(QCheckBox).setChecked(False)
+    assert dialog.get_settings()["live_preview"]["app_rules"][bundle] is False
 
     remove = dialog.live_apps_list.itemWidget(item).findChild(QToolButton)
     assert remove is not None and remove.text() == "✕"
@@ -2356,22 +2482,27 @@ def test_live_check_app_can_be_deleted_and_added_back() -> None:
     assert bundle not in markers
     live = dialog.get_settings()["live_preview"]
     assert bundle in live["hidden_apps"]
-    assert bundle not in live["app_rules"]
+    # Deleting is a list change, not a behaviour change: the app is still
+    # switched off for Live Check, exactly as it was.
+    assert live["app_rules"][bundle] is False
+    assert app_allowed(live, {"bundle_id": bundle, "name": "Mail"}) is False
 
     # Reopening from those settings keeps it deleted.
     reopened = SettingsDialog(dialog.get_settings(), owner)
     assert _live_row_for(reopened, bundle) is None
 
-    # Add App puts the app back, and it is no longer marked as deleted.
+    # Add App puts the app back, still switched off.
     reopened.choose_installed_app = lambda existing=None: {
         "bundle_id": bundle,
         "name": "Mail",
     }  # type: ignore[assignment]
     reopened._add_live_app()
-    assert _live_row_for(reopened, bundle) is not None
-    assert (
-        bundle not in reopened.get_settings()["live_preview"]["hidden_apps"]
-    )
+    restored = _live_row_for(reopened, bundle)
+    assert restored is not None
+    assert restored.checkState().value == 0  # unchecked, as it was
+    live = reopened.get_settings()["live_preview"]
+    assert bundle not in live["hidden_apps"]
+    assert live["app_rules"][bundle] is False
 
     _dispose(reopened, owner, app)
     dialog.deleteLater()

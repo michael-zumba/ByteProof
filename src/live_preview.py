@@ -412,6 +412,11 @@ def app_allowed(live: dict[str, Any], target: dict[str, Any]) -> bool:
     for marker, enabled in normalised.items():
         if not marker or marker == "*":
             continue
+        # A bundle id only ever matches exactly: letting one take part in the
+        # name test let "com.apple.mail" decide an unrelated app whose name
+        # merely contains a fragment of it.
+        if "." in marker:
+            continue
         if len(marker) > 3 and marker in name:
             return enabled
     return bool(normalised.get("*", True))

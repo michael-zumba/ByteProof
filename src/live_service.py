@@ -83,6 +83,9 @@ DETACH_REVALIDATE_S = 1.5
 SUPPRESS_SELECTION_S = 15.0
 # When Word stops answering (modal dialog), stop polling it for this long.
 WORD_BUSY_BACKOFF_S = 5.0
+# Undo re-locates the text it wrote, but only within this distance of the
+# recorded offset: further away is a different edit, not the same one reflowed.
+UNDO_RELOCATE_WINDOW = 64
 # After an applied edit the document has moved, so the next suggestion's
 # offset is only a hint. Its original text is searched for around that hint
 # before anything is written; nothing is written when it cannot be found.
@@ -753,10 +756,26 @@ class LivePreviewService(QObject):
             state = self._read_selection_state()
             if state is not None and state[0]:
                 return self._same_selection(state[0])
+        # A copy is only a witness when the captured app can answer it. While
+        # another app is frontmost the Copy command goes to *that* app (or to a
+        # global key post when it has no usable menu item), so the text that
+        # comes back belongs to the wrong window - and the keystroke itself is
+        # not ours to send. Returning None keeps the panel instead.
+        if not self._target_is_frontmost():
+            return None
         copied = self._read_selection_by_copy(attempts=1)
         if not copied:
             return None
         return self._same_selection(copied)
+
+    def _target_is_frontmost(self) -> bool:
+        try:
+            checker = getattr(self._editor, "is_frontmost", None)
+            if not callable(checker):
+                return False
+            return bool(checker(self._selection_target))
+        except Exception:
+            return False
 
     def _same_selection(self, text: str) -> bool:
         return text.strip() == (self._selection_text or "").strip()
@@ -1678,12 +1697,19 @@ class LivePreviewService(QObject):
                     live = self._live_edit_text()
                     if live:
                         located = self._locate_span(live, applied, abs_start)
-                        if located is not None:
+                        # Only a *near* match is the same edit after a reflow:
+                        # accepting a match further away could restore the
+                        # original text over an identical phrase somewhere else
+                        # (the before-text guard cannot tell them apart when the
+                        # text is the same).
+                        if located is not None and (
+                            abs(located - abs_start) <= UNDO_RELOCATE_WINDOW
+                        ):
                             target_start = located
                         else:
                             _debug_log(
-                                "LIVE UNDO: could not locate the applied text; "
-                                "trying the recorded offset"
+                                "LIVE UNDO: the applied text is no longer where "
+                                "it was written; trying the recorded offset"
                             )
                     ok, _ = self._editor.ax_replace_range(
                         state.get("target") or {},
@@ -1922,9 +1948,12 @@ class LivePreviewService(QObject):
         (caught by a regression test), which is also what made a browser undo
         restore the wrong place.
 
-        Returns the offset unchanged when the field cannot be read, and None
-        when the text cannot be found inside the selection: writing outside it
-        is never what the user asked for.
+        Returns the offset unchanged when the field cannot be read at all:
+        some editors expose no ``AXValue``, and refusing every edit there would
+        take Live Check away from them (the editor's own before-text check and
+        its read-back still guard the write). Returns None when the field *is*
+        readable and the text cannot be found inside the selection, because
+        writing outside the selection is never what the user asked for.
         """
         live = self._live_edit_text()
         if not live:
@@ -2440,9 +2469,14 @@ class LivePreviewService(QObject):
             )
             self._hide_panel()
         elif applied == 0:
-            # Report the real reason instead of a bare "0 of N".
+            # Report the real reason instead of a bare "0 of N" - including the
+            # case where every span was skipped because its text could not be
+            # found any more, which otherwise reported nothing at all.
             self._pending = skipped
-            message = failure_message
+            message = failure_message or (
+                "Could not place these suggestions — the text has changed. "
+                "Select it again."
+            )
         else:
             # Keep what is left on screen so the user can retry it instead of
             # losing the rest of the review. The selection snapshot now holds
