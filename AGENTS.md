@@ -19,6 +19,14 @@ Never auto-release.
 Durable state lives in `docs/aegis/` (intent, checkpoints, evidence) and
 `docs/superpowers/` (specs, plans).
 
+CI rule: macOS gates every release; the Windows suite runs the same tests
+informationally because a blocked test takes the hosted Windows runner down
+with it (its job, step and cancellation timers stop landing, which once held a
+finished release for an hour with no output). The Windows *packaging* job is
+still a hard gate. Never let a test file run bare on Windows: use
+`scripts/run_tests_ci.py`, which streams output and kills a stalled process
+tree, and keep `BYTEPROOF_CI_PROGRESS=1` so the log names the test it was on.
+
 Versioning rule: every update, however minor, bumps `APP_VERSION` in
 `src/settings.py` and mirrors it in `version_info.txt`, so testers can
 always tell they are on the latest build. `scripts/check_version.py` verifies
