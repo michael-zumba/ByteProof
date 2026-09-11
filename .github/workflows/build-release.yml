@@ -23,10 +23,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        include:
+          - os: macos-14
+            timeout: 20
+          - os: windows-latest
+            timeout: 8
     runs-on: ${{ matrix.os }}
     # A hang must fail the job quickly instead of blocking a release for hours.
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,6 +50,7 @@ jobs:
         # file builds its own, which intermittently segfaults on macOS.
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONUNBUFFERED: "1"
         shell: bash
         run: |
           status=0
