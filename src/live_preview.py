@@ -400,13 +400,21 @@ def app_allowed(live: dict[str, Any], target: dict[str, Any]) -> bool:
         return True
     bundle = str(target.get("bundle_id", "")).lower()
     name = str(target.get("name", "")).lower()
-    for key, enabled in rules.items():
-        marker = str(key).strip().lower()
+    normalised = {
+        str(key).strip().lower(): bool(value) for key, value in rules.items()
+    }
+    # The bundle id is authoritative and is checked across *all* rules before
+    # any name fragment: returning on the first key that matched in dict order
+    # let a stale name-based rule ("mail") shadow the app's own switch
+    # ("com.apple.mail"), so unchecking an app in Live Check did nothing.
+    if bundle and bundle in normalised:
+        return normalised[bundle]
+    for marker, enabled in normalised.items():
         if not marker or marker == "*":
             continue
-        if marker == bundle or (len(marker) > 3 and marker in name):
-            return bool(enabled)
-    return bool(rules.get("*", True))
+        if len(marker) > 3 and marker in name:
+            return enabled
+    return bool(normalised.get("*", True))
 
 
 def evaluate_trigger(

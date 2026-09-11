@@ -12,6 +12,7 @@ selection). The current model is deliberately simpler and non-invasive:
    formatted, underlined, or otherwise modified until the user accepts.
 """
 
+import os
 import subprocess
 import threading
 import time
@@ -670,12 +671,33 @@ class LivePreviewService(QObject):
             return
         self._spawn_preview(target, text, details, key)
 
+    def _is_self_target(self, target: dict[str, Any]) -> bool:
+        """Whether this target is ByteProof's own window."""
+        if target.get("pid") and target.get("pid") == os.getpid():
+            return True
+        name = str(target.get("name", "")).lower()
+        bundle = str(target.get("bundle_id", "")).lower()
+        return "byteproof" in name or "bytemind" in bundle
+
     def _selection_target_changed(self, target: dict[str, Any]) -> bool:
+        """Whether the frontmost app is a different one from the capture.
+
+        Compared by bundle id when both sides have one: Mail's composer and its
+        message viewer are separate processes, so the pid test alone treated a
+        second window of the same app as "the user switched away" and dismissed
+        the panel while they were still working in Mail. ByteProof itself is not
+        a switch either - the panel and the undo pill are the app's own windows,
+        and clicking them makes ByteProof frontmost.
+        """
         if not self._selection_target:
             return False
-        return self._selection_target.get("pid") != target.get("pid") or str(
-            self._selection_target.get("bundle_id", "")
-        ) != str(target.get("bundle_id", ""))
+        if self._is_self_target(target):
+            return False
+        captured_bundle = str(self._selection_target.get("bundle_id", "")).lower()
+        current_bundle = str(target.get("bundle_id", "")).lower()
+        if captured_bundle and current_bundle:
+            return captured_bundle != current_bundle
+        return self._selection_target.get("pid") != target.get("pid")
 
     def _keep_panel_for_detached_target(self, target: dict[str, Any]) -> bool:
         """Whether the panel should survive the user switching apps.
@@ -696,12 +718,48 @@ class LivePreviewService(QObject):
             self._arm_detach_timer()
             return True
         self._detach_checked_at = now
-        state = self._read_selection_state()
-        if state is None or state[0] != self._selection_text:
+        evidence = self._selection_still_matches()
+        if evidence is False:
             _debug_log("LIVE PANEL: captured selection changed; dismissing")
             return False
+        if evidence is None:
+            # No witness either way (Mail's composer never reports a selection,
+            # a web view goes quiet while another app is frontmost). Keeping the
+            # panel is safer than dismissing a review the user is still reading:
+            # Apply re-reads the selection and refuses if it really changed.
+            _debug_log("LIVE PANEL: selection unreadable; keeping the panel")
         self._arm_detach_timer()
         return True
+
+    def _selection_still_matches(self) -> bool | None:
+        """Whether the captured selection is still there: True/False/None.
+
+        None means "no evidence either way" and is not treated as a change.
+        Word is read through AppleScript, a clipboard-captured selection (Mail,
+        Pages) through the app's own Copy command, and everything else through
+        Accessibility - falling back to a copy when AX answers nothing, which
+        is what web views do while another app is frontmost.
+        """
+        if self._selection_is_word:
+            state = self._read_selection_state()
+            if state is None or not state[0]:
+                return None
+            return self._same_selection(state[0])
+        bundle = str(self._selection_target.get("bundle_id", "")).lower()
+        clipboard_only = (not self._selection_has_range) or (
+            bundle in CLIPBOARD_FALLBACK_BUNDLE_IDS
+        )
+        if not clipboard_only:
+            state = self._read_selection_state()
+            if state is not None and state[0]:
+                return self._same_selection(state[0])
+        copied = self._read_selection_by_copy(attempts=1)
+        if not copied:
+            return None
+        return self._same_selection(copied)
+
+    def _same_selection(self, text: str) -> bool:
+        return text.strip() == (self._selection_text or "").strip()
 
     def _target_still_running(self) -> bool:
         pid = self._selection_target.get("pid")
@@ -1269,12 +1327,17 @@ class LivePreviewService(QObject):
         except Exception:
             return ""
 
-    def _sync_after_apply(self, expected: str) -> bool:
+    def _sync_after_apply(self, expected: str, tolerant: bool = False) -> bool:
         """After an apply, keep state only when the selection still covers
-        exactly the expected post-edit text (offsets stay valid then)."""
+        exactly the expected post-edit text (offsets stay valid then).
+
+        ``tolerant`` keeps the panel when the app cannot report the selection at
+        all (Mail's composer never does): unreadable is not the same as wrong,
+        and the writes that remain are still guarded by their own text.
+        """
         state = self._read_selection_state()
-        if state is None:
-            return False
+        if state is None or not state[0]:
+            return tolerant
         text, start, end = state
         if text != expected:
             return False
@@ -1605,11 +1668,26 @@ class LivePreviewService(QObject):
                         expected_document=state.get("document") or None,
                     )
                 else:
-                    # before_text makes the undo refuse when the document has
+                    # The recorded offset is a hint, not a fact: apps reflow,
+                    # normalise and re-render between the apply and the undo, so
+                    # the text that was written is located in the live field
+                    # first (field coordinates, like abs_start). before_text
+                    # then makes the undo refuse when the document really has
                     # moved on, instead of overwriting whatever now sits there.
+                    target_start = abs_start
+                    live = self._live_edit_text()
+                    if live:
+                        located = self._locate_span(live, applied, abs_start)
+                        if located is not None:
+                            target_start = located
+                        else:
+                            _debug_log(
+                                "LIVE UNDO: could not locate the applied text; "
+                                "trying the recorded offset"
+                            )
                     ok, _ = self._editor.ax_replace_range(
                         state.get("target") or {},
-                        abs_start,
+                        target_start,
                         len(applied),
                         original,
                         before_text=applied,
@@ -1832,6 +1910,41 @@ class LivePreviewService(QObject):
             return reader(self._selection_target) or ""
         except Exception:
             return ""
+
+    def _relocate_rel_start(self, before_text: str, rel_start: int) -> int | None:
+        """Where a span's text now sits, in selection-relative coordinates.
+
+        The live field text is in *field* coordinates while a span offset is
+        relative to the captured selection, so the expected field position is
+        the selection start plus the span offset - and the located position has
+        to be converted back, because the editor adds the selection start again
+        when it writes. Mixing the two spaces put an edit outside the selection
+        (caught by a regression test), which is also what made a browser undo
+        restore the wrong place.
+
+        Returns the offset unchanged when the field cannot be read, and None
+        when the text cannot be found inside the selection: writing outside it
+        is never what the user asked for.
+        """
+        live = self._live_edit_text()
+        if not live:
+            return rel_start
+        expected_abs = self._selection_start + rel_start
+        located_abs = self._locate_span(live, before_text, expected_abs)
+        if located_abs is None:
+            return None
+        if not (
+            self._selection_start
+            <= located_abs
+            <= self._selection_start + len(self._selection_text)
+        ):
+            _debug_log(
+                "LIVE RELOCATE: located the span outside the selection "
+                f"(abs={located_abs} selection={self._selection_start}.."
+                f"{self._selection_start + len(self._selection_text)})"
+            )
+            return None
+        return located_abs - self._selection_start
 
     def _locate_span(self, text: str, before: str, expected: int) -> int | None:
         """Find ``before`` in the live text, preferring the ``expected`` offset.
@@ -2117,7 +2230,7 @@ class LivePreviewService(QObject):
         rel_start = span.start
         live_text = self._live_edit_text()
         if live_text:
-            located = self._locate_span(live_text, before_text, rel_start)
+            located = self._relocate_rel_start(before_text, rel_start)
             if located is None:
                 _debug_log(
                     "LIVE APPLY ONE: could not locate the span "
@@ -2172,12 +2285,15 @@ class LivePreviewService(QObject):
         if not remaining:
             self._hide_panel()
             return
+        # Build the expectation from where the edit was actually written: the
+        # span may have been relocated in the live text, and an app can rewrite
+        # what it inserts, so span.start is not always the truth.
         expected = (
-            self._selection_text[: span.start]
+            self._selection_text[:rel_start]
             + span.after
-            + self._selection_text[span.end :]
+            + self._selection_text[rel_start + len(before_text) :]
         )
-        if not self._sync_after_apply(expected):
+        if not self._sync_after_apply(expected, tolerant=True):
             _debug_log("LIVE APPLY ONE: post-apply selection drifted; closing")
             self._hide_panel()
             return
@@ -2259,7 +2375,7 @@ class LivePreviewService(QObject):
             before_text = span.before or self._selection_text[span.start : span.end]
             rel_start, rel_end = span.start + delta, span.end + delta
             if live_text:
-                located = self._locate_span(live_text, before_text, rel_start)
+                located = self._relocate_rel_start(before_text, rel_start)
                 if located is None:
                     # Teams and friends rewrite what they insert, so after an
                     # earlier edit the arithmetic offset is only a hint. Not

@@ -325,6 +325,9 @@ def load_runtime_settings() -> dict[str, Any]:
         },
         "live_preview": {
             "enabled": True,
+            # Apps the user removed from the Live Check list; "Add App" can
+            # bring them back, so a delete never loses an app for good.
+            "hidden_apps": [],
             "delay_ms": 600,
             # Suggestions appear only for selections of at least this many
             # words, so a stray word or two never pings the model.

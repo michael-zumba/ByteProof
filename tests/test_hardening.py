@@ -1387,6 +1387,141 @@ def _mail_service(*, read_sequence, corrected_text, pasted):
     return service, pasted, reads
 
 
+def test_undo_locates_the_applied_text_before_restoring():
+    """Undo must restore where the text is now, not where it was written.
+
+    A browser reflows and re-renders between the apply and the undo, so the
+    offset recorded at apply time drifts; using it blindly restored the wrong
+    place, which is the mismatch reported after a browser apply.
+    """
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    # The document moved 2 characters to the right since the apply.
+    field = "XXThe cat sat on the mat."
+    calls: list[tuple[int, int, str, str]] = []
+
+    class Editor:
+        def field_value(self, target):
+            return field
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            calls.append((start, length, new, before_text or ""))
+            return True, "Applied."
+
+    service._editor = Editor()
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 5,
+        "name": "Safari",
+    }
+    service._selection_start = 0
+    service._selection_text = field
+    service._undo_state = {
+        "mode": "range",
+        "target": dict(service._selection_target),
+        "is_word": False,
+        "steps": [(0, "The", "teh")],  # written at 0 before the document moved
+    }
+
+    service._perform_undo()
+
+    assert calls == [(2, 3, "teh", "The")]
+    service.stop()
+
+
+def test_mail_panel_survives_an_unreadable_selection(monkeypatch):
+    """The reported Mail failure: the panel dismissed itself after the preview.
+
+    Mail's compose text never reports a selection through Accessibility, so the
+    keep-alive read came back empty, was read as "the selection changed", and
+    the suggestions vanished about a second after they appeared. An unreadable
+    read is not evidence of a change.
+    """
+    service, _pasted, reads = _mail_service(
+        read_sequence=[""],  # nothing readable by copy either
+        corrected_text="",
+        pasted=[],
+    )
+    service._pending = service._pending  # suggestions are on screen
+    service._detach_checked_at = 0.0
+
+    kept = service._keep_panel_for_detached_target(
+        {"bundle_id": "com.apple.mail", "pid": 9, "name": "Mail"}
+    )
+
+    assert kept is True
+    assert reads["n"] >= 1  # it did look, rather than assuming
+    service.stop()
+
+
+def test_mail_panel_is_dismissed_when_the_selection_really_changed(monkeypatch):
+    service, _pasted, _reads = _mail_service(
+        read_sequence=["a completely different selection"],
+        corrected_text="",
+        pasted=[],
+    )
+    service._detach_checked_at = 0.0
+
+    kept = service._keep_panel_for_detached_target(
+        {"bundle_id": "com.apple.mail", "pid": 9, "name": "Mail"}
+    )
+
+    assert kept is False
+    service.stop()
+
+
+def test_mail_panel_survives_when_the_text_is_unchanged(monkeypatch):
+    service, _pasted, _reads = _mail_service(
+        read_sequence=["Everything else stays where it belongs: "],
+        corrected_text="",
+        pasted=[],
+    )
+    service._detach_checked_at = 0.0
+
+    kept = service._keep_panel_for_detached_target(
+        {"bundle_id": "com.apple.mail", "pid": 9, "name": "Mail"}
+    )
+
+    assert kept is True
+    service.stop()
+
+
+def test_a_second_window_of_the_same_app_is_not_a_switch():
+    """Mail's composer and viewer are separate processes of one app."""
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service._selection_target = {
+        "bundle_id": "com.apple.mail",
+        "pid": 4516,
+        "name": "Mail",
+    }
+    # Another Mail window, different pid: still Mail.
+    assert not service._selection_target_changed(
+        {"bundle_id": "com.apple.mail", "pid": 55355, "name": "Mail"}
+    )
+    # ByteProof's own panel taking focus is not a switch either.
+    assert not service._selection_target_changed(
+        {"bundle_id": "nz.bytemind.byteproof", "pid": 1, "name": "ByteProof"}
+    )
+    # A real switch is.
+    assert service._selection_target_changed(
+        {"bundle_id": "com.apple.Safari", "pid": 77, "name": "Safari"}
+    )
+
+
 def test_mail_apply_retries_a_flaky_clipboard_read(monkeypatch):
     """Mail ignores a process-targeted copy now and then; do not give up."""
     monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
@@ -1987,6 +2122,259 @@ def test_live_check_add_app_uses_the_installed_app_picker() -> None:
     rules = dialog.get_settings()["live_preview"]["app_rules"]
     assert rules["com.example.editor"] is True
     _dispose(dialog, owner, app)
+
+
+def test_single_apply_keeps_the_rest_when_the_selection_is_unreadable():
+    """A web view that goes quiet after the write must not end the review.
+
+    Browsers stop reporting the selection through Accessibility while another
+    app is frontmost, which is the state right after clicking the panel. The
+    post-apply check treated that as "the selection changed" and closed the
+    panel with the remaining suggestions discarded.
+    """
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    applied: list[tuple[int, int, str]] = []
+    selection = "teh cat sat"
+
+    class BrowserEditor:
+        def selection_details(self, target):
+            if applied:
+                # Quiet after the write, exactly like a web view in the
+                # background: no text, no range.
+                return {
+                    "text": "",
+                    "range": None,
+                    "context_before": "",
+                    "context_after": "",
+                }
+            return {
+                "text": selection,
+                "range": (0, len(selection)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return ""
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            applied.append((start, length, new))
+            return True, "Applied."
+
+    service._editor = BrowserEditor()
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 4,
+        "name": "Safari",
+    }
+    service._selection_start = 0
+    service._selection_text = selection
+    service._seen_text = selection
+    service._selection_has_range = True
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("cat", "dog", "Word choice", 4, 7),
+    ]
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_one(0)
+
+    assert applied == [(0, 3, "the")]
+    assert messages and messages[0] == "Applied."
+    # The second suggestion is still on screen, re-based by the edit.
+    assert [span.before for span in service._pending] == ["cat"]
+    service.stop()
+
+
+def test_apply_then_undo_restores_the_browser_text_exactly():
+    """The reported mismatch: after a browser apply, Undo left the text altered.
+
+    The apply and the undo are simulated against one mutable field, with the
+    same before-text guard a real app enforces, so the text is compared
+    character for character after each step.
+    """
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    field = "Intro text. teh cat sat on teh mat. Outro text."
+    start = field.index("teh cat")
+    selection = field[start : start + 22]  # "teh cat sat on teh ma"
+    assert selection.count("teh") == 2
+
+    state = {"text": field}
+
+    class Editor:
+        def selection_details(self, target):
+            return {
+                "text": selection,
+                "range": (start, start + len(selection)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return state["text"]
+
+        def ax_replace_range(
+            self,
+            target,
+            start_abs,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            current = state["text"]
+            if before_text is not None and (
+                current[start_abs : start_abs + length] != before_text
+            ):
+                return False, "range no longer holds the original text"
+            state["text"] = current[:start_abs] + new + current[start_abs + length :]
+            return True, "Applied."
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+    service._editor = Editor()
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 3,
+        "name": "Safari",
+    }
+    service._selection_start = start
+    service._selection_text = selection
+    service._seen_text = selection
+    service._selection_has_range = True
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("teh", "the", "Spelling", 15, 18),
+    ]
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    applied = selection.replace("teh", "the")
+    assert state["text"] == field[:start] + applied + field[start + len(selection) :]
+    assert messages == ["Applied 2 suggestions."]
+    assert service._undo_state is not None
+
+    service._perform_undo()
+
+    assert state["text"] == field, "undo must restore the selection exactly"
+    service.stop()
+
+
+def _live_row_for(dialog, marker: str):
+    from PyQt6.QtCore import Qt
+
+    for index in range(dialog.live_apps_list.count()):
+        item = dialog.live_apps_list.item(index)
+        if item.data(Qt.ItemDataRole.UserRole) == marker:
+            return item
+    return None
+
+
+def test_live_check_unchecking_an_app_persists_and_takes_effect() -> None:
+    """The switch in the list must reach the settings and the trigger."""
+    from PyQt6.QtWidgets import QCheckBox
+
+    from src.live_preview import app_allowed
+
+    if platform.system() != "Darwin":
+        pytest.skip("Live Check controls are macOS-only")
+    app, owner, dialog = _make_settings_dialog()
+    item = _live_row_for(dialog, "com.apple.mail")
+    assert item is not None and item.checkState().value == 2  # checked by default
+    widget = dialog.live_apps_list.itemWidget(item)
+    checkbox = widget.findChild(QCheckBox)
+    assert checkbox is not None and checkbox.isChecked()
+
+    # Click it off the way a user does, through the row's own checkbox.
+    checkbox.setChecked(False)
+
+    assert item.checkState().value == 0
+    live = dialog.get_settings()["live_preview"]
+    assert live["app_rules"]["com.apple.mail"] is False
+    mail = {"bundle_id": "com.apple.mail", "name": "Mail"}
+    assert app_allowed({"app_rules": live["app_rules"]}, mail) is False
+    # Everything else still runs.
+    assert (
+        app_allowed(
+            {"app_rules": live["app_rules"]},
+            {"bundle_id": "com.apple.Safari", "name": "Safari"},
+        )
+        is True
+    )
+
+    # Switching it back on is symmetric.
+    checkbox.setChecked(True)
+    assert dialog.get_settings()["live_preview"]["app_rules"]["com.apple.mail"] is True
+    _dispose(dialog, owner, app)
+
+
+def test_live_check_app_can_be_deleted_and_added_back() -> None:
+    """Delete takes a row out of the list; Add App brings it back."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QToolButton
+
+    from src.gui import SettingsDialog
+
+    if platform.system() != "Darwin":
+        pytest.skip("Live Check controls are macOS-only")
+    app, owner, dialog = _make_settings_dialog()
+    bundle = "com.apple.mail"
+    item = _live_row_for(dialog, bundle)
+    assert item is not None
+    before = dialog.live_apps_list.count()
+
+    remove = dialog.live_apps_list.itemWidget(item).findChild(QToolButton)
+    assert remove is not None and remove.text() == "✕"
+    remove.click()  # exactly what the user presses
+
+    markers = [
+        dialog.live_apps_list.item(i).data(Qt.ItemDataRole.UserRole)
+        for i in range(dialog.live_apps_list.count())
+    ]
+    assert dialog.live_apps_list.count() == before - 1
+    assert bundle not in markers
+    live = dialog.get_settings()["live_preview"]
+    assert bundle in live["hidden_apps"]
+    assert bundle not in live["app_rules"]
+
+    # Reopening from those settings keeps it deleted.
+    reopened = SettingsDialog(dialog.get_settings(), owner)
+    assert _live_row_for(reopened, bundle) is None
+
+    # Add App puts the app back, and it is no longer marked as deleted.
+    reopened.choose_installed_app = lambda existing=None: {
+        "bundle_id": bundle,
+        "name": "Mail",
+    }  # type: ignore[assignment]
+    reopened._add_live_app()
+    assert _live_row_for(reopened, bundle) is not None
+    assert (
+        bundle not in reopened.get_settings()["live_preview"]["hidden_apps"]
+    )
+
+    _dispose(reopened, owner, app)
+    dialog.deleteLater()
 
 
 def test_live_check_app_rows_show_icons_when_installed() -> None:

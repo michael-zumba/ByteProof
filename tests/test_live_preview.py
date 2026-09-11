@@ -809,6 +809,7 @@ def test_load_runtime_settings_includes_live_preview_defaults(monkeypatch, tmp_p
         "max_chars": 1500,
         "min_words": 3,
         "app_rules": {},
+        "hidden_apps": [],
         "use_local_model": True,
         "style": "strict",
     }
@@ -1309,6 +1310,118 @@ def test_service_apply_all_reports_partial_failure(monkeypatch):
     ]
     assert [span.before for span in service._pending] == ["teh"]
     assert service._undo_state is not None  # the edit that landed is undoable
+
+
+def _selection_offset_service(field: str, start: int, selection: str, spans):
+    """A service whose selection begins part-way into the field's text."""
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    writes: list[tuple[int, int, str, str]] = []
+
+    class Editor:
+        def selection_details(self, target):
+            return {
+                "text": selection,
+                "range": (start, start + len(selection)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return field
+
+        def ax_replace_range(
+            self,
+            target,
+            start_abs,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            writes.append((start_abs, length, new, before_text or ""))
+            return True, "Applied."
+
+    service._editor = Editor()
+    service._selection_target = {
+        "bundle_id": "com.apple.Safari",
+        "pid": 1,
+        "name": "Safari",
+    }
+    service._selection_start = start
+    service._selection_text = selection
+    service._seen_text = selection
+    service._selection_has_range = True
+    service._pending = list(spans)
+    return service, writes
+
+
+def test_relocated_edit_lands_inside_the_selection_not_the_field():
+    """Field offsets and selection offsets are different spaces.
+
+    The relocation search reads the whole field, but a span offset is relative
+    to the captured selection and the editor adds the selection start when it
+    writes. Mixing them wrote *outside* the selection (offset 75 instead of 38
+    in the case that caught this), and the undo then restored the wrong place.
+    """
+    from src.live_preview import EditSpan
+
+    field = "Intro paragraph that nobody selected. teh cat sat on the mat. End."
+    start = field.index(" teh cat")
+    selection = field[start : start + 22]
+    assert selection.index("teh") == 1
+
+    service, writes = _selection_offset_service(
+        field, start, selection, [EditSpan("teh", "the", "Spelling", 1, 4)]
+    )
+    service._apply_all()
+
+    assert writes == [(start + 1, 3, "the", "teh")]
+    service.stop()
+
+
+def test_edit_outside_the_selection_is_refused():
+    """A span that cannot be found inside the selection is never written."""
+    from src.live_preview import EditSpan
+
+    field = "Intro paragraph that nobody selected. teh cat sat on the mat. End."
+    start = field.index(" teh cat")
+    selection = field[start : start + 22]
+
+    service, writes = _selection_offset_service(
+        field, start, selection, [EditSpan("nobody", "somebody", "Word choice", 0, 6)]
+    )
+    service._apply_all()
+
+    assert writes == []
+    service.stop()
+
+
+def test_app_switch_is_not_shadowed_by_a_stale_name_rule():
+    """Unchecking an app must win over an older name-based rule.
+
+    Rules are matched in dict order and the first match used to win, so a stale
+    key such as "mail" left over from an earlier build could answer "enabled"
+    before the app's own "com.apple.mail": false was ever consulted, and the
+    switch in Live Check appeared to do nothing.
+    """
+    from src.live_preview import app_allowed
+
+    mail = {"bundle_id": "com.apple.mail", "name": "Mail"}
+    stale_first = {
+        "mail": True,               # written by an older build
+        "com.apple.mail": False,    # the user's switch
+    }
+    assert app_allowed({"app_rules": stale_first}, mail) is False
+    assert app_allowed({"app_rules": {"mail": False, "*": True}}, mail) is False
+    # A name rule still applies when the app has no rule of its own.
+    assert app_allowed({"app_rules": {"notes": False}}, {"name": "Notes"}) is False
+    # Case is irrelevant on both sides.
+    assert (
+        app_allowed({"app_rules": {"COM.APPLE.MAIL": False}}, mail) is False
+    )
 
 
 def test_apply_all_relocates_edits_when_the_app_moves_the_text(monkeypatch):
