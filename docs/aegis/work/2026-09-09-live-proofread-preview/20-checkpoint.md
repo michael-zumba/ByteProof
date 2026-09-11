@@ -705,3 +705,33 @@ length change. The scan stays covered as the fallback path. 309 tests pass.
 
 The Windows path used COM `Range.Revisions` (already O(revisions)) and now uses
 the same binary search, where each probe is an in-process call.
+
+## Released (2.1.0) — 2026-09-11
+
+Owner instructed the official release, named 2.1 (three parts are required by
+`scripts/check_version.py`, so the shipped version is `2.1.0`). It carries the
+three fixes from this session:
+
+- Live Check applies every suggestion it can place (Teams stopped at the first
+  miss and dropped the rest).
+- Word with tracked changes is fast again: a five-suggestion apply went from 40
+  seconds to the region of a second, and a busy Word can stall a poll at most
+  1.5s instead of 3s.
+- The in-app updater downloads again (GitHub's release-asset host).
+
+Artifacts: Apple Silicon DMG (34,402,497 B, sha256 `5f3a4bba…`), Intel DMG
+(35,562,591 B, sha256 `ee0306fa…`), Windows zip (48,792,831 B, sha256
+`89241293…`) and the Store MSIX, all attached to the published release
+`v2.1.0` ("ByteProof 2.1").
+
+Two process notes worth keeping:
+
+1. `tools/bump_version.py` carried the previous release's `sha256` map into the
+   new feed, which would have made every 2.1.0 download fail its integrity
+   check. The tool now empties the map on a bump and the checksums are filled
+   in from the built artifacts (done here by hand, in the same commit as the
+   feed). Verified end to end afterwards: the app's own `download_update()`
+   fetched the published DMG from the live feed and the published SHA-256
+   matched.
+2. `tools/` is gitignored (it holds the signing key), so that tool fix is local
+   only - it cannot regress the repository, but it also is not reviewed by CI.
