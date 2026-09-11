@@ -662,3 +662,46 @@ Fixes:
   (48,784,576 B, sha256 `30b592a1…`) and the Store MSIX.
 - Feed `https://www.bytemind.co.nz/byteproof-version.json` serves 2.0.2 with a
   `sha256` map; all three download URLs answer.
+
+## Checkpoint (2.0.3-beta.3) — Word with tracked changes: 40s apply → sub-second
+
+Owner report: Word lagged badly and the app froze, worst when the selected text
+contained tracked changes.
+
+`capture.log` gave the shape of it: a five-suggestion Apply All started at
+14:04:11 and the first result only appeared at 14:04:51 - 40 seconds - and an
+earlier four-suggestion batch took 15 seconds. The poll also logged repeated
+`WORD: AppleScript timed out after 3s; Word is probably showing a dialog`.
+
+Cause: the visible→document position mapping. Word counts tracked deletions and
+field codes in document positions but omits them from `content`, so an offset in
+the previewed text has to be translated before a range can be written.
+`get_selection_hidden_spans` did that by scanning the selection **one character
+at a time** in AppleScript (`create range` → read `content`, per character), and
+`_word_compensated_span` re-read the selection and re-ran that scan **for every
+span**. A 700-character selection with five suggestions therefore meant roughly
+3,500 Word operations, each one forcing Word to re-resolve its revisions.
+
+Fix:
+
+- `live_doc_positions()` finds each position by binary search on the only
+  monotone quantity Word exposes - the length of the visible content from the
+  selection start, which grows by one per visible character and not at all
+  across hidden ones. That is ~10 reads per offset instead of one per character.
+- A batch shares one selection read and one mapping call, and every applied edit
+  shifts the map by its own length change (the inserted text carries no hidden
+  characters, so the arithmetic is exact).
+- The mapping call is bounded at 5s, and when it fails the offsets are left raw
+  rather than falling back to the character scan - on a busy Word that fallback
+  is hundreds of timed-out reads, which is the freeze being removed. Word's own
+  before-text guard then refuses a write it cannot place, so accuracy is kept.
+- The poll read is bounded at 1.5s instead of 3s: a Word showing a modal dialog
+  used to stall the UI thread for three seconds per tick before backing off.
+
+Evidence: `tests/test_live_preview.py::test_word_batch_maps_positions_once_for_every_suggestion`
+asserts one mapping call and zero character scans for a two-suggestion batch,
+and that the second span is written at the position shifted by the first edit's
+length change. The scan stays covered as the fallback path. 309 tests pass.
+
+The Windows path used COM `Range.Revisions` (already O(revisions)) and now uses
+the same binary search, where each probe is an in-process call.
