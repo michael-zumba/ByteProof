@@ -23,6 +23,11 @@ APPLESCRIPT_READ_TIMEOUT_S = 10.0
 # tick was long enough to feel like the app had frozen.
 WORD_POLL_READ_TIMEOUT_S = 1.5
 
+# Mapping visible offsets to document positions is about ten in-process reads
+# per offset, so a healthy Word answers in well under a second. The bound keeps
+# a busy Word from blocking the UI thread while the apply waits.
+WORD_MAP_TIMEOUT_S = 5.0
+
 # How many characters of a field's visible result the macOS fallback scan may
 # read before giving up. A page of text is roughly 3,000-3,500 characters, so
 # 4,000 covers any realistic citation/field result while keeping the scan
@@ -1252,7 +1257,7 @@ class MacOSWordIntegration(WordIntegration):
         """
         args = [str(sel_start), str(sel_end)] + [str(offset) for offset in wanted]
         try:
-            raw = self._run_applescript(script, *args)
+            raw = self._run_applescript(script, *args, timeout=WORD_MAP_TIMEOUT_S)
         except Exception as exc:
             _log_word(f"Error mapping Word selection positions: {exc}")
             return None

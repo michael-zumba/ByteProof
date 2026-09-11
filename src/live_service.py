@@ -2061,10 +2061,15 @@ class LivePreviewService(QObject):
             int(sel_start), int(sel_end), [visible_start, visible_start + length]
         )
         if not mapping:
+            # The mapper exists but could not answer (Word busy, AppleScript
+            # error). Do NOT fall back to the character scan here: on a busy
+            # Word that is hundreds of timed-out reads. Returning None leaves
+            # the raw offsets, and Word's own before-text guard then refuses
+            # the write rather than editing the wrong words.
             _debug_log(
-                "WORD: position mapping unavailable; falling back to the scan"
+                "WORD: position mapping failed; leaving the offsets raw"
             )
-            return self._word_compensated_span_scan(word, visible_start, length)
+            return None
         start = mapping.get(visible_start)
         end = mapping.get(visible_start + length)
         if start is None or end is None or end <= start:
