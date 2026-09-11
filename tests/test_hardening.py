@@ -106,12 +106,23 @@ def test_update_url_allowlist() -> None:
     )
     assert _is_allowed_url("https://www.bytemind.co.nz/byteproof-version.json")
     assert _is_allowed_url("https://objects.githubusercontent.com/asset/1")
+    # GitHub moved release downloads to this host, and a download follows the
+    # redirect, so refusing it made the app reject its own installer with
+    # "refused redirect to untrusted URL" (seen live on 2026-09-11).
+    assert _is_allowed_url(
+        "https://release-assets.githubusercontent.com/github-production-"
+        "release-asset/1328502799/5bc3542b?sp=r&sig=abc"
+    )
+    assert _is_allowed_url("https://github-releases.githubusercontent.com/1/2")
     # Plain http is refused even on a trusted host.
     assert not _is_allowed_url("http://github.com/x/y.dmg")
+    assert not _is_allowed_url("http://release-assets.githubusercontent.com/x.dmg")
     # Lookalike hosts must not pass.
     assert not _is_allowed_url("https://github.com.evil.example/x.dmg")
     assert not _is_allowed_url("https://evil.example/github.com")
     assert not _is_allowed_url("https://notgithub.com/x.dmg")
+    assert not _is_allowed_url("https://githubusercontent.com.evil.example/x.dmg")
+    assert not _is_allowed_url("https://evilgithubusercontent.com/x.dmg")
     assert not _is_allowed_url("file:///tmp/ByteProof.dmg")
     assert not _is_allowed_url("")
 

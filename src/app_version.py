@@ -38,6 +38,15 @@ ALLOWED_UPDATE_HOSTS = frozenset(
     }
 )
 
+# GitHub downloads release assets through a CDN whose hostname has already
+# changed once - objects.githubusercontent.com became
+# release-assets.githubusercontent.com - and a download follows that redirect,
+# so pinning only the old name made the app refuse its own installers
+# ("refused redirect to untrusted URL"). Every githubusercontent.com host is
+# GitHub-owned, so the whole family is trusted while the exact hosts above stay
+# for everything else. The feed URL itself must still be https and exact.
+ALLOWED_UPDATE_HOST_SUFFIXES = (".githubusercontent.com",)
+
 # Pre-release stage ordering: a release outranks every pre-release, and within
 # pre-releases rc > beta > alpha > dev.
 _STAGE_RANKS = {"dev": 0, "a": 1, "alpha": 1, "b": 2, "beta": 2, "rc": 3}
@@ -150,7 +159,9 @@ def _is_allowed_url(url: str) -> bool:
     if parsed.scheme != "https":
         return False
     host = (parsed.hostname or "").lower()
-    return host in ALLOWED_UPDATE_HOSTS
+    if host in ALLOWED_UPDATE_HOSTS:
+        return True
+    return any(host.endswith(suffix) for suffix in ALLOWED_UPDATE_HOST_SUFFIXES)
 
 
 def _artifact_key(version_info: dict[str, Any]) -> str:
