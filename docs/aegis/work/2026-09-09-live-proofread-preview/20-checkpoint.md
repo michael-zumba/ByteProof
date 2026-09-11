@@ -735,3 +735,58 @@ Two process notes worth keeping:
    matched.
 2. `tools/` is gitignored (it holds the signing key), so that tool fix is local
    only - it cannot regress the repository, but it also is not reviewed by CI.
+
+## Checkpoint (2.1.1-beta) — Live Check list rebuilt, Undo content-addressed
+
+Owner report: the Live Check page was "in a mass", Mail did nothing, and Undo
+was not reliable.
+
+### The list was drawn twice
+
+Measured offscreen before the fix: `item rect = 437x32 at x=4` but
+`row widget = 399x32 at x=60`. Qt lays an item widget out inside the item's
+*decoration* area, so with the item's own text, icon and checkbox still set,
+the delegate painted them **underneath** the row widget: doubled names, a
+second checkbox, every row indented by 54px and running 18px past the item's
+right edge. That is the "mass".
+
+The list is now:
+
+* `LiveAppsList`, a `QListWidget` whose `resizeEvent` re-applies each item's
+  size hint, so a row spans the viewport however the width changes (window
+  resize, resize while another settings page is showing, add, delete, fold);
+* `BlankRowDelegate`, which paints nothing - the row widget is the whole
+  visual, so nothing can be drawn twice;
+* data-only items (marker, name, on/off in item roles) so the delegate has
+  nothing to draw even by accident;
+* one row widget per app: checkbox, 22px icon, name (elided past 48 chars, full
+  name in the tooltip), and a ✕ delete button with a hover state.
+
+Verified numerically rather than by eye: every row widget's geometry now equals
+its item rect (437x34 at x=0) in all five width-change scenarios above, and a
+regression test asserts it. The header is one line - "Apps that trigger it" ⓘ
+with the Show/Hide control beside it - instead of a label with a large button
+on its own row.
+
+### Undo trusted an offset
+
+`capture.log` showed only `LIVE UNDO: the applied text is no longer where it
+was written` - the recorded offset had drifted (apps reflow and normalise what
+they insert), the fallback offset was then stale, and the undo either refused
+or restored the wrong place.
+
+Each apply now also records the text *around* the edit (`UndoStep.needle`, 32
+characters each side, with the offset inside it). Undo searches for that block
+first - it moves with the edit wherever the app put it - and only then falls
+back to a nearby offset (64 characters), and otherwise refuses honestly instead
+of guessing. Every attempt and outcome is logged; the pill is offered for 30s
+instead of 10s. Covered by tests: a document that moves 500 characters between
+the apply and the undo still restores exactly, and text that is simply gone is
+left alone.
+
+### The owner's log was polluted by the test suite
+
+The tests exercise the live service, which writes diagnostics to `capture.log`
+in the real support folder - the same file the owner reads to report a problem.
+`conftest.py` now points every support-directory lookup at a temporary folder;
+a full run adds no lines to the real log (verified by line count).
