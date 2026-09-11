@@ -15,6 +15,7 @@ selection). The current model is deliberately simpler and non-invasive:
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from PyQt6.QtCore import QObject, QPoint, QRect, QThread, QTimer, pyqtSignal
@@ -298,6 +299,12 @@ class LivePreviewService(QObject):
         self._selection_is_word = False
         self._word_document = ""
         self._word_busy_until = 0.0
+        # Word position mapping for the batch being applied: prepared once,
+        # then shifted by each edit instead of re-scanned per suggestion.
+        self._word_prepared = False
+        self._word_identity = False
+        self._word_map: dict[int, int] = {}
+        self._word_doc_delta = 0
         self._retry_not_before: float | None = None
         self._fail_streak = 0
         self._last_now = 0.0
@@ -1865,12 +1872,17 @@ class LivePreviewService(QObject):
         length: int,
         replacement: str,
         before_text: str | None = None,
+        visible_start: int | None = None,
     ) -> tuple[bool, str, int]:
         """Replace a relative span; returns (ok, message, absolute start).
 
         ``before_text`` is the original text expected at the span; the
         editor uses it to guard against apps whose AX state lags behind the
         real document (e.g. ChatGPT applies range writes asynchronously).
+
+        ``visible_start`` is the span's offset in the *previewed* text. Word
+        needs it because earlier edits shift the running offset while the
+        prepared position map is keyed by the original offsets.
         """
         if self._selection_is_word:
             from .word_integration import get_word_integration
@@ -1879,7 +1891,11 @@ class LivePreviewService(QObject):
             word = get_word_integration()
             start = self._selection_start + rel_start
             end = start + length
-            compensated = self._word_compensated_span(word, rel_start, length)
+            compensated = self._word_compensated_span(
+                word,
+                rel_start if visible_start is None else visible_start,
+                len(before_text) if before_text else length,
+            )
             if compensated is not None:
                 start, end = compensated
             if not self._word_document:
@@ -1894,6 +1910,10 @@ class LivePreviewService(QObject):
                 before_text=before_text,
                 expected_document=self._word_document or None,
             )
+            if ok:
+                # Everything after a replaced range moves by its length change,
+                # including the tracked deletions still hidden in the document.
+                self._word_doc_delta += len(replacement) - (end - start)
             return ok, message, start
         self._note_foreign_frontmost()
         abs_start = self._selection_start + rel_start
@@ -1909,17 +1929,63 @@ class LivePreviewService(QObject):
         )
         return ok, message, abs_start
 
-    def _word_compensated_span(
-        self, word: Any, rel_start: int, length: int
-    ) -> tuple[int, int] | None:
-        """Map a visible-text span to absolute Word positions.
+    def _prepare_word_batch(self, spans: Sequence[Any]) -> None:
+        """Resolve every span's Word document range before the first write.
 
-        Word counts tracked deletions and field codes in document positions
-        but omits them from ``content``, so edits after them would land in
-        the wrong place. This re-reads the live state (previous applies in
-        an Apply-all shift these spans), then compensates when evidence of
-        hidden characters exists; otherwise it returns None and the raw
-        offsets are used.
+        Word counts tracked deletions and field codes in document positions but
+        omits them from ``content``, so visible offsets must be mapped. Doing
+        that per span used to re-read the selection and re-scan the whole
+        selection character by character for every suggestion - seconds each on
+        a tracked-changes document, which is what froze the app. One selection
+        read plus one mapping call now covers the whole batch, and each applied
+        edit only shifts the mapping by its own length change.
+        """
+        self._word_prepared = False
+        self._word_identity = False
+        self._word_map = {}
+        self._word_doc_delta = 0
+        if not self._selection_is_word or not spans:
+            return
+        state = self._read_selection_state()
+        if state is None:
+            return
+        text, sel_start, sel_end = state
+        if sel_end - sel_start <= len(text):
+            # Nothing hidden in the selection: visible offsets are document
+            # offsets and no mapping work is needed at all.
+            self._word_prepared = True
+            self._word_identity = True
+            return
+        offsets = {
+            offset
+            for span in spans
+            for offset in (span.start, span.end)
+        }
+        mapper = getattr(self._word_editor(), "live_doc_positions", None)
+        if not callable(mapper):
+            return
+        mapping = mapper(int(sel_start), int(sel_end), sorted(offsets))
+        if not mapping:
+            return
+        self._word_map = {int(k): int(v) for k, v in mapping.items()}
+        self._word_prepared = True
+
+    def _word_editor(self) -> Any:
+        from .word_integration import get_word_integration
+
+        return get_word_integration()
+
+    def _word_compensated_span_scan(
+        self, word: Any, visible_start: int, length: int
+    ) -> tuple[int, int] | None:
+        """Slow, exhaustive mapping kept as the fallback.
+
+        This is the original path: read the selection, list every field, then
+        locate each hidden character one range at a time. Correct, but on a
+        tracked-changes selection it costs one Word read per character - the
+        reason a single suggestion could take seconds. It only runs now when
+        the binary-search mapping is unavailable (an integration that predates
+        it, or an AppleScript error).
         """
         state = self._read_selection_state()
         if state is None:
@@ -1955,16 +2021,55 @@ class LivePreviewService(QObject):
                 return None
         try:
             start = word_visible_to_doc(
-                rel_start, sel_start, sel_end, hidden, fields
+                visible_start, sel_start, sel_end, hidden, fields
             )
             end = word_visible_to_doc(
-                rel_start + length, sel_start, sel_end, hidden, fields
+                visible_start + length, sel_start, sel_end, hidden, fields
             )
         except Exception:
             return None
         if start is None or end is None or end <= start:
             return None
         return start, end
+
+    def _word_compensated_span(
+        self, word: Any, visible_start: int, length: int
+    ) -> tuple[int, int] | None:
+        """Map a visible-text span to absolute Word positions.
+
+        Returns None when the raw offsets are already correct (nothing hidden,
+        or no mapping available) so the caller keeps its normal path.
+        """
+        if self._word_prepared:
+            if self._word_identity:
+                return None
+            start = self._word_map.get(visible_start)
+            end = self._word_map.get(visible_start + length)
+            if start is None or end is None or end <= start:
+                return None
+            return start + self._word_doc_delta, end + self._word_doc_delta
+        mapper = getattr(word, "live_doc_positions", None)
+        if not callable(mapper):
+            return self._word_compensated_span_scan(word, visible_start, length)
+        state = self._read_selection_state()
+        if state is None:
+            return None
+        text, sel_start, sel_end = state
+        if sel_end - sel_start <= len(text):
+            return None
+        mapping = mapper(
+            int(sel_start), int(sel_end), [visible_start, visible_start + length]
+        )
+        if not mapping:
+            _debug_log(
+                "WORD: position mapping unavailable; falling back to the scan"
+            )
+            return self._word_compensated_span_scan(word, visible_start, length)
+        start = mapping.get(visible_start)
+        end = mapping.get(visible_start + length)
+        if start is None or end is None or end <= start:
+            return None
+        return int(start), int(end)
 
     def _apply_one(self, index: int) -> None:
         if not (0 <= index < len(self._pending)):
@@ -2003,6 +2108,7 @@ class LivePreviewService(QObject):
             return
         span = self._pending[index]
         before_text = span.before or self._selection_text[span.start : span.end]
+        self._prepare_word_batch([span])
         rel_start = span.start
         live_text = self._live_edit_text()
         if live_text:
@@ -2023,6 +2129,7 @@ class LivePreviewService(QObject):
             len(before_text),
             span.after,
             before_text=before_text,
+            visible_start=span.start,
         )
         _debug_log(
             f"LIVE APPLY ONE RESULT: ok={ok} message={message!r} "
@@ -2134,6 +2241,9 @@ class LivePreviewService(QObject):
                 return
         total = len(self._pending)
         batch = list(self._pending)
+        # One selection read and one position map for the whole batch; the
+        # per-suggestion rescan is what made Word with tracked changes crawl.
+        self._prepare_word_batch(batch)
         applied = 0
         delta = 0
         failure_message = ""
@@ -2165,6 +2275,7 @@ class LivePreviewService(QObject):
                 rel_end - rel_start,
                 span.after,
                 before_text=before_text,
+                visible_start=span.start,
             )
             if not ok:
                 # Keep going: the previous behaviour stopped here and left the

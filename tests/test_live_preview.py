@@ -1613,6 +1613,120 @@ def test_preview_worker_cancel_event_aborts_and_signals(monkeypatch):
     assert captured["cancel_event"] is cancel
 
 
+def test_word_batch_maps_positions_once_for_every_suggestion(monkeypatch):
+    """Tracked changes must not be rescanned once per suggestion.
+
+    The old path read the selection and rescanned the selection character by
+    character for every span, which took seconds per suggestion on a document
+    with tracked changes and froze the app. One selection read and one mapping
+    call now cover the batch, and each applied edit shifts the map by its own
+    length change.
+    """
+    from src import word_integration as wi
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    class FakeWord:
+        def __init__(self):
+            self.text = "teh cat sat on teh mat"
+            self.start = 100
+            self.end = 125
+            self.calls = {"selection_info": 0, "map": 0, "scan": 0, "applied": []}
+
+        def get_selection_info(self):
+            self.calls["selection_info"] += 1
+            return self.text, self.start, self.end, "", ""
+
+        def live_doc_positions(self, sel_start, sel_end, offsets):
+            self.calls["map"] += 1
+            # Three tracked deletions sit at document 104..107, so every
+            # visible offset past them is three positions further along.
+            return {
+                offset: sel_start + offset + (3 if offset >= 4 else 0)
+                for offset in offsets
+            }
+
+        def get_selection_hidden_spans(self, *args, **kwargs):
+            self.calls["scan"] += 1
+            return []
+
+        def selection_has_fields(self):
+            return False
+
+        def get_selection_field_spans(self):
+            return []
+
+        def apply_live_edit(
+            self,
+            selection_start,
+            rel_start,
+            rel_end,
+            replacement,
+            before_text=None,
+            expected_document=None,
+        ):
+            self.calls["applied"].append((rel_start, rel_end, replacement))
+            return True, "Applied."
+
+    word = FakeWord()
+    monkeypatch.setattr(wi, "get_word_integration", lambda: word)
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._selection_is_word = True
+    service._selection_has_range = True
+    service._selection_target = {
+        "bundle_id": "com.microsoft.Word",
+        "pid": 9,
+        "name": "Microsoft Word",
+    }
+    service._selection_text = word.text
+    service._seen_text = word.text
+    service._selection_start = word.start
+    service._selection_end = word.end
+    service._pending = [
+        EditSpan("teh", "the,", "Spelling", 0, 3),
+        EditSpan("teh", "the", "Spelling", 19, 22),
+    ]
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert messages == ["Applied 2 suggestions."]
+    # One mapping call for the whole batch, and never the character scan.
+    assert word.calls["map"] == 1
+    assert word.calls["scan"] == 0
+    assert word.calls["selection_info"] <= 3
+    # The first edit added a character, so the second span moved by one.
+    assert word.calls["applied"] == [
+        (100, 103, "the,"),
+        (123, 126, "the"),
+    ]
+    service.stop()
+
+
+def test_word_position_mapping_parses_the_binary_search_result():
+    from src.word_integration import MacOSWordIntegration
+
+    word = MacOSWordIntegration()
+    seen: dict[str, object] = {}
+
+    def fake_run(script, *args, **kwargs):
+        seen["args"] = args
+        return "100###POS###122###POS###"
+
+    word._run_applescript = fake_run  # type: ignore[method-assign]
+    mapping = word.live_doc_positions(100, 125, [0, 22])
+    assert mapping == {0: 100, 22: 122}
+    assert seen["args"] == ("100", "125", "0", "22")
+
+    # A short or unparsable answer must not be trusted.
+    word._run_applescript = lambda *a, **k: "100###POS###"  # type: ignore[method-assign]
+    assert word.live_doc_positions(100, 125, [0, 22]) is None
+    word._run_applescript = lambda *a, **k: "x###POS###y###POS###"  # type: ignore[method-assign]
+    assert word.live_doc_positions(100, 125, [0, 22]) is None
+
+
 def test_service_word_apply_compensates_hidden_characters(monkeypatch):
     from src import word_integration as wi
     from src.live_service import LivePreviewService

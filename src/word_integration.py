@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import subprocess
+from collections.abc import Sequence
 from typing import Any, NamedTuple
 
 WD_WITH_IN_TABLE = 12  # Word constant: wdWithInTable
@@ -16,8 +17,11 @@ APPLESCRIPT_TIMEOUT_S = 30.0
 # Short reads (document/selection state) should fail fast rather than freeze.
 APPLESCRIPT_READ_TIMEOUT_S = 10.0
 # The live poll reads the selection on every tick: a busy Word must not
-# stall the loop, so the poll read is bounded much tighter.
-WORD_POLL_READ_TIMEOUT_S = 3.0
+# stall the loop, so the poll read is bounded much tighter. A healthy read
+# answers in well under 200 ms; anything slower means Word is busy, and the
+# poll backs off instead of blocking the UI thread - at 3 s a single stuck
+# tick was long enough to feel like the app had frozen.
+WORD_POLL_READ_TIMEOUT_S = 1.5
 
 # How many characters of a field's visible result the macOS fallback scan may
 # read before giving up. A page of text is roughly 3,000-3,500 characters, so
@@ -181,6 +185,31 @@ class WordIntegration:
         absolute document positions.
         """
         raise NotImplementedError
+
+    def live_doc_positions(
+        self,
+        sel_start: int,
+        sel_end: int,
+        visible_offsets: Sequence[int],
+    ) -> dict[int, int] | None:
+        """Map visible-text offsets in the selection to document positions.
+
+        Tracked deletions and field codes occupy document positions but are
+        absent from ``content``, so a visible offset does not equal its
+        document position. Word exposes no range-scoped revision list, so each
+        position is found by binary search on the only monotone quantity Word
+        gives us: the length of the visible content from the selection start to
+        a candidate position grows by one per visible character and not at all
+        across hidden ones.
+
+        That is ``log(n)`` Word reads per offset instead of the one-read-per-
+        character scan it replaces, which is what made a tracked-changes
+        selection take seconds per suggestion.
+
+        Implementations that cannot answer return None and the caller falls
+        back to the guarded write, which refuses rather than misplaces an edit.
+        """
+        return None
 
 # --- Windows Implementation ---
 
@@ -400,6 +429,41 @@ class WindowsWordIntegration(WordIntegration):
         except Exception as e:
             _log_word(f"Error getting field spans (Windows): {e}")
             return []
+
+    def live_doc_positions(
+        self,
+        sel_start: int,
+        sel_end: int,
+        visible_offsets: Sequence[int],
+    ) -> dict[int, int] | None:
+        """Map visible offsets to document positions by binary search.
+
+        Same invariant as the macOS version (``Range.Text`` omits tracked
+        deletions and field codes while positions still count them), but each
+        probe is a cheap in-process COM call.
+        """
+        wanted = sorted({int(offset) for offset in visible_offsets})
+        if not wanted:
+            return {}
+        try:
+            word = self._get_word()
+            if not word.Documents.Count:
+                return None
+            doc = word.ActiveDocument
+            mapping: dict[int, int] = {}
+            for target in wanted:
+                lo, hi = int(sel_start), int(sel_end)
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if len(str(doc.Range(int(sel_start), mid).Text)) >= target:
+                        hi = mid
+                    else:
+                        lo = mid + 1
+                mapping[target] = lo
+            return mapping
+        except Exception as exc:
+            _log_word(f"Error mapping Word selection positions (Windows): {exc}")
+            return None
 
     def get_selection_hidden_spans(
         self,
@@ -1135,6 +1199,77 @@ class MacOSWordIntegration(WordIntegration):
                 )
             )
         return spans
+
+    def live_doc_positions(
+        self,
+        sel_start: int,
+        sel_end: int,
+        visible_offsets: Sequence[int],
+    ) -> dict[int, int] | None:
+        """Map visible offsets to document positions with one AppleScript.
+
+        Each offset is found by binary search over the candidate document
+        positions, comparing ``length of content`` from the selection start.
+        Word omits tracked deletions and field codes from ``content`` but still
+        counts them in positions, so that length is the number of visible
+        characters before the candidate: monotone, and exactly what a search
+        needs. Ten-odd reads per offset replace the previous one-read-per-
+        character scan, which took seconds on a tracked-changes selection.
+        """
+        wanted = sorted({int(offset) for offset in visible_offsets})
+        if not wanted:
+            return {}
+        script = """
+        on run argv
+            set aStart to (item 1 of argv) as integer
+            set aEnd to (item 2 of argv) as integer
+            set out to ""
+            try
+                tell application "Microsoft Word"
+                    if not (exists active document) then return ""
+                    set d to active document
+                    repeat with i from 3 to (count of argv)
+                        set target to (item i of argv) as integer
+                        set lo to aStart
+                        set hi to aEnd
+                        repeat while lo < hi
+                            set mid to (lo + hi) div 2
+                            set r to create range d start aStart end mid
+                            if (length of (content of r as string)) >= target then
+                                set hi to mid
+                            else
+                                set lo to mid + 1
+                            end if
+                        end repeat
+                        set out to out & (lo as string) & "###POS###"
+                    end repeat
+                end tell
+            on error
+                return ""
+            end try
+            return out
+        end run
+        """
+        args = [str(sel_start), str(sel_end)] + [str(offset) for offset in wanted]
+        try:
+            raw = self._run_applescript(script, *args)
+        except Exception as exc:
+            _log_word(f"Error mapping Word selection positions: {exc}")
+            return None
+        parts = [part.strip() for part in raw.split("###POS###") if part.strip()]
+        if len(parts) != len(wanted):
+            _log_word(
+                "Word position mapping returned "
+                f"{len(parts)} of {len(wanted)} offsets"
+            )
+            return None
+        mapping: dict[int, int] = {}
+        try:
+            for offset, position in zip(wanted, parts, strict=True):
+                mapping[offset] = int(position)
+        except ValueError:
+            return None
+        return mapping
 
     def get_selection_hidden_spans(
         self,
