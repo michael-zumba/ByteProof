@@ -48,6 +48,11 @@ jobs:
         # One process per test file: Qt objects are freed by Python's garbage
         # collector, so a window from one file can be collected while a later
         # file builds its own, which intermittently segfaults on macOS.
+        #
+        # The step timeout matters more than the job timeout: when a test hangs
+        # on Windows the runner stops reporting, so a job-level timeout can take
+        # far longer to land than the value it was given.
+        timeout-minutes: 5
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONUNBUFFERED: "1"
@@ -57,10 +62,10 @@ jobs:
           for file in tests/test_*.py; do
             echo "=== $file"
             # A hanging test must fail with a stack trace instead of burning the
-            # whole job timeout: faulthandler dumps every thread after 60s and
+            # whole job timeout: faulthandler dumps every thread after 25s and
             # pytest-timeout fails the test so the file still finishes.
             python -m pytest "$file" -v -p no:cacheprovider \
-              --timeout=150 -o faulthandler_timeout=60 --tb=short || status=1
+              --timeout=45 -o faulthandler_timeout=25 --tb=short || status=1
           done
           exit $status
 
