@@ -984,7 +984,7 @@ def _browser_service(ax_text: str, copied: str):
             return True, "Applied."
 
     service._editor = SafariEditor()
-    service._pending = [EditSpan("sometimes", "sometimes,", "Punctuation", 8, 9)]
+    service._pending = [EditSpan("sometimes", "sometimes,", "Punctuation", 19, 28)]
     service._selection_target = {
         "bundle_id": "com.apple.Safari",
         "pid": 22297,
@@ -1009,7 +1009,7 @@ def test_sync_verifies_by_copy_when_ax_returns_empty(monkeypatch):
 
     service._apply_one(0)
 
-    assert applied == [(8, 1, "sometimes,")]  # the edit went through
+    assert applied == [(19, 9, "sometimes,")]  # the edit went through
     assert messages == ["Applied."]
     assert invalidated  # the stale AX element was dropped and re-read
     service.stop()
@@ -1265,7 +1265,7 @@ def _lost_selection_service(
             return True, "Applied."
 
     service._editor = SafariEditor()
-    service._pending = [EditSpan("sometimes", "sometimes,", "Punctuation", 8, 9)]
+    service._pending = [EditSpan("sometimes", "sometimes,", "Punctuation", 19, 28)]
     service._selection_target = {
         "bundle_id": "com.apple.Safari",
         "pid": 22297,
@@ -1292,7 +1292,7 @@ def test_apply_succeeds_when_the_selection_is_lost_but_the_document_matches(
 
     service._apply_one(0)
 
-    assert applied == [(8, 1, "sometimes,")]  # the edit went through
+    assert applied == [(19, 9, "sometimes,")]  # the edit went through
     assert messages == ["Applied."]
     service.stop()
 
@@ -1326,7 +1326,7 @@ def test_sync_brings_the_target_app_forward_before_verifying(monkeypatch):
     service._apply_one(0)
 
     assert state["activated"] == 1  # brought forward, then read successfully
-    assert applied == [(8, 1, "sometimes,")]
+    assert applied == [(19, 9, "sometimes,")]
     assert messages == ["Applied."]
     service.stop()
 

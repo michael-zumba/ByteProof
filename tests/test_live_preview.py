@@ -1298,11 +1298,234 @@ def test_service_apply_all_reports_partial_failure(monkeypatch):
     messages = []
     service.apply_done.connect(messages.append)
     service._apply_all()
-    # The first failure aborts the batch: every later span's offsets assume the
-    # earlier writes landed, so continuing could target shifted text. The real
-    # reason is reported instead of a bare "0 of 2".
-    assert messages == ["Could not apply."]
-    assert service._undo_state is None
+    # A failed suggestion no longer stops the batch: the rest still land, the
+    # one that failed stays on screen so it can be retried, and the reason is
+    # reported instead of a bare "0 of 2".
+    assert messages == [
+        (
+            "Applied 1 of 2 suggestions — 1 could not be placed. "
+            "Press Apply All to retry."
+        )
+    ]
+    assert [span.before for span in service._pending] == ["teh"]
+    assert service._undo_state is not None  # the edit that landed is undoable
+
+
+def test_apply_all_relocates_edits_when_the_app_moves_the_text(monkeypatch):
+    """Teams rewrites its composer, so the next offset is a hint, not a fact.
+
+    Reported live: in Teams the second suggestion always failed with "range no
+    longer holds the original text" and Apply All stopped, so a review was only
+    ever partly applied. The span is now located in the live text.
+    """
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    original = "teh cat sat on teh mat"
+    state = {"text": original}
+    applied: list[tuple[int, int, str]] = []
+
+    class RewritingEditor:
+        def selection_details(self, target):
+            return {
+                "text": original,
+                "range": (0, len(original)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return state["text"]
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            current = state["text"]
+            # Writing anywhere else would edit words the user never chose.
+            assert current[start : start + length] == before_text
+            applied.append((start, length, new))
+            # Teams keeps the original words and inserts the replacement, so
+            # the document moves by len(new) and the arithmetic offset for the
+            # following suggestion no longer points at its text.
+            state["text"] = current[:start] + new + current[start:]
+            return True, "Applied."
+
+    service._editor = RewritingEditor()
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("teh", "the", "Spelling", 15, 18),
+    ]
+    service._selection_target = {
+        "bundle_id": "com.microsoft.teams2",
+        "pid": 9,
+        "name": "Microsoft Teams",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = original
+    service._seen_text = original
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    # Both suggestions landed in one press, the second at its real position:
+    # the document grew by the three inserted characters, and the naive
+    # offset (15) would have written over " on".
+    assert applied == [(0, 3, "the"), (18, 3, "the")]
+    assert messages == ["Applied 2 suggestions."]
+    assert service._pending == []
+    service.stop()
+
+
+def test_apply_all_skips_an_edit_it_cannot_place_and_keeps_it(monkeypatch):
+    """An edit whose text is gone is skipped, never guessed, and kept."""
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    original = "teh cat sat"
+    # The user already fixed "cat" by hand, so only the spelling is left.
+    state = {"text": "teh dog sat"}
+    applied: list[tuple[int, int, str]] = []
+
+    class Editor:
+        def selection_details(self, target):
+            return {
+                "text": original,
+                "range": (0, len(original)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return state["text"]
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            current = state["text"]
+            assert current[start : start + length] == before_text
+            applied.append((start, length, new))
+            state["text"] = current[:start] + new + current[start + length :]
+            return True, "Applied."
+
+    service._editor = Editor()
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("cat", "dog", "Word choice", 4, 7),
+    ]
+    service._selection_target = {
+        "bundle_id": "com.microsoft.teams2",
+        "pid": 9,
+        "name": "Microsoft Teams",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = original
+    service._seen_text = original
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert applied == [(0, 3, "the")]  # nothing was written over "dog"
+    assert messages == [
+        (
+            "Applied 1 of 2 suggestions — 1 could not be placed. "
+            "Press Apply All to retry."
+        )
+    ]
+    assert [span.before for span in service._pending] == ["cat"]
+    service.stop()
+
+
+def test_apply_all_retries_what_the_app_could_not_place(monkeypatch):
+    """The advertised retry must work even though the app rewrote the text.
+
+    After a partial apply the selection no longer reads as the previewed text,
+    so the strict sync refuses - and the panel's remaining suggestions would be
+    stranded. A retry is allowed when every remaining span can be located, and
+    each write is still guarded by the span's own text.
+    """
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    original = "teh cat sat"
+    # Teams-style composer: the first press inserted "the" and kept "teh".
+    state = {"text": "theteh cat sat"}
+    applied: list[tuple[int, int, str]] = []
+
+    class TeamsEditor:
+        def selection_details(self, target):
+            # The app reports the selection it now has, which is not the text
+            # that was previewed, so the strict sync fails.
+            return {
+                "text": "theteh cat sat",
+                "range": (0, len(original)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return state["text"]
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            current = state["text"]
+            assert current[start : start + length] == before_text
+            applied.append((start, length, new))
+            state["text"] = current[:start] + new + current[start + length :]
+            return True, "Applied."
+
+    service._editor = TeamsEditor()
+    service._pending = [EditSpan("cat", "dog", "Word choice", 4, 7)]
+    service._partial_retry = True
+    service._selection_target = {
+        "bundle_id": "com.microsoft.teams2",
+        "pid": 9,
+        "name": "Microsoft Teams",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = original
+    service._seen_text = original
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert applied == [(7, 3, "dog")]  # located after the inserted "the"
+    assert messages == ["Applied 1 suggestion."]
+    assert service._pending == []
+    service.stop()
 
 
 def test_service_apply_all_reports_partial_success(monkeypatch):
@@ -1357,7 +1580,13 @@ def test_service_apply_all_reports_partial_success(monkeypatch):
     messages = []
     service.apply_done.connect(messages.append)
     service._apply_all()
-    assert messages == ["Applied 1 of 2 suggestions."]
+    assert messages == [
+        (
+            "Applied 1 of 2 suggestions — 1 could not be placed. "
+            "Press Apply All to retry."
+        )
+    ]
+    assert [span.before for span in service._pending] == ["cat"]
     assert service._undo_state is not None  # the applied span stays undoable
 
 

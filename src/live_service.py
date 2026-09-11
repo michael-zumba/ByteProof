@@ -81,6 +81,10 @@ DETACH_REVALIDATE_S = 1.5
 SUPPRESS_SELECTION_S = 15.0
 # When Word stops answering (modal dialog), stop polling it for this long.
 WORD_BUSY_BACKOFF_S = 5.0
+# After an applied edit the document has moved, so the next suggestion's
+# offset is only a hint. Its original text is searched for around that hint
+# before anything is written; nothing is written when it cannot be found.
+SPAN_RELOCATE_WINDOW = 400
 
 # Word's AppleScript selection read takes a few hundred milliseconds, so
 # polling Word at the full rate keeps the UI thread busy and makes the app
@@ -283,6 +287,10 @@ class LivePreviewService(QObject):
         self._timer: QTimer | None = None
         self._panel: LiveSuggestionPanel | None = None
         self._pending: list[EditSpan] = []
+        # True while the panel still holds suggestions from a partly applied
+        # batch: the app has already rewritten the text, so it will not confirm
+        # the old selection and the retry must be allowed to locate the spans.
+        self._partial_retry = False
         self._selection_text = ""
         self._selection_start = 0
         self._selection_end = 0
@@ -1304,6 +1312,7 @@ class LivePreviewService(QObject):
     ) -> None:
         filtered = self._filter_dismissed(spans)
         self._pending = filtered
+        self._partial_retry = False
         if not filtered:
             if clean_when_empty and not spans:
                 self._show_clean_panel()
@@ -1424,6 +1433,7 @@ class LivePreviewService(QObject):
 
     def _hide_panel(self) -> None:
         self._pending = []
+        self._partial_retry = False
         self._remove_escape_monitor()
         if self._clean_timer is not None:
             self._clean_timer.stop()
@@ -1786,6 +1796,69 @@ class LivePreviewService(QObject):
         except Exception:
             return ""
 
+    def _pending_located(self, text: str) -> bool:
+        """Whether every pending span's own text is still in the document.
+
+        This is the evidence that replaces the selection check on a retry: the
+        app will not confirm a selection it has already rewritten, but a span
+        whose text is present where it is expected can be applied safely.
+        """
+        if not text or not self._pending:
+            return False
+        return all(
+            self._locate_span(text, span.before, span.start) is not None
+            for span in self._pending
+        )
+
+    def _live_edit_text(self) -> str:
+        """The target field's current text, or "" when it cannot be read.
+
+        Word is excluded: its document is read through AppleScript at apply
+        time, and the AX value of a Word window is not the document.
+        """
+        if self._selection_is_word:
+            return ""
+        reader = getattr(self._editor, "field_value", None)
+        if reader is None:
+            return ""
+        try:
+            return reader(self._selection_target) or ""
+        except Exception:
+            return ""
+
+    def _locate_span(self, text: str, before: str, expected: int) -> int | None:
+        """Find ``before`` in the live text, preferring the ``expected`` offset.
+
+        Returning None means "do not write": a wrong offset would rewrite words
+        the user never asked to change, so an edit that cannot be placed is
+        skipped rather than guessed.
+        """
+        if not before:
+            return None
+        if text[expected : expected + len(before)] == before:
+            return expected
+        window_start = max(0, expected - SPAN_RELOCATE_WINDOW)
+        window_end = min(
+            len(text), expected + len(before) + SPAN_RELOCATE_WINDOW
+        )
+        window = text[window_start:window_end]
+        first = window.find(before)
+        if first < 0:
+            # Nothing nearby: accept a single match anywhere, never one of
+            # several.
+            if text.count(before) == 1:
+                return text.index(before)
+            return None
+        best: tuple[int, int] | None = None
+        position = first
+        while position >= 0:
+            candidate = window_start + position
+            distance = abs(candidate - expected)
+            if best is None or distance < best[0]:
+                best = (distance, candidate)
+            position = window.find(before, position + 1)
+        return best[1] if best is not None else None
+
     def _apply_abs(
         self,
         rel_start: int,
@@ -1929,15 +2002,31 @@ class LivePreviewService(QObject):
             self.apply_done.emit(self._sync_failure_message(sync_reason))
             return
         span = self._pending[index]
+        before_text = span.before or self._selection_text[span.start : span.end]
+        rel_start = span.start
+        live_text = self._live_edit_text()
+        if live_text:
+            located = self._locate_span(live_text, before_text, rel_start)
+            if located is None:
+                _debug_log(
+                    "LIVE APPLY ONE: could not locate the span "
+                    f"({_redact(before_text)}) near rel={rel_start}"
+                )
+                self.apply_done.emit(
+                    "That suggestion no longer matches the text — "
+                    "select it again to refresh."
+                )
+                return
+            rel_start = located
         ok, message, abs_start = self._apply_abs(
-            span.start,
-            span.end - span.start,
+            rel_start,
+            len(before_text),
             span.after,
-            before_text=self._selection_text[span.start : span.end],
+            before_text=before_text,
         )
         _debug_log(
             f"LIVE APPLY ONE RESULT: ok={ok} message={message!r} "
-            f"rel=({span.start},{span.end})"
+            f"rel=({rel_start},{rel_start + len(before_text)})"
         )
         self.apply_done.emit(message)
         if not ok:
@@ -2027,37 +2116,79 @@ class LivePreviewService(QObject):
             time.sleep(0.12)
             sync_ok, sync_reason = self._sync_selection()
         if not sync_ok:
-            _debug_log(f"LIVE APPLY ALL SYNC FAIL: {sync_reason}")
-            self._hide_panel()
-            self.apply_done.emit(self._sync_failure_message(sync_reason))
-            return
+            # A retry after a partial apply: the app has already rewritten the
+            # text this batch inserted, so it no longer confirms the original
+            # selection. Every write is still guarded by its own span text, so
+            # applying the spans that can be located (and skipping the rest) is
+            # safe - refusing here would strand the suggestions the panel is
+            # still showing.
+            if self._partial_retry and self._pending_located(self._live_edit_text()):
+                _debug_log(
+                    "LIVE APPLY ALL: retry without selection sync "
+                    f"({sync_reason}); every remaining span was located"
+                )
+            else:
+                _debug_log(f"LIVE APPLY ALL SYNC FAIL: {sync_reason}")
+                self._hide_panel()
+                self.apply_done.emit(self._sync_failure_message(sync_reason))
+                return
         total = len(self._pending)
+        batch = list(self._pending)
         applied = 0
         delta = 0
         failure_message = ""
+        skipped: list[EditSpan] = []
         undo_steps: list[tuple[int, str, str]] = []
-        for span in sorted(self._pending, key=lambda s: s.start):
-            rel_start = span.start + delta
-            rel_end = span.end + delta
+        live_text = self._live_edit_text()
+        for span in sorted(batch, key=lambda s: s.start):
+            before_text = span.before or self._selection_text[span.start : span.end]
+            rel_start, rel_end = span.start + delta, span.end + delta
+            if live_text:
+                located = self._locate_span(live_text, before_text, rel_start)
+                if located is None:
+                    # Teams and friends rewrite what they insert, so after an
+                    # earlier edit the arithmetic offset is only a hint. Not
+                    # finding the text means "do not write": a guess would edit
+                    # the wrong words. Skip this one and keep going, so the
+                    # rest of the suggestions still land.
+                    _debug_log(
+                        "LIVE APPLY ALL: could not locate a span "
+                        f"({_redact(before_text)}) near rel={rel_start}; "
+                        "skipping it"
+                    )
+                    skipped.append(span)
+                    continue
+                rel_start = located
+                rel_end = located + len(before_text)
             ok, message, abs_start = self._apply_abs(
                 rel_start,
                 rel_end - rel_start,
                 span.after,
-                before_text=self._selection_text[span.start : span.end],
+                before_text=before_text,
             )
             if not ok:
-                # Stop at the first failure: every later span's offset assumes
-                # the earlier writes landed, so continuing could target shifted
-                # text.
+                # Keep going: the previous behaviour stopped here and left the
+                # remaining suggestions unapplied, which is what "Apply All"
+                # must never do.
                 failure_message = message or "Could not apply the edit in this app."
                 _debug_log(
-                    "LIVE APPLY ALL: aborting after failure "
+                    "LIVE APPLY ALL: skipping a span after failure "
                     f"({failure_message!r}) at rel=({rel_start},{rel_end})"
                 )
-                break
+                skipped.append(span)
+                continue
             applied += 1
-            delta += len(span.after) - (span.end - span.start)
+            delta = rel_start + len(span.after) - span.start - len(before_text)
             undo_steps.append((abs_start, span.after, span.before))
+            refreshed = self._live_edit_text()
+            if refreshed:
+                live_text = refreshed
+            elif live_text:
+                live_text = (
+                    live_text[:rel_start]
+                    + span.after
+                    + live_text[rel_start + len(before_text) :]
+                )
         self.apply_all_requested.emit()
         if applied:
             self._arm_undo(
@@ -2069,15 +2200,35 @@ class LivePreviewService(QObject):
                     "steps": list(reversed(undo_steps)),
                 }
             )
-        if applied == total:
-            message = f"Applied {applied} suggestions."
+        if not skipped:
+            message = (
+                "Applied 1 suggestion."
+                if applied == 1
+                else f"Applied {applied} suggestions."
+            )
             self._hide_panel()
         elif applied == 0:
             # Report the real reason instead of a bare "0 of N".
+            self._pending = skipped
             message = failure_message
         else:
-            message = f"Applied {applied} of {total} suggestions."
-            self._hide_panel()
+            # Keep what is left on screen so the user can retry it instead of
+            # losing the rest of the review. The selection snapshot now holds
+            # the edits that landed, so the retry compares against the document
+            # as it really is.
+            self._pending = skipped
+            self._partial_retry = True
+            landed = [span for span in batch if span not in skipped]
+            self._selection_text = apply_edits_to_text(self._selection_text, landed)
+            self._seen_text = self._selection_text
+            message = (
+                f"Applied {applied} of {total} suggestions — "
+                f"{len(skipped)} could not be placed. Press Apply All to retry."
+            )
+            panel = self._panel
+            if panel is not None:
+                panel.set_spans(skipped)
+                panel.show()
         self.apply_done.emit(message)
 
     def _apply_full_selection(self) -> None:

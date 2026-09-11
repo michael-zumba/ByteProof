@@ -518,6 +518,33 @@ class GenericTextEditor:
             return False
         return GenericTextEditor._mac_is_frontmost(target)
 
+    def field_value(self, target: dict[str, Any]) -> str:
+        """The focused field's whole text, or "" when it cannot be read.
+
+        Applied edits change the document, and some apps (Teams and other
+        Electron composers) rewrite what they insert, so an offset computed
+        from the original selection drifts. Re-reading the live text is what
+        lets the next edit be located instead of guessed.
+        """
+        if SYSTEM != "Darwin":
+            return ""
+        try:
+            import ApplicationServices as AS
+
+            _as, element = GenericTextEditor._mac_ax_text_element(
+                target.get("pid") or 0
+            )
+            if element is None:
+                return ""
+            err, value = AS.AXUIElementCopyAttributeValue(
+                element, AS.kAXValueAttribute, None
+            )
+            if err != 0 or not isinstance(value, str):
+                return ""
+            return value
+        except Exception:
+            return ""
+
     def field_text_at(
         self, target: dict[str, Any], start: int, length: int
     ) -> str:
