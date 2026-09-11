@@ -15,7 +15,26 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_license_generator():
+    """Load the private license generator, skipping where it does not exist.
+
+    ``tools/`` holds the RSA signing key and is deliberately kept out of the
+    repository, so a CI checkout cannot generate signed keys. Those tests still
+    run on the release machine, which has the tool.
+    """
+    path = os.path.join(PROJECT_ROOT, "tools", "generate_license.py")
+    if not os.path.exists(path):
+        pytest.skip("tools/generate_license.py is not in this checkout")
+    spec = importlib.util.spec_from_file_location("generate_license", path)
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    return generator
 sys.path.insert(0, PROJECT_ROOT)
 
 
@@ -111,12 +130,7 @@ def test_licensing_roundtrip() -> None:
     licensing._secure_store_get = lambda: None
     licensing._secure_store_delete = lambda: None
 
-    spec = importlib.util.spec_from_file_location(
-        "generate_license", os.path.join(PROJECT_ROOT, "tools", "generate_license.py")
-    )
-    assert spec is not None and spec.loader is not None
-    generator = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(generator)
+    generator = _load_license_generator()
 
     try:
         key = generator.generate_license_key("buyer@example.com", "unlimited", "")
@@ -314,13 +328,9 @@ def test_legacy_email_and_signed_key_fallback() -> None:
     from src import activation, licensing
 
     tmpdir = tempfile.mkdtemp()
+    # Load the generator before patching storage: a skip must not leak it.
+    generator = _load_license_generator()
     originals = _patch_license_storage(tmpdir)
-    spec = importlib.util.spec_from_file_location(
-        "generate_license", os.path.join(PROJECT_ROOT, "tools", "generate_license.py")
-    )
-    assert spec is not None and spec.loader is not None
-    generator = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(generator)
     original_post = activation._post_json
     original_org = activation.POLAR_ORGANIZATION_ID
     try:
@@ -404,12 +414,7 @@ def test_secure_store_fallback_restores_license() -> None:
         licensing._secure_store_set = lambda _value: None
         licensing._secure_store_delete = lambda: None
 
-        spec = importlib.util.spec_from_file_location(
-            "generate_license", os.path.join(PROJECT_ROOT, "tools", "generate_license.py")
-        )
-        assert spec is not None and spec.loader is not None
-        generator = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(generator)
+        generator = _load_license_generator()
         machine_fp = licensing._get_machine_fingerprint()
         key = generator.generate_license_key("keychain@example.com", "unlimited", machine_fp)
 
