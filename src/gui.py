@@ -148,6 +148,12 @@ def _mono_font(size: int = 12) -> QFont:
     return font
 
 
+# How long a background worker may hold up the exit. Quitting must be visible:
+# waiting a minute for a stalled model download looked like the app ignoring
+# the Quit, and the user pressed it again.
+WORKER_QUIT_GRACE_MS = 1500
+
+
 class AppNameLineEdit(QLineEdit):
     """A line edit that accepts an application dropped from Finder/Dock."""
 
@@ -1113,6 +1119,7 @@ class SettingsDialog(QDialog):
     button_box: QDialogButtonBox
     chk_launch_login: QCheckBox
     chk_keep_top: QCheckBox
+    chk_keep_running: QCheckBox
     chk_auto_apply: QCheckBox
     chk_live_preview: QCheckBox
     chk_live_local: QCheckBox
@@ -1550,8 +1557,23 @@ class SettingsDialog(QDialog):
 
         self.chk_keep_top = QCheckBox("Keep window on top")
         self.chk_keep_top.setChecked(self.settings.get("general", {}).get("keep_on_top", True))
-        self.chk_keep_top.setToolTip("Tip: use the Quit button or the tray icon menu to close the app.")
         prefs_layout.addWidget(self.chk_keep_top)
+
+        self.chk_keep_running = QCheckBox(
+            "Keep ByteProof in the menu bar when the window is closed"
+        )
+        self.chk_keep_running.setChecked(
+            self.settings.get("general", {}).get(
+                "keep_running_in_menu_bar", True
+            )
+        )
+        self.chk_keep_running.setToolTip(
+            "On (default): closing the window hides it and Live Check keeps "
+            "running from the menu bar icon. Quit from the menu bar icon or "
+            "with Cmd+Q to exit completely.\n\n"
+            "Off: closing the window quits ByteProof."
+        )
+        prefs_layout.addWidget(self.chk_keep_running)
 
         self.chk_sound = QCheckBox("Play a sound when proofreading starts")
         self.chk_sound.setChecked(
@@ -4235,6 +4257,9 @@ class SettingsDialog(QDialog):
     def get_settings(self) -> dict[str, Any]:
         self.settings["general"]["launch_at_login"] = self.chk_launch_login.isChecked()
         self.settings["general"]["keep_on_top"] = self.chk_keep_top.isChecked()
+        self.settings["general"]["keep_running_in_menu_bar"] = (
+            self.chk_keep_running.isChecked()
+        )
         self.settings["general"]["auto_apply"] = self.chk_auto_apply.isChecked()
         self.settings["general"]["track_changes"] = self.chk_track_changes.isChecked()
         self.settings["general"]["play_sound_on_proofread"] = self.chk_sound.isChecked()
@@ -4626,7 +4651,7 @@ class ProofreaderApp(QMainWindow):
         self.quit_btn.setObjectName("SecondaryBtn")
         self.quit_btn.setMinimumHeight(46)
         self.quit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.quit_btn.clicked.connect(QApplication.quit)
+        self.quit_btn.clicked.connect(self.request_quit)
         btn_layout.addWidget(self.quit_btn, stretch=1)
         
         controls_layout.addLayout(btn_layout)
@@ -4656,6 +4681,9 @@ class ProofreaderApp(QMainWindow):
         self._suppress_activate_until = 0.0
         self._tray_menu_open = False
         self._close_hint_shown = False
+        # Set as soon as a quit is requested, so the close handler stops
+        # treating the close that a quit sends as "user closed the window".
+        self._quitting = False
         self._task_cancel_event = threading.Event()
         self._last_task_cancelled = False
         self._escape_monitor = None
@@ -5224,7 +5252,7 @@ class ProofreaderApp(QMainWindow):
         tray_menu.addAction(open_log_action)
         
         quit_action = QAction("Quit", self)
-        quit_action.triggered.connect(QApplication.quit)
+        quit_action.triggered.connect(self.request_quit)
         tray_menu.addAction(quit_action)
 
         self.tray_icon.setContextMenu(tray_menu)
@@ -5375,6 +5403,7 @@ class ProofreaderApp(QMainWindow):
 
     def _on_about_to_quit(self) -> None:
         """Cancel in-flight tasks before the app exits."""
+        self._quitting = True
         self._save_window_geometry()
         self._stop_escape_monitor()
         self._cancel_active_tasks()
@@ -5385,16 +5414,32 @@ class ProofreaderApp(QMainWindow):
             if worker is not None and callable(getattr(worker, "isRunning", None)) and worker.isRunning():
                 if callable(getattr(worker, "wait", None)):
                     try:
-                        worker.wait(10_000)
+                        # Bounded: a task that will not stop must not turn a
+                        # quit into "nothing happened".
+                        if not worker.wait(WORKER_QUIT_GRACE_MS):
+                            from .generic_editing import _debug_log
+
+                            _debug_log(
+                                "APP: a proofreading task did not stop in "
+                                "time; exiting without it"
+                            )
                     except Exception:
                         pass
         for attr in ("_local_download_worker", "_local_server_worker"):
             worker = getattr(self, attr, None)
             if worker is not None and worker.isRunning():
-                # The download loop checks cancellation between chunks; one
-                # stalled socket read can take up to the 60s timeout.
+                # A background download or the local server may need a moment
+                # to stop, but quitting must not look like "nothing happened":
+                # the loop below only waits briefly, and the process exit takes
+                # the thread with it.
                 try:
-                    worker.wait(60_000)
+                    if not worker.wait(WORKER_QUIT_GRACE_MS):
+                        from .generic_editing import _debug_log
+
+                        _debug_log(
+                            "APP: a background worker did not stop in time; "
+                            "exiting without it"
+                        )
                 except Exception:
                     pass
         try:
@@ -5577,7 +5622,7 @@ class ProofreaderApp(QMainWindow):
             quit_action = QAction(f"Quit {APP_NAME}", self)
             quit_action.setMenuRole(QAction.MenuRole.QuitRole)
             quit_action.setShortcut(f"{meta_key}+Q")
-            quit_action.triggered.connect(QApplication.quit)
+            quit_action.triggered.connect(self.request_quit)
             file_menu.addAction(quit_action)
 
         # ---- Edit ----
@@ -6961,12 +7006,54 @@ class ProofreaderApp(QMainWindow):
         except Exception as e:
             print(f"Could not save window geometry: {e}")
 
+    def _stays_in_menu_bar(self) -> bool:
+        """Whether closing the window should leave ByteProof running.
+
+        True by default, and only when there is a menu bar icon to reopen it
+        from: an app the user cannot get back to would be worse than one that
+        quits.
+        """
+        if self._quitting:
+            return False
+        if not self.settings.get("general", {}).get(
+            "keep_running_in_menu_bar", True
+        ):
+            return False
+        try:
+            return bool(QSystemTrayIcon.isSystemTrayAvailable())
+        except Exception:
+            return False
+
+    def request_quit(self) -> None:
+        """Quit for real, from any entry point.
+
+        Closing the window deliberately keeps ByteProof in the menu bar, so a
+        quit has to be marked as such: the close handler used to hide the
+        window and veto the close, which cancelled the quit and left the app
+        running until the user asked a second time. Every quit path goes
+        through here instead, so a quit is always a quit.
+        """
+        self._quitting = True
+        try:
+            from .generic_editing import _debug_log
+
+            _debug_log("APP: quit requested")
+        except Exception:
+            pass
+        try:
+            self._save_window_geometry()
+        except Exception:
+            pass
+        QApplication.quit()
+
     def closeEvent(self, a0: Any) -> None:
         try:
             self._save_window_geometry()
-            if not QSystemTrayIcon.isSystemTrayAvailable():
+            if not self._stays_in_menu_bar():
+                # Either the user turned the menu-bar behaviour off, there is
+                # no menu bar icon, or this close is part of a quit: let it
+                # through instead of hiding and cancelling it.
                 self._on_about_to_quit()
-                QApplication.quit()
                 if a0 is not None:
                     a0.accept()
                 return
@@ -6975,8 +7062,8 @@ class ProofreaderApp(QMainWindow):
             if not self._close_hint_shown:
                 self._close_hint_shown = True
                 self._show_toast(
-                    "ByteProof keeps running in the menu bar — choose "
-                    "Quit from the tray menu to exit.",
+                    "ByteProof keeps running in the menu bar — quit from the "
+                    "menu bar icon or with Cmd+Q.",
                 )
             if a0 is not None:
                 a0.ignore()

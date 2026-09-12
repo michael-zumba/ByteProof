@@ -2583,6 +2583,73 @@ def test_live_check_app_can_be_deleted_and_added_back() -> None:
     dialog.deleteLater()
 
 
+def test_quit_is_always_a_quit(monkeypatch):
+    """The reported inconsistency: Quit sometimes only hid the window.
+
+    Closing the window deliberately keeps ByteProof in the menu bar, and the
+    close handler vetoed the close - so a quit delivered as a close (the system
+    menu, the Dock) was cancelled and the app kept running until the user asked
+    a second time. A quit is now marked, and marked quits are never vetoed.
+    """
+    from PyQt6.QtGui import QCloseEvent
+    from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
+
+    from src import gui
+    from src import settings as settings_mod
+
+    class MenuBarIcon(QSystemTrayIcon):
+        """A real tray icon whose availability the test controls."""
+
+        @staticmethod
+        def isSystemTrayAvailable() -> bool:
+            return True
+
+    monkeypatch.setattr(gui, "QSystemTrayIcon", MenuBarIcon)
+    app = QApplication.instance() or QApplication([])
+    window = gui.ProofreaderApp(1024, settings_mod.load_runtime_settings())
+    stopped: list[int] = []
+    monkeypatch.setattr(window, "_on_about_to_quit", lambda: stopped.append(1))
+    try:
+        # Closing hides: the behaviour the owner prefers as the default.
+        window.show()
+        close_event = QCloseEvent()
+        window.closeEvent(close_event)
+        assert close_event.isAccepted() is False, "closing must hide, not quit"
+        assert window.isHidden()
+
+        # A quit is never turned into a hide, whichever way it arrives.
+        window.request_quit()
+        assert window._quitting is True
+        assert window._stays_in_menu_bar() is False
+        quit_close = QCloseEvent()
+        window.closeEvent(quit_close)
+        assert quit_close.isAccepted() is True
+        assert stopped == [1]
+
+        # With the menu-bar behaviour switched off, closing quits.
+        window._quitting = False
+        window.settings["general"]["keep_running_in_menu_bar"] = False
+        plain_close = QCloseEvent()
+        window.closeEvent(plain_close)
+        assert plain_close.isAccepted() is True
+        assert stopped == [1, 1]
+    finally:
+        window.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_keep_running_in_menu_bar_setting_round_trips() -> None:
+    """The General switch is honoured and saved."""
+    app, owner, dialog = _make_settings_dialog()
+    assert dialog.chk_keep_running.isChecked() is True  # default: stay running
+    dialog.chk_keep_running.setChecked(False)
+    assert (
+        dialog.get_settings()["general"]["keep_running_in_menu_bar"] is False
+    )
+    _dispose(dialog, owner, app)
+
+
 def test_tests_never_write_into_the_real_support_folder() -> None:
     """Guard: the suite must not touch the owner's data folder.
 

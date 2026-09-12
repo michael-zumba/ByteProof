@@ -291,6 +291,9 @@ def load_runtime_settings() -> dict[str, Any]:
         "general": {
             "launch_at_login": False,
             "keep_on_top": True,
+            # Closing the window hides ByteProof and keeps Live Check running
+            # from the menu bar; quitting is explicit (menu bar icon or Cmd+Q).
+            "keep_running_in_menu_bar": True,
             "auto_apply": True,
             "track_changes": True,
             "play_sound_on_proofread": True,
