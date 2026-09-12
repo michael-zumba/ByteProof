@@ -464,7 +464,15 @@ def test_diff_html_replacement_shows_arrow():
     from src.live_overlay import diff_html
 
     rendered = diff_html("teh cat", "the cat")
-    assert "→" in rendered
+    assert "→" in rendered  # the panel's inline diff keeps it to pair old/new
+
+
+def test_diff_html_can_leave_the_arrow_out():
+    from src.ui_theme import diff_html
+
+    rendered = diff_html("teh cat", "the cat", arrow=False)
+    assert "→" not in rendered
+    assert "teh</s>" in rendered and "the</span>" in rendered
 
 
 def test_diff_html_dims_unchanged_context():
@@ -3249,7 +3257,10 @@ def test_main_window_display_diff_uses_word_level_renderer():
         text = window.diff_text.toPlainText()
         assert "teh" in text
         assert "the" in text
-        assert "→" in text  # the shared renderer's replacement arrow
+        # The review pane shows the struck original and the replacement side by
+        # side without the panel's arrow, which reads as noise across a whole
+        # document.
+        assert "→" not in text
     finally:
         window.close()
 

@@ -7714,10 +7714,11 @@ class ProofreaderApp(QMainWindow):
     def display_diff(self, original: str, corrected: str) -> None:
         """Render the proposed changes with the shared word-level diff.
 
-        Reuses the suggestion panel's renderer (struck original → arrow →
-        green replacement, dimmed unchanged context) with the full text and
-        preserved line breaks, keeping both surfaces visually consistent.
-        The unchanged words stay dimmed so the pinpoint edits stand out.
+        Reuses the suggestion panel's renderer (struck original, green
+        replacement, dimmed unchanged context) with the full text and preserved
+        line breaks. The arrow the panel shows between old and new is left out:
+        across a whole document it reads as noise, and the colour plus the
+        strike-through already pair the two.
         """
         try:
             from .ui_theme import diff_html
@@ -7727,6 +7728,7 @@ class ProofreaderApp(QMainWindow):
                 corrected,
                 context=100000,  # review view: never truncate
                 preserve_newlines=True,
+                arrow=False,
             )
             cursor = self.diff_text.textCursor()
             cursor.insertHtml(

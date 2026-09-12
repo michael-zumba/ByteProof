@@ -58,6 +58,7 @@ def diff_html(
     after: str,
     context: int = 24,
     preserve_newlines: bool = False,
+    arrow: bool = True,
 ) -> str:
     """Render a pinpoint word/character diff, unchanged text left normal.
 
@@ -68,7 +69,9 @@ def diff_html(
     honours whitespace (``white-space:pre-wrap``).
 
     Only the changed words carry colour, weight or a strike-through; the
-    surrounding text stays calm so the pinpoint edits are easy to spot.
+    surrounding text stays calm so the pinpoint edits are easy to spot. With
+    ``arrow`` the replacement is shown as ``old → new``; the review view turns
+    it off, because a whole manuscript of arrows reads as noise.
     """
 
     def escape(text: str) -> str:
@@ -96,6 +99,11 @@ def diff_html(
             parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
         elif tag == "replace":
             parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
-            parts.append(f"<span style='{ARROW_STYLE}'> → </span>")
+            # The struck original and the replacement already read as a pair
+            # through their colour and strike-through; a gap is enough, and in
+            # the review view (arrow=False) the arrow itself was the noise.
+            parts.append(
+                f"<span style='{ARROW_STYLE}'> → </span>" if arrow else " "
+            )
             parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
     return "".join(parts) or escape(after)
