@@ -66,10 +66,10 @@ USER_ACTIVE_WINDOW_S = 0.6
 ACCESS_CACHE_TTL_S = 30.0
 # After a refusal, do not re-check on every selection change.
 ACCESS_RETRY_S = 60.0
-# How long the Undo pill stays offered. Ten seconds was too short to be
-# reliable when the target app takes a moment to settle; the pill is small and
-# disappears as soon as a new selection replaces the panel.
-UNDO_AVAILABLE_MS = 30000
+# How long the Undo pill stays offered. Ten seconds was too short when the
+# target app takes a moment to settle; a new preview, a new selection or
+# another apply dismisses it earlier.
+UNDO_AVAILABLE_MS = 15000
 # How many previous applies can still be undone.
 UNDO_STACK_MAX = 5
 
@@ -1419,6 +1419,9 @@ class LivePreviewService(QObject):
         filtered = self._filter_dismissed(spans)
         self._pending = filtered
         self._partial_retry = False
+        # A new set of suggestions means the user has moved on; the Undo pill
+        # for the previous apply should not keep floating over the document.
+        self._hide_undo_pill()
         if not filtered:
             if clean_when_empty and not spans:
                 self._show_clean_panel()
@@ -1678,8 +1681,16 @@ class LivePreviewService(QObject):
             return UndoStep(abs_start, applied, original)
         start = abs_start
         if live[start : start + len(applied)] != applied:
+            # The app rewrote what it inserted (smart quotes, autocorrect), so
+            # the text is not where it was written. Only a *near* match can be
+            # our edit; anchoring the needle on an identical phrase elsewhere
+            # would make Undo rewrite that phrase later.
             located = self._locate_span(live, applied, abs_start)
-            if located is None:
+            if located is None or abs(located - abs_start) > UNDO_RELOCATE_WINDOW:
+                _debug_log(
+                    "LIVE UNDO: the written text is not where it was placed; "
+                    "no context recorded for this step"
+                )
                 return UndoStep(abs_start, applied, original)
             start = located
         left = max(0, start - UNDO_CONTEXT_CHARS)
@@ -1772,7 +1783,7 @@ class LivePreviewService(QObject):
                     if ok:
                         restored += 1
                     continue
-                live = self._live_edit_text()
+                live = self._live_edit_text(state.get("target") or None)
                 target = self._undo_target(step, live)
                 if target is None:
                     _debug_log(
@@ -1996,11 +2007,13 @@ class LivePreviewService(QObject):
             for span in self._pending
         )
 
-    def _live_edit_text(self) -> str:
+    def _live_edit_text(self, target: dict[str, Any] | None = None) -> str:
         """The target field's current text, or "" when it cannot be read.
 
         Word is excluded: its document is read through AppleScript at apply
-        time, and the AX value of a Word window is not the document.
+        time, and the AX value of a Word window is not the document. Pass
+        ``target`` to read a specific app - Undo must search the document the
+        edit was applied to, which may not be the one selected now.
         """
         if self._selection_is_word:
             return ""
@@ -2008,7 +2021,7 @@ class LivePreviewService(QObject):
         if reader is None:
             return ""
         try:
-            return reader(self._selection_target) or ""
+            return reader(target or self._selection_target) or ""
         except Exception:
             return ""
 
@@ -2475,7 +2488,7 @@ class LivePreviewService(QObject):
         delta = 0
         failure_message = ""
         skipped: list[EditSpan] = []
-        undo_steps: list[tuple[int, str, str]] = []
+        undo_steps: list[UndoStep] = []
         live_text = self._live_edit_text()
         for span in sorted(batch, key=lambda s: s.start):
             before_text = span.before or self._selection_text[span.start : span.end]

@@ -1173,9 +1173,18 @@ class SettingsDialog(QDialog):
         # and selectable through "Add App", so a delete is reversible without
         # losing the app's name or icon.
         hidden = self.settings.get("live_preview", {}).get("hidden_apps", [])
-        self._live_hidden_apps: set[str] = {
-            str(marker) for marker in hidden if str(marker).strip()
-        }
+        self._live_hidden_apps: set[str] = set()
+        for raw_marker in hidden:
+            marker = str(raw_marker).strip()
+            # "*" is the "allow other apps" switch, never a row: a stray entry
+            # would otherwise overwrite that switch when the dialog saves.
+            # Aliases are normalised so an app deleted by an older build stays
+            # deleted after the identifier fix.
+            if not marker or marker == "*":
+                continue
+            self._live_hidden_apps.add(
+                self.APP_ID_ALIASES.get(marker.lower(), marker)
+            )
         # The on/off state each hidden app had when it was removed, seeded from
         # the saved rules so it survives a restart. Without this the state would
         # be read from the saved settings, which only change on Save.
@@ -2274,11 +2283,13 @@ class SettingsDialog(QDialog):
         entries: list[tuple[str, str]] = [
             (marker, name)
             for marker, name in self.LIVE_CHECK_KNOWN_APPS
-            if marker not in self._live_hidden_apps
+            if self.APP_ID_ALIASES.get(marker.lower(), marker)
+            not in self._live_hidden_apps
         ]
         for key in rules:
             marker = str(key).strip()
-            if not marker or marker == "*" or marker in self._live_hidden_apps:
+            canonical = self.APP_ID_ALIASES.get(marker.lower(), marker)
+            if not marker or marker == "*" or canonical in self._live_hidden_apps:
                 continue
             if any(marker == b for b, _ in entries):
                 continue

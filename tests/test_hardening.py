@@ -2543,7 +2543,9 @@ def test_live_check_app_can_be_deleted_and_added_back() -> None:
     dialog.live_apps_list.itemWidget(item).findChild(QCheckBox).setChecked(False)
     assert dialog.get_settings()["live_preview"]["app_rules"][bundle] is False
 
-    remove = dialog.live_apps_list.itemWidget(item).findChild(QToolButton)
+    row = dialog.live_app_row(bundle)
+    assert row is not None, "the row helper must find an app's row"
+    remove = row.findChild(QToolButton)
     assert remove is not None and remove.text() == "✕"
     remove.click()  # exactly what the user presses
 
@@ -2576,6 +2578,107 @@ def test_live_check_app_can_be_deleted_and_added_back() -> None:
     live = reopened.get_settings()["live_preview"]
     assert bundle not in live["hidden_apps"]
     assert live["app_rules"][bundle] is False
+
+    _dispose(reopened, owner, app)
+    dialog.deleteLater()
+
+
+def test_tests_never_write_into_the_real_support_folder() -> None:
+    """Guard: the suite must not touch the owner's data folder.
+
+    Every module that resolves the support directory has to be redirected, not
+    just ``settings`` - the licence and trial marker, the window geometry, the
+    log and the cache cleanup were all being written for real.
+    """
+    from src import generic_editing, gui, licensing, logic, settings
+
+    real = os.path.expanduser("~/Library/Application Support/ByteMind/ByteProof")
+    for label, value in (
+        ("settings", settings.get_app_support_dir()),
+        ("generic_editing", generic_editing.get_app_support_dir()),
+        ("licensing", licensing.get_app_support_dir()),
+        ("gui", gui.get_app_support_dir()),
+        ("logic", logic.get_app_support_dir()),
+        ("APP_SUPPORT_DIR", settings.APP_SUPPORT_DIR),
+    ):
+        assert not value.startswith(real), f"{label} points at the real folder"
+    assert not str(settings.SETTINGS_FILE).startswith(real)
+
+
+def test_hidden_app_settings_cannot_override_the_wildcard() -> None:
+    """A stray "*" in hidden_apps must not rewrite "Allow other apps"."""
+    if platform.system() != "Darwin":
+        pytest.skip("Live Check controls are macOS-only")
+    app, owner, dialog = _make_settings_dialog()
+    dialog.chk_live_other_apps.setChecked(False)
+    saved = dialog.get_settings()["live_preview"]
+    assert saved["app_rules"]["*"] is False
+    assert saved["hidden_apps"] == []
+    _dispose(dialog, owner, app)
+
+    # A settings file that was hand-edited (or written by an older build) with
+    # "*" in hidden_apps must be ignored, not applied over the switch.
+    from src import settings as settings_mod
+
+    broken = settings_mod.load_runtime_settings()
+    broken["live_preview"]["app_rules"] = {"*": True, "com.apple.mail": True}
+    broken["live_preview"]["hidden_apps"] = ["*"]
+    app2, owner2, dialog2 = _make_settings_dialog(broken)
+    dialog2.chk_live_other_apps.setChecked(False)
+    rules = dialog2.get_settings()["live_preview"]["app_rules"]
+    assert rules["*"] is False, rules
+    _dispose(dialog2, owner2, app2)
+
+
+def test_a_deleted_app_survives_an_older_identifier() -> None:
+    """hidden_apps written with the old Pages identifier still hides Pages."""
+    if platform.system() != "Darwin":
+        pytest.skip("Live Check controls are macOS-only")
+    from src import settings as settings_mod
+
+    saved = settings_mod.load_runtime_settings()
+    saved["live_preview"]["hidden_apps"] = ["com.apple.pages"]
+    saved["live_preview"]["app_rules"] = {"com.apple.iWork.Pages": False}
+    app, owner, dialog = _make_settings_dialog(saved)
+
+    markers = [
+        dialog.live_app_marker(dialog.live_apps_list.item(i))
+        for i in range(dialog.live_apps_list.count())
+    ]
+    assert "com.apple.iWork.Pages" not in markers, markers
+    # And the alias is not carried forward as a growing stale entry.
+    assert dialog.get_settings()["live_preview"]["hidden_apps"] == [
+        "com.apple.iWork.Pages"
+    ]
+    _dispose(dialog, owner, app)
+
+
+def test_a_saved_off_app_reopens_switched_off() -> None:
+    """The row must render the saved state, not just store it."""
+    from PyQt6.QtWidgets import QCheckBox, QLabel
+
+    from src.gui import SettingsDialog
+
+    if platform.system() != "Darwin":
+        pytest.skip("Live Check controls are macOS-only")
+    app, owner, dialog = _make_settings_dialog()
+    item = _live_row_for(dialog, "com.apple.Notes")
+    assert item is not None
+    dialog.live_apps_list.itemWidget(item).findChild(QCheckBox).setChecked(False)
+    saved = dialog.get_settings()
+
+    reopened = SettingsDialog(saved, owner)
+    again = _live_row_for(reopened, "com.apple.Notes")
+    assert again is not None
+    checkbox = reopened.live_apps_list.itemWidget(again).findChild(QCheckBox)
+    assert checkbox is not None
+    assert checkbox.isChecked() is False, "the row must show the saved switch"
+    # And the icon the row renders comes from the real app icon.
+    icon_label = reopened.live_apps_list.itemWidget(again).findChildren(QLabel)
+    assert any(
+        label.pixmap() is not None and not label.pixmap().isNull()
+        for label in icon_label
+    ), "the row draws no icon"
 
     _dispose(reopened, owner, app)
     dialog.deleteLater()
