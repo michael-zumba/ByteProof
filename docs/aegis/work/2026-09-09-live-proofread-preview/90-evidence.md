@@ -581,3 +581,73 @@ longer hidden when the selection went away.
 `test_service_shows_panel_on_result_and_hides_on_selection_change` failed and
 the duplicate was removed. Suite: 356 tests green (`run_tests_ci.py`), ruff
 clean.
+
+## Twelfth fix round (2.1.1-beta.9) — finishing the undo when the pill has the focus
+
+The owner's next log check showed the beta.8 installer had landed at 11:10,
+but the process still running was the **beta.7** one from 10:05 (`ps`), so none
+of the eleventh-round fixes had been exercised yet. The real
+`settings.json` still held `max_chars: 1500` and `app_version: 2.1.1-beta.7`.
+
+Before restarting, the code path was audited one more time and two gaps were
+found in the beta.8 work:
+
+### The clipboard-only undo had the same focus bug
+
+The beta.8 fix activated the target before an Accessibility undo, but the
+`mode == "full"` path (Mail compose, Pages) still called
+`get_selection_light()` while ByteProof owned the keyboard focus. A background
+clipboard-only app cannot answer that read, so `current` came back empty and
+the undo reported "Selection changed — could not undo." on an untouched
+selection. It now:
+
+* activates the record's app first, with the same bounded wait as the range
+  path, and says "could not reach Mail" if that fails;
+* reads with `_read_full_selection_with_retries(attempts=2)`, the same
+  rate-limit-aware bounded read the full apply uses;
+* still refuses unless the selection holds exactly the corrected text
+  (whitespace-insensitive at the edges, as before).
+
+### A correct undo could bounce the panel straight back
+
+After an apply, `_seen_text`/`_previewed_text` hold the corrected text. Undo
+restored the original selection, the poll then read it as a new selection and
+could re-show cached suggestions within a second - a correct undo that looks
+like it did nothing. Every undo state now records `selection_before`, and a
+successful restore marks that text as seen again
+(`_remember_selection_after_undo`), so the poll stays quiet until the user
+makes a new selection.
+
+### The migration only ever existed in memory
+
+`load_runtime_settings` starts from a defaults dict whose `app_version` is
+already `APP_VERSION`, then `_stamp_version_and_save` compared that with
+itself and returned without writing. The 1,500 -> 4,000 limit migration and
+the corrupted-hotkey repair therefore changed the live session but never
+reached `settings.json`, and `last_run_version` was never copied from the
+file, so the post-update Accessibility hint could not trigger either. The
+loaded version and `last_run_version` are now preserved until the save.
+Verified against a copy of the owner's real settings file:
+`max_chars: 1500 -> 4000`, and the restart then showed on disk
+`app_version: 2.1.1-beta.9`, `last_run_version: 2.1.1-beta.9`,
+`max_chars: 4000`, `require_pointer_near: true`.
+
+### Evidence
+
+* Tests: 360 green — `test_hardening.py` 121 (four new: restored selection is
+  marked seen; full undo activates Mail first; unreachable full undo refuses
+  without pasting; the migration reaches the file), `test_live_preview.py`
+  135, `test_smoke.py` 104. Ruff clean; version markers agree.
+* Build: Apple Silicon DMG built, notarized, stapled and installed; running app
+  is 2.1.1-beta.9 (`/Applications`, PID confirmed after restart).
+  DMG sha256 `5609188026d52fe56c2f50a3b22e2ffc05d82f2cdf72303570bab8cb0d8666eb`.
+
+### What was *not* adopted from the owner's temp-file proposal
+
+The existing in-memory stack already stores original, edited, surrounding
+context, document, and offset per apply; undo targets the newest state and
+refuses when a unique, exact match cannot be proved. A temp file would add a
+second source of truth that can be stale after a crash, and the 15-second pill
+is the only undo entry point, so a disk record buys no capability. The
+matching was tightened instead (unique needle, 64-character relocation window,
+editor-side `before_text` guard, Word read-back).

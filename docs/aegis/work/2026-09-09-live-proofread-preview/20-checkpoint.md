@@ -65,6 +65,14 @@
       instead of skipped in silence); suggestions wait for the pointer to be
       with the selected text (selection rectangle when the app reports one,
       otherwise pointer movement since the selection appeared; toggleable)
+- [x] Twelfth fix round (2.1.1-beta.9): the clipboard-only Mail/Pages undo
+      also brings its app forward before reading the selection (it was blamed
+      as "changed" for the same focus reason); a successful undo marks the
+      restored text as seen so the cached suggestion panel cannot bounce back
+      and make the undo look broken; the 1,500 -> 4,000 selection migration
+      and the loaded `last_run_version` are actually persisted to
+      settings.json (APP_VERSION had been compared with itself, so migration
+      saves were skipped)
 - [x] Tenth fix round (2.1.1-beta.7): the hidden main window stays hidden
       while our own card/pill is on screen (helper life-cycle signal + a
       pointer check, non-activating mask on every helper); table **cell**
