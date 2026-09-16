@@ -56,6 +56,15 @@
       borders/buttons/diff wells; spurious "could not verify" fixed
       (two-poll glitch debounce, sync compares the previewed text only,
       frontmost-target check for stale results, 3× sync retry)
+- [x] Eleventh fix round (2.1.1-beta.8): Undo works again (it activates the
+      app it wrote to before restoring - our own pill had taken the focus, so
+      the AX element could not be read and the text was blamed; Word records
+      what it *stored*, and an unreachable app now says so); long selections
+      are checked again (the invisible 1,500-character cap became 4,000,
+      migrates, and is a Settings control; an over-long selection is explained
+      instead of skipped in silence); suggestions wait for the pointer to be
+      with the selected text (selection rectangle when the app reports one,
+      otherwise pointer movement since the selection appeared; toggleable)
 - [x] Tenth fix round (2.1.1-beta.7): the hidden main window stays hidden
       while our own card/pill is on screen (helper life-cycle signal + a
       pointer check, non-activating mask on every helper); table **cell**

@@ -33,7 +33,10 @@ SELF_BUNDLE_MARKERS = ("bytemind", "byteproof")
 DEFAULT_DELAY_MS = 600
 MIN_DELAY_MS = 400
 MAX_DELAY_MS = 2000
-DEFAULT_MAX_CHARS = 1500
+DEFAULT_MAX_CHARS = 4000
+# Bounds for the setting that controls it (Settings > Live Check).
+MIN_MAX_CHARS = 500
+MAX_MAX_CHARS = 20000
 MIN_PREVIEW_CHARS = 8
 # A selection must also be a few words long before suggestions appear:
 # a stray word or two is usually just a cursor placement, and pinging the

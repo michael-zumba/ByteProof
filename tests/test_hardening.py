@@ -3516,3 +3516,410 @@ def test_showing_and_hiding_the_card_reports_helper_activity(monkeypatch):
     service._hide_panel()
     assert len(touches) == quiet
     service.stop()
+
+
+# --- Undo must reach the app it wrote to ------------------------------------
+
+
+SAFARI_TARGET = {
+    "bundle_id": "com.apple.Safari",
+    "pid": 52623,
+    "name": "Safari",
+}
+
+
+def _undo_service(monkeypatch, *, reachable=True):
+    """A live service with a recording editor and one armed undo step."""
+    from src.live_service import LivePreviewService, UndoStep
+
+    written = "the corrected words"
+    original = "the orginal words"
+
+    class FakeEditor:
+        def __init__(self) -> None:
+            self.frontmost = "byteproof"
+            self.activated: list[dict] = []
+            self.restored: list[tuple] = []
+
+        def is_frontmost(self, target) -> bool:
+            return self.frontmost == "safari"
+
+        def activate(self, target) -> bool:
+            self.activated.append(dict(target))
+            if reachable:
+                self.frontmost = "safari"
+            return reachable
+
+        def field_value(self, target) -> str:
+            if self.frontmost != "safari":
+                return ""
+            return written
+
+        def ax_replace_range(
+            self, target, start, length, new_text, before_text=None, **kwargs
+        ):
+            if self.frontmost != "safari":
+                return False, "Could not read the focused text field."
+            self.restored.append((start, length, new_text, before_text))
+            return True, "Applied."
+
+    editor = FakeEditor()
+    service = LivePreviewService()
+    service.refresh_settings({"live_preview": {"enabled": True}})
+    service._editor = editor
+    service._selection_target = dict(SAFARI_TARGET)
+    service._undo_state = {
+        "mode": "range",
+        "target": dict(SAFARI_TARGET),
+        "is_word": False,
+        "document": "",
+        "steps": [
+            UndoStep(
+                0,
+                written,
+                original,
+                needle=f"before {written} after",
+                needle_offset=len("before "),
+            )
+        ],
+    }
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+    return service, editor, written, original, messages
+
+
+def test_undo_brings_the_target_app_forward_first(monkeypatch):
+    """The reported bug: Undo said "the text had changed" and changed nothing.
+
+    Clicking the Undo pill activates ByteProof, and an app that is not active
+    exposes no focused Accessibility element - so every read came back empty
+    and the restore was refused. The undo has to activate the app it wrote to,
+    exactly like the apply does.
+    """
+    service, editor, written, original, messages = _undo_service(monkeypatch)
+
+    service._perform_undo()
+
+    assert editor.activated == [dict(SAFARI_TARGET)], "the app is brought forward"
+    assert editor.restored == [(0, len(written), original, written)]
+    assert messages == ["Undone."]
+    service.stop()
+
+
+def test_undo_says_why_when_the_app_cannot_be_reached(monkeypatch):
+    """An unreachable app is not "the text had changed"."""
+    service, editor, _written, _original, messages = _undo_service(
+        monkeypatch, reachable=False
+    )
+
+    service._perform_undo()
+
+    assert editor.restored == [], "nothing is written into an app we cannot read"
+    assert messages and "could not reach" in messages[0].lower()
+    assert "changed" not in messages[0].lower()
+    service.stop()
+
+
+def test_a_word_undo_records_what_word_stored(monkeypatch):
+    """Word normalises what it is given; the guard must compare against that.
+
+    Recording the text as sent made the undo's own before-text check refuse an
+    edit that was plainly still in the document.
+    """
+    from src import word_integration
+    from src.live_service import LivePreviewService, UndoStep
+
+    sent = 'He said "hello" today'
+    stored = 'He said “hello” today'
+
+    class FakeWord:
+        def read_range_text(self, start, end) -> str:
+            assert start == 100 and end == 100 + len(sent)
+            return stored
+
+    monkeypatch.setattr(
+        word_integration, "get_word_integration", lambda: FakeWord()
+    )
+    service = LivePreviewService()
+    service._selection_is_word = True
+
+    step = service._undo_step(100, sent, "He said hello today")
+
+    assert isinstance(step, UndoStep)
+    assert step.applied == stored, "the undo guard must expect what Word kept"
+    assert step.original == "He said hello today"
+    service.stop()
+
+
+def test_a_word_undo_without_a_readable_range_keeps_the_sent_text(monkeypatch):
+    from src import word_integration
+    from src.live_service import LivePreviewService
+
+    class FakeWord:
+        def read_range_text(self, start, end) -> str:
+            return ""
+
+    monkeypatch.setattr(
+        word_integration, "get_word_integration", lambda: FakeWord()
+    )
+    service = LivePreviewService()
+    service._selection_is_word = True
+
+    step = service._undo_step(10, "sent text", "old text")
+
+    assert step.applied == "sent text"
+    service.stop()
+
+
+# --- long selections --------------------------------------------------------
+
+
+def test_a_five_paragraph_selection_is_checked_now():
+    """1,500 characters was about three paragraphs: the panel never appeared."""
+    from src.live_preview import DEFAULT_MAX_CHARS, evaluate_trigger
+
+    selection = " ".join(["word"] * 600)  # ~3,000 characters
+    assert 1500 < len(selection) <= DEFAULT_MAX_CHARS
+
+    settings = {"live_preview": {"enabled": True, "min_words": 3}}
+    decision, _reason = evaluate_trigger(
+        settings,
+        {"bundle_id": "com.microsoft.Word", "name": "Microsoft Word"},
+        selection,
+        True,
+        True,
+        False,
+        False,
+    )
+    assert decision == "run"
+
+    # A selection beyond the (configurable) limit is still refused.
+    settings["live_preview"]["max_chars"] = 1000
+    decision, reason = evaluate_trigger(
+        settings,
+        {"bundle_id": "com.microsoft.Word", "name": "Microsoft Word"},
+        selection,
+        True,
+        True,
+        False,
+        False,
+    )
+    assert decision == "too_long"
+    assert "1000" in reason
+
+
+def test_the_old_selection_limit_is_migrated():
+    from src.live_preview import DEFAULT_MAX_CHARS
+    from src.settings import _LEGACY_MAX_CHARS, _migrate_live_preview_limits
+
+    legacy = {"live_preview": {"max_chars": _LEGACY_MAX_CHARS}}
+    _migrate_live_preview_limits(legacy)
+    assert legacy["live_preview"]["max_chars"] == DEFAULT_MAX_CHARS
+
+    # A limit the user chose is left alone.
+    chosen = {"live_preview": {"max_chars": 2500}}
+    _migrate_live_preview_limits(chosen)
+    assert chosen["live_preview"]["max_chars"] == 2500
+
+
+def test_a_selection_that_is_too_long_is_explained_once(monkeypatch):
+    """124 silent skips in the owner's log looked like a broken feature."""
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "max_chars": 1500}}
+    )
+    said: list[str] = []
+    service.preview_error.connect(said.append)
+    target = {"bundle_id": "com.microsoft.Word", "name": "Microsoft Word"}
+
+    service._log_too_long_once("com.microsoft.word", target, "x" * 2000)
+    service._log_too_long_once("com.microsoft.word", target, "x" * 2000)
+
+    assert len(said) == 1, "told once, not on every tick"
+    assert "1,500" in said[0]
+    assert "Settings" in said[0]
+    service.stop()
+
+
+# --- only suggest while the pointer is with the selection -------------------
+
+
+class _StubCursor:
+    def __init__(self, x: int, y: int) -> None:
+        self._point = None
+        self.x = x
+        self.y = y
+
+    def pos(self):
+        from PyQt6.QtCore import QPoint
+
+        return QPoint(self.x, self.y)
+
+
+def _pointer_service(monkeypatch, *, captured_at, now_at, enabled=True, rect=None):
+    from src import live_service as live_mod
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {
+            "live_preview": {
+                "enabled": True,
+                "max_chars": 4000,
+                "min_words": 1,
+                "require_pointer_near": enabled,
+            }
+        }
+    )
+    monkeypatch.setattr(
+        live_mod, "QCursor", _StubCursor(now_at[0], now_at[1])
+    )
+    from PyQt6.QtCore import QPoint
+
+    service._pointer_at_capture = QPoint(captured_at[0], captured_at[1])
+    monkeypatch.setattr(service, "_selection_screen_rect", lambda: rect)
+    return service
+
+
+def test_suggestions_wait_while_the_pointer_is_away(monkeypatch):
+    """The owner's rule: a selection the user walked away from is not a request."""
+    service = _pointer_service(monkeypatch, captured_at=(100, 100), now_at=(900, 600))
+    assert service._pointer_near_selection() is False
+
+    near = _pointer_service(monkeypatch, captured_at=(100, 100), now_at=(180, 140))
+    assert near._pointer_near_selection() is True
+
+    service.stop()
+    near.stop()
+
+
+def test_a_known_selection_rectangle_is_measured_directly(monkeypatch):
+    from PyQt6.QtCore import QRect
+
+    rect = QRect(400, 300, 200, 20)
+    # Pointer nowhere near the text, but it has not moved since the selection:
+    # the pointer's own movement is still evidence enough.
+    settled = _pointer_service(
+        monkeypatch, captured_at=(950, 700), now_at=(950, 700), rect=rect
+    )
+    assert settled._pointer_near_selection() is True
+    # Pointer moved away and it is not over the text either: no panel.
+    away = _pointer_service(
+        monkeypatch, captured_at=(950, 700), now_at=(90, 60), rect=rect
+    )
+    assert away._pointer_near_selection() is False
+    # On the text, even though it moved there: the pointer is on the selection.
+    on_text = _pointer_service(
+        monkeypatch, captured_at=(950, 700), now_at=(500, 310), rect=rect
+    )
+    assert on_text._pointer_near_selection() is True
+
+    settled.stop()
+    away.stop()
+    on_text.stop()
+
+
+def test_the_pointer_rule_can_be_turned_off_and_fails_open(monkeypatch):
+    disabled = _pointer_service(
+        monkeypatch, captured_at=(0, 0), now_at=(900, 600), enabled=False
+    )
+    assert disabled._pointer_near_selection() is True
+
+    # Nothing to measure (no rectangle, no reference yet): never take the
+    # feature away.
+    unknown = _pointer_service(
+        monkeypatch, captured_at=(0, 0), now_at=(900, 600)
+    )
+    unknown._pointer_at_capture = None
+    assert unknown._pointer_near_selection() is True
+
+    disabled.stop()
+    unknown.stop()
+
+
+def test_the_poll_waits_for_the_pointer_before_spending_a_request(monkeypatch):
+    """No pointer, no selection: the panel appears once it comes back."""
+    from src import live_service as live_mod
+    from src import word_integration
+    from src.live_service import LivePreviewService
+    from src.word_integration import SCOPE_MAIN
+
+    selection = "A sentence the user selected and then walked away from."
+
+    class FakeWord:
+        def get_selection_info(self):
+            return selection, 0, len(selection), "", ""
+
+        def selection_scope(self) -> str:
+            return SCOPE_MAIN
+
+    class FakeEditor:
+        def frontmost_app(self):
+            return {
+                "bundle_id": "com.microsoft.Word",
+                "name": "Microsoft Word",
+                "pid": 9,
+            }
+
+        def is_word(self, target) -> bool:
+            return True
+
+        def permission_status(self):
+            return True, ""
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {
+            "live_preview": {
+                "enabled": True,
+                "delay_ms": 600,
+                "min_words": 1,
+                "max_chars": 4000,
+                "require_pointer_near": True,
+            }
+        }
+    )
+    service._editor = FakeEditor()
+    monkeypatch.setattr(
+        word_integration, "get_word_integration", lambda: FakeWord()
+    )
+    started: list[Any] = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(service, "_selection_screen_rect", lambda: None)
+
+    def tick(now: float, position: tuple[int, int]) -> None:
+        """One poll tick, with the pointer at a known place."""
+        monkeypatch.setattr(live_mod, "QCursor", _StubCursor(*position))
+        service._sample(now=now)
+        service._pointer_prev = service._pointer_pos()
+
+    # The user selects the text: the first read only starts the debounce.
+    tick(0.0, (100, 100))
+    assert started == [], "a new selection waits for the debounce"
+    # Second agreeing read: committed, with the pointer remembered as being
+    # on the text (it is where the selection gesture left it).
+    tick(0.3, (105, 100))
+    assert service._pointer_at_capture is not None, "the pointer is recorded"
+
+    # The pointer goes elsewhere before the debounce expires: no request.
+    tick(1.2, (1400, 900))
+    assert started == [], "no request once the pointer has left the text"
+
+    # Back on the text: the waiting selection is picked up after all.
+    tick(1.6, (110, 105))
+    assert started, "the panel appears once the pointer returns"
+    service.stop()
+
+
+def test_undo_reads_the_app_it_wrote_to_after_a_switch(monkeypatch):
+    """Switching to Word must not blind the undo of an edit made in Safari."""
+    service, editor, written, original, _messages = _undo_service(monkeypatch)
+    # The user has selected text in Word since the apply.
+    service._selection_is_word = True
+
+    service._perform_undo()
+
+    assert editor.restored == [(0, len(written), original, written)]
+    service.stop()

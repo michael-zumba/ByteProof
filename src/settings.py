@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.1.1-beta.7"
+APP_VERSION = "2.1.1-beta.8"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -338,7 +338,14 @@ def load_runtime_settings() -> dict[str, Any]:
             # Per-app rules: {bundle id | name fragment | "*": enabled}.
             # Empty means every app may trigger suggestions.
             "app_rules": {},
-            "max_chars": 1500,
+            # Longest selection that is checked. The preview request itself is
+            # bounded by its edit and output limits, so a long selection costs
+            # a little more input and nothing more.
+            "max_chars": 4000,
+            # Only suggest while the pointer is still at the text the user
+            # selected: a selection the user has walked away from must not pop
+            # a panel over the document.
+            "require_pointer_near": True,
             "use_local_model": True,
             "style": "strict",
         },
@@ -419,6 +426,7 @@ def load_runtime_settings() -> dict[str, Any]:
         settings["live_preview"].update(loaded["live_preview"])
 
     _migrate_mac_hotkeys(settings)
+    _migrate_live_preview_limits(settings)
     refreshed = refresh_superseded_models(settings)
     if refreshed:
         print(f"Updated default models for: {', '.join(refreshed)}")
@@ -454,6 +462,21 @@ def _migrate_mac_hotkeys(settings: dict[str, Any]) -> None:
         general["proofread_hotkey"] = "<cmd>+<shift>+'"
     if general.get("open_hotkey") == "<ctrl>+<shift>+;":
         general["open_hotkey"] = "<cmd>+<shift>+;"
+
+
+# The longest-selection setting was never exposed in the UI, so a stored value
+# can only be the old built-in default. Raise exactly that value: a limit the
+# user chose deliberately is none of a migration's business.
+_LEGACY_MAX_CHARS = 1500
+
+
+def _migrate_live_preview_limits(settings: dict[str, Any]) -> None:
+    """Give existing installs the longer selection limit (see live_preview)."""
+    from .live_preview import DEFAULT_MAX_CHARS
+
+    live = settings.setdefault("live_preview", {})
+    if int(live.get("max_chars", DEFAULT_MAX_CHARS)) == _LEGACY_MAX_CHARS:
+        live["max_chars"] = DEFAULT_MAX_CHARS
 
 
 def _stamp_version_and_save(settings: dict[str, Any], force: bool = False) -> None:

@@ -444,3 +444,140 @@ helper was just used` / `... the pointer is on a floating helper` when an
 activation is treated as ours, and `APP: activation — showing the main window`
 when it is not. The owner's next beta run can therefore say exactly which one
 happened if the window still appears.
+
+## Eleventh fix round (2.1.1-beta.8) — undo, long selections, the pointer rule
+
+Owner report: *"After applying live suggestions, and if user click undo, it
+says cannot undo because text changed."* Plus: selections of more than four or
+five paragraphs produce no suggestions, and the panel should only appear while
+the pointer is still with the selected text.
+
+### Undo failed because our own pill had taken the focus
+
+`capture.log` (17 Sep, 10:46) shows the whole sequence: `LIVE APPLY ALL` on
+Safari's text field, both ranges written and verified, then two restores, each
+refused with `Could not read the focused text field.`, reported to the user as
+**"Could not undo — the text had changed."**
+
+Nothing had changed. Clicking the Undo pill activates ByteProof, and
+`_mac_ax_text_element(pid)` resolves the target through
+`AXUIElementCreateApplication(pid)` +
+`kAXFocusedUIElementAttribute` - which an application that is *not* active does
+not have. Every read and write then failed, and the message blamed the text.
+The apply path had always activated the target for exactly this reason
+(`LIVE SYNC: verified after bringing the app forward` in the same log); undo
+never did.
+
+Fix: `_perform_undo` activates the app the record belongs to, waits (bounded:
+`TARGET_ACTIVATE_TIMEOUT_S`) until it is frontmost, and only then restores.
+When the app cannot be reached at all, the message now says so
+("ByteProof could not reach Safari…") instead of blaming the text.
+`_live_edit_text` also stopped refusing to read a field whenever the *current*
+selection happens to be in Word, so an undo of an edit made elsewhere still
+searches the document it wrote to.
+
+### The record is already complete; the matching is what had to be tightened
+
+The owner's proposal - keep original and edited text in a temp file and only
+undo on a 100% match - was reviewed and deliberately not implemented as such:
+
+* the record already holds everything the file would (the text written, the
+  text to restore, the surrounding 32 characters from both sides, the offset,
+  the document name); the failure above was mechanical, not missing data;
+* a file adds a second, *stale* source of truth: after an app restart or a
+  crash it would offer an undo whose text no longer matches anything, which is
+  exactly the risk the owner asked to avoid;
+* the pill is the only way to ask for an undo and it lives for 15 seconds, so
+  a disk record buys no capability - an undo whose record is gone is gone.
+
+What changed instead, so that a *match* is now provable in every path:
+
+* the app the record belongs to must be reachable (above);
+* the text written must still be where the record says: the recorded needle
+  must occur exactly once, or the recorded offset must hold exactly that text
+  (`_undo_target`, unchanged - it already refuses to guess);
+* for Word, the text recorded is now what Word *stored*, not what was sent:
+  Word rewrites what it is given (smart quotes, autocorrect), and the undo's
+  own before-text guard compares against the document. `read_range_text()`
+  reads the range back after a live edit (verified against Word: `4-9` →
+  `'quick'`, an empty range → `''`, whole document round-trips byte for byte),
+  and `UndoStep.applied` carries that spelling.
+
+Tests: `test_undo_brings_the_target_app_forward_first`,
+`test_undo_says_why_when_the_app_cannot_be_reached`,
+`test_undo_reads_the_app_it_wrote_to_after_a_switch`,
+`test_a_word_undo_records_what_word_stored`,
+`test_a_word_undo_without_a_readable_range_keeps_the_sent_text`.
+
+### Long selections were refused by a limit nobody could see
+
+`LIVE SKIP: too_long` appears 124 times in `capture.log` (20:24-20:26 and 14:41
+are Microsoft Word). The cap was `max_chars: 1500` - about three paragraphs -
+and it was not exposed in Settings at all, so four or five paragraphs silently
+produced nothing: exactly the owner's report. `evaluate_trigger` is the gate.
+
+* `DEFAULT_MAX_CHARS` is now 4000 (six to eight paragraphs). The request itself
+  is bounded by `PREVIEW_MAX_EDITS` (12) and `PREVIEW_MAX_OUTPUT_TOKENS` (512),
+  so a longer selection costs input tokens and nothing else.
+* Existing installs migrate: a stored value of exactly the old built-in default
+  (1500) is raised, a value the user chose is left alone
+  (`_migrate_live_preview_limits`). Verified against a copy of the owner's real
+  `settings.json`: 1500 → 4000.
+* The limit is now a Settings > Live Check control (500-20,000 characters).
+* A selection that is still too long is no longer silent: the reason is logged
+  once and the user is told to raise the limit.
+
+Word read timing was measured before raising the cap (scratch document): the
+selection read is an AppleScript round trip of ~300 ms at 93, 500 and 4,000
+characters alike - the text length is not what costs - so the 1.5 s poll
+timeout still has plenty of headroom.
+
+Tests: `test_a_five_paragraph_selection_is_checked_now`,
+`test_the_old_selection_limit_is_migrated`,
+`test_a_selection_that_is_too_long_is_explained_once`.
+
+### Suggestions now wait for the pointer to be with the text
+
+Owner request, assessed as feasible and implemented behind a setting that
+defaults on:
+
+> only trigger the live editing suggestion when the mouse is also around the
+> selected text… I don't want it to interrupt user's work
+
+`_pointer_near_selection()` answers with two signals, either one enough:
+
+* the pointer is within `POINTER_NEAR_SELECTION_PX` (150 px) of the selection's
+  own screen rectangle, from `ax_bounds_for_range` - asked for the first and
+  last character only (one AX round trip each, cached for a second), and never
+  for Word, whose tree is large and whose panel has always been placed at the
+  pointer;
+* otherwise, the pointer has not moved further than that from where it was
+  when the selection appeared. `_poll` samples the pointer every tick, so the
+  reference is the position from the tick *before* the selection was committed
+  (`_pointer_at_capture`), which needs no screen-coordinate conversion from the
+  AppKit event monitor and works in every app, Word included.
+
+Neither signal available (no rectangle, no reference) means "yes": an
+unmeasurable pointer must never take the feature away. A gated selection is not
+marked as seen, so the panel still appears the moment the pointer comes back.
+Turn the rule off with Settings > Live Check ("Only suggest while the pointer is
+still at the selected text" → `live_preview.require_pointer_near`).
+
+Note on scope: the pointer rule governs *new* previews only. A panel that is
+already on screen is never taken away by moving the pointer, because reading
+the suggestions is exactly what the pointer usually goes to do.
+
+Tests: `test_suggestions_wait_while_the_pointer_is_away`,
+`test_a_known_selection_rectangle_is_measured_directly`,
+`test_the_pointer_rule_can_be_turned_off_and_fails_open`,
+`test_the_poll_waits_for_the_pointer_before_spending_a_request` (three real
+poll ticks: selection, walk away, come back).
+
+### One self-inflicted regression, caught by the suite
+
+The first version of the pointer change accidentally duplicated the poll's
+"selection committed" block, so the second copy never ran and the panel was no
+longer hidden when the selection went away.
+`test_service_shows_panel_on_result_and_hides_on_selection_change` failed and
+the duplicate was removed. Suite: 356 tests green (`run_tests_ci.py`), ruff
+clean.

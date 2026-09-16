@@ -808,16 +808,18 @@ def test_word_set_live_underline_builds_dotted_script(monkeypatch):
 
 def test_load_runtime_settings_includes_live_preview_defaults(monkeypatch, tmp_path):
     from src import settings as settings_mod
+    from src.live_preview import DEFAULT_MAX_CHARS
 
     monkeypatch.setattr(settings_mod, "SETTINGS_FILE", str(tmp_path / "settings.json"))
     loaded = settings_mod.load_runtime_settings()
     assert loaded["live_preview"] == {
         "enabled": True,
         "delay_ms": 600,
-        "max_chars": 1500,
+        "max_chars": DEFAULT_MAX_CHARS,
         "min_words": 3,
         "app_rules": {},
         "hidden_apps": [],
+        "require_pointer_near": True,
         "use_local_model": True,
         "style": "strict",
     }

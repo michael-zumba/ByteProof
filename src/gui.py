@@ -92,6 +92,11 @@ from .licensing import (
     record_proofread_usage,
 )
 from .live_overlay import apply_nonactivating_panel
+from .live_preview import (
+    DEFAULT_MAX_CHARS,
+    MAX_MAX_CHARS,
+    MIN_MAX_CHARS,
+)
 from .local_model import (
     MODEL_CATALOG,
     DownloadCancelledError,
@@ -1153,6 +1158,8 @@ class SettingsDialog(QDialog):
     combo_context: QComboBox
     live_delay_slider: QSlider
     live_delay_label: QLabel
+    live_max_chars_spin: QSpinBox
+    chk_live_pointer_near: QCheckBox
     automation_enabled_check: QCheckBox
     automation_list: QListWidget
     automation_add_btn: QPushButton
@@ -2048,6 +2055,50 @@ class SettingsDialog(QDialog):
         delay_layout.addStretch(1)
         style_layout.addWidget(delay_row)
 
+        length_row = QWidget()
+        length_layout = QHBoxLayout(length_row)
+        length_layout.setContentsMargins(0, 0, 0, 0)
+        length_layout.setSpacing(8)
+        length_label = QLabel("Check selections up to")
+        length_label.setStyleSheet("font-size: 13px; color: #292524;")
+        self.live_max_chars_spin = QSpinBox()
+        self.live_max_chars_spin.setRange(MIN_MAX_CHARS, MAX_MAX_CHARS)
+        self.live_max_chars_spin.setSingleStep(500)
+        self.live_max_chars_spin.setFixedWidth(92)
+        self.live_max_chars_spin.setValue(
+            int(
+                self.settings.get("live_preview", {}).get(
+                    "max_chars", DEFAULT_MAX_CHARS
+                )
+            )
+        )
+        length_suffix = QLabel("characters")
+        length_suffix.setStyleSheet("font-size: 13px; color: #292524;")
+        length_layout.addWidget(length_label)
+        length_layout.addWidget(self.live_max_chars_spin)
+        length_layout.addWidget(length_suffix)
+        length_layout.addWidget(
+            info_icon(
+                "Longer selections are left alone, because a whole section in "
+                "one panel is rarely what you want. Around 4,000 characters "
+                "is six to eight paragraphs."
+            )
+        )
+        length_layout.addStretch(1)
+        style_layout.addWidget(length_row)
+
+        self.chk_live_pointer_near = QCheckBox(
+            "Only suggest while the pointer is still at the selected text"
+        )
+        self.chk_live_pointer_near.setChecked(
+            bool(
+                self.settings.get("live_preview", {}).get(
+                    "require_pointer_near", True
+                )
+            )
+        )
+        style_layout.addWidget(self.chk_live_pointer_near)
+
         self.chk_live_local = QCheckBox(
             "Prefer the local AI for suggestions (saves cloud tokens)"
         )
@@ -2120,6 +2171,8 @@ class SettingsDialog(QDialog):
                 self.live_style_combo,
                 self.live_delay_slider,
                 self.live_min_words_spin,
+                self.live_max_chars_spin,
+                self.chk_live_pointer_near,
                 self.live_toggle_hotkey_edit,
                 self.apply_all_hotkey_edit,
             ):
@@ -4295,7 +4348,10 @@ class SettingsDialog(QDialog):
             self.live_delay_slider.value()
         )
         self.settings["live_preview"]["max_chars"] = int(
-            self.settings.get("live_preview", {}).get("max_chars", 1500)
+            self.live_max_chars_spin.value()
+        )
+        self.settings["live_preview"]["require_pointer_near"] = bool(
+            self.chk_live_pointer_near.isChecked()
         )
         self.settings["live_preview"]["min_words"] = int(
             self.live_min_words_spin.value()

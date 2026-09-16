@@ -198,6 +198,15 @@ class WordIntegration:
         """Replace the text of a selection that sits in a Word comment."""
         raise NotImplementedError
 
+    def read_range_text(self, start: int, end: int) -> str:
+        """The document text at an absolute range, or "" when unreadable.
+
+        Read right after a live edit: Word normalises what it is given, so the
+        only truth about what an edit left behind is a read of the range it
+        wrote. Undo's guard compares against that text.
+        """
+        raise NotImplementedError
+
     def add_comment(self, comment_text: str) -> None:
         raise NotImplementedError
 
@@ -594,6 +603,17 @@ class WindowsWordIntegration(WordIntegration):
         except Exception as e:
             _log_word(f"Error getting hidden spans (Windows): {e}")
             return []
+
+    def read_range_text(self, start: int, end: int) -> str:
+        """See WordIntegration.read_range_text (Windows/COM)."""
+        try:
+            word = self._get_word()
+            if not word.Documents.Count:
+                return ""
+            return str(word.ActiveDocument.Range(int(start), int(end)).Text or "")
+        except Exception as exc:
+            _log_word(f"could not read the document range: {exc}")
+            return ""
 
     def add_comment(self, comment_text: str) -> None:
         if not comment_text or not comment_text.strip():
@@ -1720,6 +1740,20 @@ class MacOSWordIntegration(WordIntegration):
                 except Exception:
                     continue
         return None
+
+    def read_range_text(self, start: int, end: int) -> str:
+        """See WordIntegration.read_range_text (macOS/AppleScript).
+
+        Returned as Word reports it: this becomes the before-text the undo
+        checks against, so it has to be in Word's own spelling rather than the
+        spelling that was sent to it. An empty range comes back as the literal
+        "missing value", which is normalised to an empty string the same way
+        the selection read does it.
+        """
+        text = self._mac_read_range_text(int(start), int(end))
+        if str(text).strip().lower() == "missing value":
+            return ""
+        return text
 
     def add_comment(self, comment_text: str) -> None:
         import subprocess as sp

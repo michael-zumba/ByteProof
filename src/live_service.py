@@ -34,6 +34,7 @@ from .live_preview import (
     CLIPBOARD_READ_BACKOFF_S,
     CLIPBOARD_READ_INTERVAL_S,
     DEFAULT_DELAY_MS,
+    DEFAULT_MAX_CHARS,
     POLL_INTERVAL_MS,
     RETRY_COOLDOWN_S,
     RETRY_MAX_FAILURES,
@@ -78,6 +79,19 @@ ACCESS_RETRY_S = 60.0
 UNDO_AVAILABLE_MS = 15000
 # How many previous applies can still be undone.
 UNDO_STACK_MAX = 5
+# An app that is not active exposes no focused Accessibility element, so a
+# write has to wait for the app to come forward first. Bounded: an app that
+# never confirms is reported instead of blocking the UI.
+TARGET_ACTIVATE_TIMEOUT_S = 1.0
+
+# The panel only appears while the pointer is still with the text the user
+# selected: a selection the user has walked away from is not a request for
+# suggestions. Measured either against the selection's own screen rectangle
+# (apps that expose bounds) or from where the pointer was when the selection
+# appeared (everywhere else, Word included).
+POINTER_NEAR_SELECTION_PX = 150
+# How long a selection's screen rectangle stays usable.
+SELECTION_RECT_TTL_S = 1.0
 
 # How long the "no changes needed" panel lingers before fading away.
 CLEAN_PANEL_MS = 2600
@@ -283,6 +297,20 @@ def _log_word_busy_once(exc: Exception) -> None:
     _debug_log(f"LIVE SKIP: Word busy ({exc})")
 
 
+def _distance_between(first: QPoint, second: QPoint) -> float:
+    """Straight-line distance between two screen points."""
+    return (
+        ((first.x() - second.x()) ** 2 + (first.y() - second.y()) ** 2) ** 0.5
+    )
+
+
+def _distance_to_rect(point: QPoint, rect: QRect) -> float:
+    """Distance from a point to a rectangle (0 when inside it)."""
+    dx = max(rect.left() - point.x(), 0, point.x() - rect.right())
+    dy = max(rect.top() - point.y(), 0, point.y() - rect.bottom())
+    return (dx * dx + dy * dy) ** 0.5
+
+
 class UndoStep(NamedTuple):
     """One applied edit, plus enough context to find it again later."""
 
@@ -337,6 +365,12 @@ class LivePreviewService(QObject):
         self._selection_scope = SCOPE_MAIN
         self._word_scope_key: tuple[int, int, str] | None = None
         self._word_scope = SCOPE_MAIN
+        # Pointer tracking for the "only suggest while the pointer is with the
+        # selection" rule, and the cached rectangle of the selection itself.
+        self._pointer_at_capture: QPoint | None = None
+        self._pointer_prev: QPoint | None = None
+        self._selection_rect: tuple[float, QRect | None] | None = None
+        self._pointer_away_logged: dict[str, float] = {}
         # Word position mapping for the batch being applied: prepared once,
         # then shifted by each edit instead of re-scanned per suggestion.
         self._word_prepared = False
@@ -437,6 +471,12 @@ class LivePreviewService(QObject):
             self._sample(now=time.monotonic())
         except Exception:
             pass
+        finally:
+            # The pointer is sampled every tick. The position from the tick
+            # *before* a selection appeared is the closest thing to "where the
+            # user's hand was when they selected it", and it needs no
+            # screen-coordinate conversion from the event monitor.
+            self._pointer_prev = self._pointer_pos()
 
     def _sample(self, now: float) -> None:
         self._last_now = now
@@ -639,6 +679,11 @@ class LivePreviewService(QObject):
                 self._seen_text = self._candidate_text
                 self._candidate_text = ""
                 self._candidate_count = 0
+                # The selection is committed: remember where the pointer was
+                # just before it appeared, which is where the user's hand still
+                # is - the reference for "they are still working on this text".
+                self._pointer_at_capture = self._pointer_prev or self._pointer_pos()
+                self._selection_rect = None
                 self._previewed_text = ""
                 self._retry_not_before = None
                 self._fail_streak = 0
@@ -699,6 +744,8 @@ class LivePreviewService(QObject):
                 self._show_result(cached)
             return
         if decision != "run":
+            if decision == "too_long":
+                self._log_too_long_once(bundle, target, text)
             if decision not in (
                 "unchanged",
                 "not_stable",
@@ -712,6 +759,12 @@ class LivePreviewService(QObject):
                 _debug_log(f"LIVE SKIP: {decision} app={target.get('name')!r}")
             return
         if self._retry_not_before is not None and now < self._retry_not_before:
+            return
+        if not self._pointer_near_selection():
+            # The user selected this text and then moved away. Nothing is
+            # marked as seen, so the panel still appears if they come back to
+            # the text before selecting something else.
+            self._log_pointer_far_once(bundle, target)
             return
 
         self._previewed_text = text
@@ -1098,6 +1151,47 @@ class LivePreviewService(QObject):
                 self._word_scope = SCOPE_MAIN
         return self._word_scope
 
+    def _log_pointer_far_once(self, bundle: str, target: dict[str, Any]) -> None:
+        """Note (at most every few seconds) that the pointer left the text.
+
+        This is a normal, frequent decision, not an error: the gate is
+        re-evaluated on every tick while the selection waits, so logging each
+        one would bury the log.
+        """
+        now = time.monotonic()
+        key = f"{bundle}:pointer_away"
+        if now - self._pointer_away_logged.get(key, 0.0) < 10.0:
+            return
+        self._pointer_away_logged[key] = now
+        _debug_log(f"LIVE SKIP: pointer_away app={target.get('name')!r}")
+
+    def _log_too_long_once(
+        self, bundle: str, target: dict[str, Any], text: str
+    ) -> None:
+        """Say once why a long selection produced nothing.
+
+        The owner's log had 124 silent `too_long` skips: selecting five
+        paragraphs looked exactly like Live Check having stopped working.
+        """
+        limit = int(
+            self._settings.get("live_preview", {}).get(
+                "max_chars", DEFAULT_MAX_CHARS
+            )
+        )
+        key = f"{bundle}:too_long"
+        message = (
+            f"LIVE SKIP: too_long bundle={bundle} chars={len(text)} "
+            f"limit={limit}"
+        )
+        if self._read_only_logged.get(key) == message:
+            return
+        self._read_only_logged[key] = message
+        _debug_log(message)
+        self.preview_error.emit(
+            f"That selection is longer than the {limit:,} characters Live "
+            "Check is set to check — raise the limit in Settings > Live Check."
+        )
+
     def _log_word_scope_once(self, scope: str, bundle: str) -> None:
         """Say once why this selection is not proofread (never per tick)."""
         key = f"{bundle}:{scope}"
@@ -1111,6 +1205,96 @@ class LivePreviewService(QObject):
                 "A whole table is selected — select the text inside the "
                 "cells you want checked."
             )
+
+    # --- pointer proximity ---------------------------------------------------
+
+    def _pointer_pos(self) -> QPoint | None:
+        try:
+            return QCursor.pos()
+        except Exception:
+            return None
+
+    def _selection_screen_rect(self) -> QRect | None:
+        """The selected text's screen rectangle, when the app exposes it.
+
+        Only the first and last character are asked for: Appsrc's
+        ``AXBoundsForRange`` is one round trip per character, and two corners
+        are enough to know whether the pointer is still with the selection.
+        Cached briefly - the trigger evaluates every tick.
+
+        Returns None when the app reports no bounds, which leaves the caller to
+        judge the pointer by movement. Word is never asked: its Accessibility
+        tree is large, its selection rectangle has never been used (the panel
+        has always been placed at the pointer there), and the movement signal
+        covers it.
+        """
+        now = time.monotonic()
+        cached = self._selection_rect
+        if cached is not None and now - cached[0] < SELECTION_RECT_TTL_S:
+            return cached[1]
+        rect: QRect | None = None
+        try:
+            length = len(self._selection_text)
+            if (
+                self._selection_target
+                and self._selection_has_range
+                and length
+                and not self._selection_is_word
+            ):
+                start = int(self._selection_start)
+                corners = list(
+                    self._editor.ax_bounds_for_range(
+                        self._selection_target, start, 1
+                    )
+                )
+                corners += list(
+                    self._editor.ax_bounds_for_range(
+                        self._selection_target, start + length - 1, 1
+                    )
+                )
+                for x, y, width, height in corners:
+                    corner = QRect(
+                        int(x), int(y), max(1, int(width)), max(1, int(height))
+                    )
+                    rect = corner if rect is None else rect.united(corner)
+        except Exception as exc:
+            _debug_log(f"LIVE POINTER: selection bounds unavailable ({exc})")
+            rect = None
+        self._selection_rect = (now, rect)
+        return rect
+
+    def _pointer_near_selection(self) -> bool:
+        """Whether the pointer is still with the text the user selected.
+
+        The owner's rule: suggestions are for text the user is working on, not
+        for a selection they have walked away from. Two signals, either one
+        enough:
+
+        * the pointer is within ``POINTER_NEAR_SELECTION_PX`` of the
+          selection's own rectangle, when the app reports one;
+        * the pointer has not moved further than that since the selection
+          appeared - the fallback that covers Word and every app without
+          bounds.
+
+        With neither signal available the answer is "yes": an unmeasurable
+        pointer must never take the feature away.
+        """
+        if not self._settings.get("live_preview", {}).get(
+            "require_pointer_near", True
+        ):
+            return True
+        point = self._pointer_pos()
+        if point is None:
+            return True
+        rect = self._selection_screen_rect()
+        if rect is not None and _distance_to_rect(point, rect) <= (
+            POINTER_NEAR_SELECTION_PX
+        ):
+            return True
+        reference = self._pointer_at_capture or self._pointer_prev
+        if reference is None:
+            return True
+        return _distance_between(point, reference) <= POINTER_NEAR_SELECTION_PX
 
     # --- provider ---
 
@@ -1797,6 +1981,14 @@ class LivePreviewService(QObject):
         """
         live = self._live_edit_text()
         if not live:
+            if self._selection_is_word:
+                # Word's document is not readable through AX. Read the written
+                # range back instead: Word rewrites what it is given (smart
+                # quotes, autocorrect), and recording the text as sent would
+                # make the undo's own guard refuse the restore of an edit that
+                # is plainly still there.
+                stored = self._word_stored_text(abs_start, len(applied))
+                return UndoStep(abs_start, stored or applied, original)
             return UndoStep(abs_start, applied, original)
         start = abs_start
         if live[start : start + len(applied)] != applied:
@@ -1821,6 +2013,23 @@ class LivePreviewService(QObject):
             needle=live[left:right],
             needle_offset=start - left,
         )
+
+    def _word_stored_text(self, abs_start: int, length: int) -> str:
+        """What the Word document really holds at a range we just wrote.
+
+        One AppleScript read per applied edit (applies are user-initiated).
+        Returns "" when it cannot be read, so callers keep the text they sent.
+        """
+        try:
+            from .word_integration import get_word_integration
+
+            reader = getattr(get_word_integration(), "read_range_text", None)
+            if not callable(reader):
+                return ""
+            return reader(int(abs_start), int(abs_start) + int(length)) or ""
+        except Exception as exc:
+            _debug_log(f"LIVE UNDO: could not read the written range back: {exc}")
+            return ""
 
     def _undo_comment(self, state: dict[str, Any]) -> None:
         """Put a comment back the way it was before the last apply.
@@ -1914,6 +2123,16 @@ class LivePreviewService(QObject):
                 return
             restored = 0
             total = 0
+            failures: list[str] = []
+            if not state.get("is_word"):
+                # Clicking the Undo pill makes ByteProof frontmost, and an app
+                # that is not active exposes no focused Accessibility element:
+                # every read and write then failed with "Could not read the
+                # focused text field", and the user was told the text had
+                # changed. The apply path has always activated the target for
+                # exactly this reason; undo has to do the same.
+                if not self._activate_for_undo(state.get("target") or {}):
+                    failures.append("unreachable")
             for raw_step in state.get("steps") or []:
                 step = (
                     raw_step
@@ -1924,7 +2143,7 @@ class LivePreviewService(QObject):
                 if state.get("is_word"):
                     from .word_integration import get_word_integration
 
-                    ok, _ = get_word_integration().apply_live_edit(
+                    ok, message = get_word_integration().apply_live_edit(
                         0,
                         step.abs_start,
                         step.abs_start + len(step.applied),
@@ -1934,6 +2153,12 @@ class LivePreviewService(QObject):
                     )
                     if ok:
                         restored += 1
+                    else:
+                        _debug_log(
+                            f"LIVE UNDO: Word refused the restore "
+                            f"({message!r}) at {step.abs_start}"
+                        )
+                        failures.append("changed")
                     continue
                 live = self._live_edit_text(state.get("target") or None)
                 target = self._undo_target(step, live)
@@ -1942,6 +2167,7 @@ class LivePreviewService(QObject):
                         "LIVE UNDO: the edited text is no longer where it was "
                         f"written (offset {step.abs_start}); leaving it alone"
                     )
+                    failures.append("changed")
                     continue
                 ok, message = self._editor.ax_replace_range(
                     state.get("target") or {},
@@ -1955,6 +2181,9 @@ class LivePreviewService(QObject):
                         f"LIVE UNDO: the app refused the restore ({message!r}) "
                         f"at {target}"
                     )
+                    failures.append(
+                        "unreachable" if not live else "changed"
+                    )
                     continue
                 restored += 1
             _debug_log(f"LIVE UNDO: restored {restored} of {total}")
@@ -1967,13 +2196,61 @@ class LivePreviewService(QObject):
                     f"Undone {restored} of {total} — the rest had changed."
                 )
             else:
-                self.apply_done.emit("Could not undo — the text had changed.")
+                self.apply_done.emit(self._undo_failure_message(state, failures))
             if restored:
                 self._restore_previous_undo()
         except Exception as exc:
             _debug_log(f"LIVE UNDO ERROR: {exc}")
             self.apply_done.emit("Could not undo.")
             self._restore_previous_undo()
+
+    def _activate_for_undo(self, target: dict[str, Any]) -> bool:
+        """Bring the app the undo record belongs to back to the front.
+
+        An Accessibility write needs the app to have a focused element, and a
+        background app has none: without this the restore fails and the user is
+        told the text changed, which is both wrong and unactionable. Bounded
+        wait, so an app that never comes forward is reported rather than
+        freezing the UI.
+        """
+        pid = int((target or {}).get("pid") or 0)
+        if not pid:
+            return False
+        try:
+            if self._editor.is_frontmost(target):
+                return True
+            _debug_log(
+                f"LIVE UNDO: bringing {target.get('name')!r} forward before "
+                "restoring"
+            )
+            self._editor.activate(target)
+            deadline = time.monotonic() + TARGET_ACTIVATE_TIMEOUT_S
+            while time.monotonic() < deadline:
+                if self._editor.is_frontmost(target):
+                    # Give the app a moment to install its focus, which is what
+                    # the focused-element lookup needs.
+                    time.sleep(0.15)
+                    return True
+                time.sleep(0.05)
+            _debug_log(
+                f"LIVE UNDO: {target.get('name')!r} did not come forward"
+            )
+            return False
+        except Exception as exc:
+            _debug_log(f"LIVE UNDO: could not activate the target: {exc}")
+            return False
+
+    def _undo_failure_message(
+        self, state: dict[str, Any], failures: list[str]
+    ) -> str:
+        """Say why nothing could be restored, in terms the user can act on."""
+        app = (state.get("target") or {}).get("name") or "that app"
+        if "unreachable" in failures:
+            return (
+                f"Could not undo — ByteProof could not reach {app}. "
+                "Bring it forward and press Undo again."
+            )
+        return "Could not undo — the text had changed."
 
     def _restore_previous_undo(self) -> None:
         """Offer the next older undo step, if any remains."""
@@ -2169,11 +2446,12 @@ class LivePreviewService(QObject):
         """The target field's current text, or "" when it cannot be read.
 
         Word is excluded: its document is read through AppleScript at apply
-        time, and the AX value of a Word window is not the document. Pass
-        ``target`` to read a specific app - Undo must search the document the
-        edit was applied to, which may not be the one selected now.
+        time, and the AX value of a Word window is not the document. That
+        applies to the selection being worked on - pass ``target`` to read a
+        specific app, which Undo does: it must search the document the edit
+        was applied to, even when the user has since selected text in Word.
         """
-        if self._selection_is_word:
+        if self._selection_is_word and target is None:
             return ""
         reader = getattr(self._editor, "field_value", None)
         if reader is None:
