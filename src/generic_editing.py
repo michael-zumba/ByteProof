@@ -1201,6 +1201,7 @@ class GenericTextEditor:
             "found": False,
             "editable": False,
             "role": "",
+            "description": "",
         }
         if SYSTEM != "Darwin":
             return result
@@ -1230,6 +1231,17 @@ class GenericTextEditor:
             )
             if err == 0 and role:
                 result["role"] = str(role)
+        except Exception:
+            pass
+        try:
+            # AXDescription is what identifies a specialised text surface (a
+            # Word comment box, for instance) to callers that must not write
+            # into the wrong one.
+            err, desc = AS.AXUIElementCopyAttributeValue(
+                focused, AS.kAXDescriptionAttribute, None
+            )
+            if err == 0 and desc:
+                result["description"] = str(desc)
         except Exception:
             pass
         result["editable"] = GenericTextEditor._ax_editable(AS, pid, focused)

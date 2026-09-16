@@ -27,12 +27,38 @@ from .settings import (
     resource_path,
 )
 from .utils import mask_api_key, normalize_text, select_api_key
-from .word_integration import get_word_integration
+from .word_integration import (
+    SCOPE_COMMENTS,
+    SCOPE_OTHER_STORY,
+    SCOPE_WHOLE_TABLE,
+    get_word_integration,
+)
 
 # Initialize platform-specific Word integration
 word_app = get_word_integration()
 
-TABLE_SKIPPED_STATUS = "Skipped: Selection contains a table. Please select text excluding tables."
+# Only a WHOLE table selection is refused: the text inside table cells is prose
+# and is proofread like any other text. What is refused is the table itself,
+# whose structure a rewrite would change.
+TABLE_SKIPPED_STATUS = (
+    "Skipped: the whole table is selected. Please select the text inside the "
+    "cells you want proofread."
+)
+
+# Comment text lives in its own story and this flow writes through document
+# character ranges, which would land in the manuscript instead of the comment.
+# Live Check handles comments (it rewrites the comment as a whole).
+COMMENT_SKIPPED_STATUS = (
+    "Skipped: comments are proofread by Live Check. Select the comment text "
+    "and use the live suggestions."
+)
+
+# Headers, footers and notes share the problem: their offsets are not document
+# offsets, so a range write would edit the wrong text.
+STORY_SKIPPED_STATUS = (
+    "Skipped: this text is not in the document body. Select text in the body "
+    "to proofread it."
+)
 
 
 class TaskCancelledError(Exception):
@@ -1591,10 +1617,15 @@ def proofread_selection_once(
 ) -> tuple[str, str | None, str | None, str | None, int]:
     try:
         word_app.ensure_ready()
-        
-        if word_app.is_selection_in_table():
+
+        scope = word_app.selection_scope()
+        if scope == SCOPE_WHOLE_TABLE:
             return TABLE_SKIPPED_STATUS, None, None, None, 0
-            
+        if scope == SCOPE_COMMENTS:
+            return COMMENT_SKIPPED_STATUS, None, None, None, 0
+        if scope == SCOPE_OTHER_STORY:
+            return STORY_SKIPPED_STATUS, None, None, None, 0
+
         runtime_settings = settings or load_runtime_settings()
         use_track_changes = runtime_settings.get("general", {}).get(
             "track_changes", True

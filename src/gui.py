@@ -15,6 +15,7 @@ from PyQt6.QtCore import (
     QFileInfo,
     QObject,
     QPropertyAnimation,
+    QRect,
     QRectF,
     QSize,
     Qt,
@@ -90,6 +91,7 @@ from .licensing import (
     is_licensed,
     record_proofread_usage,
 )
+from .live_overlay import apply_nonactivating_panel
 from .local_model import (
     MODEL_CATALOG,
     DownloadCancelledError,
@@ -105,6 +107,8 @@ from .local_model import (
     stop_local_server,
 )
 from .logic import (
+    COMMENT_SKIPPED_STATUS,
+    STORY_SKIPPED_STATUS,
     TABLE_SKIPPED_STATUS,
     TaskCancelledError,
     _find_protected_spans,
@@ -152,6 +156,15 @@ def _mono_font(size: int = 12) -> QFont:
 # waiting a minute for a stalled model download looked like the app ignoring
 # the Quit, and the user pressed it again.
 WORKER_QUIT_GRACE_MS = 1500
+
+# Clicking one of the floating helpers (the suggestion card, the pill, the
+# Undo button) activates ByteProof on macOS even though the helper never takes
+# focus. For this long after such a touch the activation is treated as ours:
+# the hidden main window stays in the menu bar instead of popping up over the
+# document. Long enough to cover a click, the preview, the apply and the
+# result pill; short enough that a Dock click a moment later still opens the
+# window.
+HELPER_ACTIVATION_GRACE_S = 8.0
 
 
 class AppNameLineEdit(QLineEdit):
@@ -492,6 +505,9 @@ class ToastNotification(QFrame):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self._fade_out)
         self._processing = False
+        # Same as the suggestion card: a click on the pill must not activate
+        # ByteProof and drag the hidden main window out of the menu bar.
+        apply_nonactivating_panel(self)
 
     def paintEvent(self, a0: Any) -> None:  # pyright: ignore[reportAny]
         """Paint a fully opaque black capsule (dynamic-island style).
@@ -4681,6 +4697,9 @@ class ProofreaderApp(QMainWindow):
         self._suppress_activate_until = 0.0
         self._tray_menu_open = False
         self._close_hint_shown = False
+        # Last time one of the floating helpers was touched; used to tell an
+        # activation they caused apart from the user clicking the Dock icon.
+        self._last_helper_touch = 0.0
         # Set as soon as a quit is requested, so the close handler stops
         # treating the close that a quit sends as "user closed the window".
         self._quitting = False
@@ -4705,6 +4724,9 @@ class ProofreaderApp(QMainWindow):
             self.live_service.preview_error.connect(self._on_live_preview_error)
             self.live_service.apply_done.connect(self._on_live_apply_done)
             self.live_service.live_status.connect(self._apply_live_status)
+            self.live_service.helper_activity.connect(
+                self.note_helper_activity
+            )
             self._apply_live_status(
                 "disabled"
                 if not self.settings.get("live_preview", {}).get(
@@ -4951,11 +4973,60 @@ class ProofreaderApp(QMainWindow):
             return None
         return apps[index]
 
+    def note_helper_activity(self, seconds: float = HELPER_ACTIVATION_GRACE_S) -> None:
+        """Record that one of our floating helpers appeared, moved or was used.
+
+        macOS activates ByteProof whenever one of those windows is clicked,
+        even though none of them ever takes keyboard focus. That activation is
+        not the user asking for the main window, so it must not bring the
+        window back from the menu bar.
+        """
+        now = time.monotonic()
+        self._last_helper_touch = now
+        self._suppress_activate_until = max(self._suppress_activate_until, now + seconds)
+
+    def _helper_rects(self) -> list[QRect]:
+        """Screen rectangles of the floating helpers currently on screen."""
+        rects: list[QRect] = []
+        try:
+            if self.toast.isVisible():
+                rects.append(QRect(self.toast.frameGeometry()))
+        except Exception:
+            pass
+        service = getattr(self, "live_service", None)
+        if service is not None:
+            try:
+                for widget in service.helper_widgets():
+                    if widget.isVisible():
+                        rects.append(QRect(widget.frameGeometry()))
+            except Exception:
+                pass
+        return rects
+
+    def _helper_woke_the_app(self) -> bool:
+        """Whether this activation came from our own floating UI.
+
+        Two signals, because either can be missing: a helper was touched or
+        shown a moment ago (the helper signals and the toast arm that window),
+        or the pointer is sitting on a helper right now - which is exactly what
+        clicking Apply on the suggestion card looks like.
+        """
+        if time.monotonic() < self._suppress_activate_until:
+            return True
+        try:
+            point = QCursor.pos()
+        except Exception:
+            return False
+        for rect in self._helper_rects():
+            if rect.contains(point):
+                return True
+        return False
+
     def _show_toast(self, message: str, kind: str = "success") -> None:
         # Showing the floating pill can briefly activate the app on macOS.
         # Suppress the ApplicationActivate auto-show so a hotkey-triggered
         # proofread never pops the main window back up.
-        self._suppress_activate_until = time.monotonic() + 2.0
+        self.note_helper_activity(2.0)
         if kind == "processing":
             self.toast.show_processing(message)
         else:
@@ -5270,13 +5341,13 @@ class ProofreaderApp(QMainWindow):
     def eventFilter(self, a0: Any, a1: Any) -> bool:  # pyright: ignore[reportAny]
         # Clicking the Dock icon (or otherwise switching to ByteProof) brings
         # the hidden main window back, unless the activation was caused by our
-        # own floating pill while proofreading in the background, or by opening
-        # the tray menu.
+        # own floating helpers while proofreading in the background, or by
+        # opening the tray menu.
         if a1.type() == QEvent.Type.ApplicationActivate:
             if (
                 self.isHidden()
-                and time.monotonic() >= self._suppress_activate_until
                 and not self._tray_menu_open
+                and not self._helper_woke_the_app()
             ):
                 self.show()
                 self.raise_()
@@ -7082,16 +7153,38 @@ class ProofreaderApp(QMainWindow):
             if self.isVisible():
                 QMessageBox.warning(
                     self,
-                    "Table Detected",
-                    "The selected text contains a table.\n\nPlease select text excluding tables to proceed with proofreading.",
+                    "Whole table selected",
+                    "A whole table is selected.\n\nSelect the text inside the "
+                    "cells you want proofread — table text is proofread like "
+                    "any other text.",
                     QMessageBox.StandardButton.Ok
                 )
             else:
                 self._show_toast(
-                    "Proofreading skipped — table detected.",
+                    "Proofreading skipped — a whole table is selected.",
                     kind="warning",
                 )
-            self.status_label.setText("Proofreading skipped (Table detected).")
+            self.status_label.setText(
+                "Proofreading skipped (whole table selected)."
+            )
+            self.diff_text.clear()
+            self.diff_word_count.setText("")
+            return
+
+        if status_text in (COMMENT_SKIPPED_STATUS, STORY_SKIPPED_STATUS):
+            # Neither of these can be written through document ranges without
+            # touching the manuscript, so the flow stops here with an
+            # explanation instead of risking the document.
+            if self.isVisible():
+                QMessageBox.information(
+                    self,
+                    "Select text in the document body",
+                    status_text,
+                    QMessageBox.StandardButton.Ok
+                )
+            else:
+                self._show_toast(status_text, kind="warning")
+            self.status_label.setText(status_text)
             self.diff_text.clear()
             self.diff_word_count.setText("")
             return

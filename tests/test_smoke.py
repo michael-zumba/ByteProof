@@ -1243,6 +1243,7 @@ def test_citations_force_marker_prompt_not_segments() -> None:
     are present, the whole text is sent with {{OBJ_N}} markers instead.
     """
     from src import logic
+    from src.word_integration import SCOPE_MAIN
 
     captured: dict[str, str] = {}
 
@@ -1250,8 +1251,8 @@ def test_citations_force_marker_prompt_not_segments() -> None:
         def ensure_ready(self) -> None:
             pass
 
-        def is_selection_in_table(self) -> bool:
-            return False
+        def selection_scope(self) -> str:
+            return SCOPE_MAIN
 
         def ensure_track_changes_enabled(self) -> None:
             pass
@@ -1338,6 +1339,7 @@ def test_proofread_repolish_with_citation_and_tracked_deletions() -> None:
     tracked deletion before the field shifts Word's internal positions.
     """
     from src import logic
+    from src.word_integration import SCOPE_MAIN
 
     captured: dict[str, str] = {}
 
@@ -1345,8 +1347,8 @@ def test_proofread_repolish_with_citation_and_tracked_deletions() -> None:
         def ensure_ready(self) -> None:
             pass
 
-        def is_selection_in_table(self) -> bool:
-            return False
+        def selection_scope(self) -> str:
+            return SCOPE_MAIN
 
         def ensure_track_changes_enabled(self) -> None:
             pass
@@ -1442,6 +1444,7 @@ def test_reviewer_guidance_always_runs_comment_optional() -> None:
     setting only decides whether a reviewer note is inserted into Word.
     """
     from src import logic
+    from src.word_integration import SCOPE_MAIN
 
     calls: dict[str, list] = {
         "comments": [],
@@ -1453,8 +1456,8 @@ def test_reviewer_guidance_always_runs_comment_optional() -> None:
         def ensure_ready(self) -> None:
             pass
 
-        def is_selection_in_table(self) -> bool:
-            return False
+        def selection_scope(self) -> str:
+            return SCOPE_MAIN
 
         def ensure_track_changes_enabled(self) -> None:
             pass
@@ -1555,6 +1558,7 @@ def test_reviewer_guidance_always_runs_comment_optional() -> None:
 
 def test_track_changes_toggle_controls_word_revisions() -> None:
     from src import logic
+    from src.word_integration import SCOPE_MAIN
 
     calls: dict[str, list] = {"enabled": [], "disabled": []}
 
@@ -1562,8 +1566,8 @@ def test_track_changes_toggle_controls_word_revisions() -> None:
         def ensure_ready(self) -> None:
             pass
 
-        def is_selection_in_table(self) -> bool:
-            return False
+        def selection_scope(self) -> str:
+            return SCOPE_MAIN
 
         def ensure_track_changes_enabled(self) -> None:
             calls["enabled"].append(True)

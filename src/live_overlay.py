@@ -320,6 +320,7 @@ class LiveOverlay(QWidget):
         popup.apply_requested.connect(self.apply_requested)
         popup.apply_all_requested.connect(self.apply_all_requested)
         popup.dismissed.connect(self.hide_popup)
+        apply_nonactivating_panel(popup)
         popup.place_near(span.rect)
         popup.show()
         self._popup = popup

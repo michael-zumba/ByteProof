@@ -3068,3 +3068,451 @@ def test_saved_pages_identifier_is_migrated() -> None:
         if item.data(Qt.ItemDataRole.UserRole) == "com.apple.iWork.Pages":
             assert dialog.live_app_checked(item) is False
     _dispose(dialog, owner, app)
+
+
+# --- Word: the table itself is untouchable, the text in it is not ------------
+
+WORD_TARGET = {
+    "bundle_id": "com.microsoft.Word",
+    "pid": 4242,
+    "name": "Microsoft Word",
+}
+
+
+def test_word_scope_probe_reads_word_information_flags():
+    """The scope probe must ask Word, not a localised story name."""
+    from src.word_integration import (
+        SCOPE_COMMENTS,
+        SCOPE_MAIN,
+        SCOPE_OTHER_STORY,
+        SCOPE_WHOLE_TABLE,
+        MacOSWordIntegration,
+    )
+
+    integration = MacOSWordIntegration()
+    scripts: list[str] = []
+    answers = iter(
+        ["comments", "whole_table", "other_story", "main", "surprising"]
+    )
+
+    def fake_run(script, *args, **kwargs):
+        scripts.append(script)
+        return next(answers)
+
+    integration._run_applescript = fake_run  # pyright: ignore[reportAttributeAccessIssue]
+
+    assert integration.selection_scope() == SCOPE_COMMENTS
+    assert integration.selection_scope() == SCOPE_WHOLE_TABLE
+    assert integration.selection_scope() == SCOPE_OTHER_STORY
+    assert integration.selection_scope() == SCOPE_MAIN
+    # An answer we do not understand keeps the previous behaviour (it is a
+    # Word we could not read, not a reason to refuse the user's selection).
+    assert integration.selection_scope() == SCOPE_MAIN
+
+    script = scripts[0]
+    assert "in comment pane" in script
+    assert "header footer" in script
+    assert "whole_table" in script
+    # The whole-table test compares the selection against the table's range:
+    # a bare "is it in a table" answer would refuse cell text as well.
+    assert "start of content of tableRange" in script
+    assert "text object of aTable" in script
+
+
+def test_a_whole_table_is_skipped_but_its_text_is_proofread(monkeypatch):
+    """The owner's rule: cell text is prose, a table selection is structure."""
+    from src import logic
+    from src.word_integration import SCOPE_COMMENTS, SCOPE_MAIN, SCOPE_WHOLE_TABLE
+
+    class FakeWord:
+        def __init__(self, scope: str) -> None:
+            self.scope = scope
+
+        def ensure_ready(self) -> None:
+            pass
+
+        def selection_scope(self) -> str:
+            return self.scope
+
+        def ensure_track_changes_enabled(self) -> None:
+            pass
+
+        def ensure_track_changes_disabled(self) -> None:
+            pass
+
+        def get_selection_info(self):
+            return "", 0, 0, "", ""
+
+    settings = {"general": {"track_changes": False}}
+
+    # A whole table is refused before anything else happens.
+    monkeypatch.setattr(logic, "word_app", FakeWord(SCOPE_WHOLE_TABLE))
+    status, *_ = logic.proofread_selection_once(1024, settings=settings)
+    assert status == logic.TABLE_SKIPPED_STATUS
+
+    # Text inside a cell runs the normal flow (here: it reaches the empty
+    # selection check, which proves the table guard did not fire).
+    monkeypatch.setattr(logic, "word_app", FakeWord(SCOPE_MAIN))
+    status, *_ = logic.proofread_selection_once(1024, settings=settings)
+    assert status == "Selection is empty."
+
+    # Comment text is not written through document ranges by this flow.
+    monkeypatch.setattr(logic, "word_app", FakeWord(SCOPE_COMMENTS))
+    status, *_ = logic.proofread_selection_once(1024, settings=settings)
+    assert status == logic.COMMENT_SKIPPED_STATUS
+
+
+def test_a_suggestion_that_drops_a_cell_mark_is_refused():
+    """Editing table text is fine; re-shaping the table is not."""
+    from src.word_integration import cell_mark_mismatch
+
+    assert cell_mark_mismatch("Alpha beta\x07", "Alpha beta") is True
+    assert cell_mark_mismatch("Alpha beta\x07", "Alpha beta\x07") is False
+    assert cell_mark_mismatch("Alpha beta", "Alpha beta.") is False
+    assert cell_mark_mismatch(None, "Alpha") is False
+    assert cell_mark_mismatch("a\x07b\x07", "a b") is True
+
+
+def test_comment_writes_never_use_a_document_range(monkeypatch):
+    """A comment lives in its own story: document offsets would hit the paper."""
+    from src.word_integration import MacOSWordIntegration
+
+    integration = MacOSWordIntegration()
+    seen: dict[str, Any] = {}
+
+    def fake_run(script, *args, **kwargs):
+        seen["script"] = script
+        seen["args"] = args
+        return seen.get("answer", "OK")
+
+    integration._run_applescript = fake_run  # pyright: ignore[reportAttributeAccessIssue]
+
+    ok, message = integration.replace_comment_selection(
+        "typod wrods", "typed words", expected_document="Thesis.docx"
+    )
+    assert ok is True
+    assert message == "Applied."
+    assert "set content of selection" in seen["script"]
+    assert "create range active document" not in seen["script"]
+    assert "Thesis.docx" in seen["script"]
+    # The original text is what the write is guarded against.
+    assert "typod wrods" in seen["script"]
+
+    for answer, expected in (
+        ("TEXT_CHANGED", "changed"),
+        ("DOC_CHANGED", "document"),
+        ("NOT_COMMENT", "comment"),
+        ("WRITE_FAILED: nope", "write"),
+    ):
+        seen["answer"] = answer
+        ok, message = integration.replace_comment_selection("a", "b")
+        assert ok is False, answer
+        assert expected in message.lower(), (answer, message)
+
+    # Word normalising what it stored is reported, not hidden.
+    seen["answer"] = "VERIFY_MISMATCH"
+    ok, message = integration.replace_comment_selection("a", "b")
+    assert ok is True
+    assert "check" in message.lower()
+
+
+# --- Live Check: comment editing -------------------------------------------
+
+
+def _comment_service(monkeypatch, scope, selection="typod wrods in a comment"):
+    """A live service whose Word integration is a recording fake."""
+    from src import word_integration
+    from src.live_service import LivePreviewService
+
+    writes: list[tuple] = []
+
+    class FakeWord:
+        def get_selection_info(self):
+            return selection, 1, 1 + len(selection), "", ""
+
+        def selection_scope(self) -> str:
+            return scope
+
+        def active_document_name(self) -> str:
+            return "Thesis.docx"
+
+        def replace_comment_selection(
+            self, expected_text, new_text, expected_document=None
+        ):
+            writes.append((expected_text, new_text, expected_document))
+            return True, "Applied."
+
+    monkeypatch.setattr(
+        word_integration, "get_word_integration", lambda: FakeWord()
+    )
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 0, "max_chars": 5000}}
+    )
+    service._selection_target = dict(WORD_TARGET)
+    service._selection_is_word = True
+    service._selection_has_range = True
+    service._selection_scope = scope
+    service._selection_text = selection
+    service._seen_text = selection
+    service._previewed_text = selection
+    service._word_document = "Thesis.docx"
+    return service, writes
+
+
+def test_apply_all_in_a_comment_rewrites_the_comment(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.word_integration import SCOPE_COMMENTS
+
+    service, writes = _comment_service(monkeypatch, SCOPE_COMMENTS)
+    service._pending = [
+        EditSpan("typod wrods", "typed words", "Spelling", 0, 11),
+        EditSpan("comment", "remark", "Wording", 17, 24),
+    ]
+    done: list[str] = []
+    service.apply_done.connect(done.append)
+
+    service._apply_all_locked()
+
+    assert writes == [
+        (
+            "typod wrods in a comment",
+            "typed words in a remark",
+            "Thesis.docx",
+        )
+    ]
+    assert done == ["Applied."]
+    assert service._pending == []
+    assert service._selection_text == "typed words in a remark"
+    service.stop()
+
+
+def test_apply_one_in_a_comment_keeps_the_other_suggestions(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.word_integration import SCOPE_COMMENTS
+
+    service, writes = _comment_service(monkeypatch, SCOPE_COMMENTS)
+    service._pending = [
+        EditSpan("typod wrods", "typed words", "Spelling", 0, 11),
+        EditSpan("comment", "remark", "Wording", 17, 24),
+    ]
+
+    service._apply_one_locked(0)
+
+    assert writes == [
+        (
+            "typod wrods in a comment",
+            "typed words in a comment",
+            "Thesis.docx",
+        )
+    ]
+    # The suggestion that was not applied is still offered, re-anchored on the
+    # rewritten comment rather than on stale offsets.
+    assert [span.before for span in service._pending] == ["comment"]
+    rebased = service._pending[0]
+    assert service._selection_text[rebased.start : rebased.end] == "comment"
+    service.stop()
+
+
+def test_undo_in_a_comment_puts_the_text_back(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.word_integration import SCOPE_COMMENTS
+
+    service, writes = _comment_service(monkeypatch, SCOPE_COMMENTS)
+    service._pending = [EditSpan("typod wrods", "typed words", "Spelling", 0, 11)]
+    service._apply_all_locked()
+    done: list[str] = []
+    service.apply_done.connect(done.append)
+
+    service._perform_undo()
+
+    assert writes[-1] == (
+        "typed words in a comment",
+        "typod wrods in a comment",
+        "Thesis.docx",
+    )
+    assert done == ["Undone."]
+    assert service._selection_text == "typod wrods in a comment"
+    service.stop()
+
+
+def test_a_whole_table_selection_never_starts_a_preview(monkeypatch):
+    """Live Check must not offer suggestions for a whole-table selection."""
+    import time as _time
+
+    from src import word_integration
+    from src.live_service import LivePreviewService
+    from src.word_integration import SCOPE_MAIN, SCOPE_WHOLE_TABLE
+
+    table_text = "Alpha beta gamma delta epsilon zeta eta theta iota kappa"
+
+    class FakeWord:
+        def __init__(self, scope: str) -> None:
+            self.scope = scope
+
+        def get_selection_info(self):
+            return table_text, 0, len(table_text), "", ""
+
+        def selection_scope(self) -> str:
+            return self.scope
+
+    class FakeEditor:
+        def frontmost_app(self):
+            return dict(WORD_TARGET)
+
+        def is_word(self, target) -> bool:
+            return True
+
+        def permission_status(self):
+            return True, ""
+
+    def make_service(scope: str):
+        service = LivePreviewService()
+        service.refresh_settings(
+            {
+                "live_preview": {
+                    "enabled": True,
+                    "delay_ms": 0,
+                    "min_words": 1,
+                    "max_chars": 5000,
+                }
+            }
+        )
+        service._editor = FakeEditor()
+        monkeypatch.setattr(
+            word_integration, "get_word_integration", lambda: FakeWord(scope)
+        )
+        service._changed_at = 0.0
+        started: list[Any] = []
+        monkeypatch.setattr(
+            service, "_spawn_preview", lambda *a, **k: started.append(a)
+        )
+        errors: list[str] = []
+        service.preview_error.connect(errors.append)
+        return service, started, errors
+
+    # A whole table: nothing starts, and the user is told why exactly once.
+    service, started, errors = make_service(SCOPE_WHOLE_TABLE)
+    now = _time.monotonic()
+    service._sample(now=now)
+    assert started == []
+    assert errors and "whole table" in errors[0]
+    service._sample(now=now + 1.0)
+    assert started == []
+    assert len(errors) == 1, "the reason is reported once, not on every tick"
+    service.stop()
+
+    # Text inside a table cell previews like any other text.
+    service, started, errors = make_service(SCOPE_MAIN)
+    service._sample(now=_time.monotonic())
+    assert errors == []
+    assert started, "cell text is proofread"
+    service.stop()
+
+
+# --- the hidden main window must stay hidden while helpers are on screen -----
+
+
+def _new_window(monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+
+    from src import gui as gui_mod
+    from src import settings as settings_mod
+
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        gui_mod, "save_runtime_settings", lambda s: None
+    )
+    window = gui_mod.ProofreaderApp(1024, settings_mod.load_runtime_settings())
+    # No floating helper is on screen in the test.
+    monkeypatch.setattr(window, "_helper_rects", list)
+    window._suppress_activate_until = 0.0
+    window._last_helper_touch = 0.0
+    return gui_mod, window
+
+
+def test_an_activation_caused_by_our_own_helper_leaves_the_window_hidden(
+    monkeypatch,
+):
+    """The reported bug: clicking Apply popped the main window up."""
+    import time as _time
+
+    from PyQt6.QtCore import QEvent
+
+    _gui_mod, window = _new_window(monkeypatch)
+    try:
+        activate = QEvent(QEvent.Type.ApplicationActivate)
+
+        # Nothing of ours is on screen: this is the user (Dock icon, Cmd-Tab)
+        # and the window comes back.
+        window.hide()
+        window.eventFilter(window, activate)
+        assert not window.isHidden()
+
+        # The suggestion card has just appeared / was just clicked: the same
+        # activation must not drag the window out of the menu bar.
+        window.hide()
+        window._suppress_activate_until = _time.monotonic() + 8.0
+        window.eventFilter(window, activate)
+        assert window.isHidden()
+
+        # Shortly after the helper stopped acting, the user is in charge again.
+        window._suppress_activate_until = 0.0
+        window._last_helper_touch = 0.0
+        window.eventFilter(window, activate)
+        assert not window.isHidden()
+    finally:
+        window.close()
+
+
+def test_the_cursor_resting_on_a_helper_counts_as_ours(monkeypatch):
+    """A click on the card activates macOS; the pointer proves where it was."""
+    from PyQt6.QtCore import QPoint, QRect
+
+    gui_mod, window = _new_window(monkeypatch)
+    try:
+        window.hide()
+        monkeypatch.setattr(
+            window, "_helper_rects", lambda: [QRect(0, 0, 200, 120)]
+        )
+
+        class Cursor:
+            @staticmethod
+            def pos():
+                return QPoint(40, 40)
+
+        monkeypatch.setattr(gui_mod, "QCursor", Cursor)
+        assert window._helper_woke_the_app() is True
+
+        class Away:
+            @staticmethod
+            def pos():
+                return QPoint(900, 900)
+
+        monkeypatch.setattr(gui_mod, "QCursor", Away)
+        assert window._helper_woke_the_app() is False
+    finally:
+        window.close()
+
+
+def test_showing_and_hiding_the_card_reports_helper_activity(monkeypatch):
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings({"live_preview": {"enabled": True}})
+    touches: list[int] = []
+    service.helper_activity.connect(lambda: touches.append(1))
+
+    service._show_result([EditSpan("teh", "the", "Spelling", 0, 3)])
+    assert touches, "showing the card is reported"
+    shown = len(touches)
+    service._hide_panel()
+    assert len(touches) > shown, "hiding the card is reported too"
+
+    # Nothing was on screen, so hiding again is not an interaction.
+    quiet = len(touches)
+    service._hide_panel()
+    assert len(touches) == quiet
+    service.stop()

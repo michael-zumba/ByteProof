@@ -305,3 +305,127 @@ Tests: 75 pass (drag, pop-in completion, updated hide timing).
 - The final installer was rebuilt after the Pages bundle-id and card-fallback
   fixes, so the artifact includes them.
 - Installer: `ByteProof_Installer_AppleSilicon.dmg`.
+
+## Tenth fix round (2.1.1-beta.7) — background window, table text, comments
+
+Owner report, verbatim: *"when I try to apply changes, it will start to pop up
+the main app window. If main app is close in the background, it should not pop
+up."* Plus two feature changes: table **cell** text must be proofread (only a
+whole-table selection stays refused), and Word **comment** editing must be
+proofread live.
+
+### The main window popped up because our own card woke the app
+
+`eventFilter` shows the hidden window on `QEvent.ApplicationActivate`, which is
+how a Dock-icon click gets the window back. The suggestion card, the Undo pill
+and the toast are non-activating Qt tool windows, but macOS still activates the
+app when one of them is clicked - so the click that started an apply looked
+exactly like "the user wants the window back", and the window opened over the
+document mid-apply. The evidence is in `capture.log`: `LIVE APPLY ALL SYNC
+FAIL: selection changed ... now=<len=0>` - the frontmost app at that moment was
+ByteProof, not Word.
+
+Fix, both halves:
+
+- every helper window now reports its life cycle (`LivePreviewService
+  .helper_activity`, emitted when the card/pill is shown, hidden, dragged into
+  place, or when an apply starts and ends) and the main window keeps the
+  auto-show off for `HELPER_ACTIVATION_GRACE_S` (8s) afterwards;
+- an activation while the pointer is resting on a visible helper counts as ours
+  too (`_helper_woke_the_app`), which is exactly the shape of a click on Apply;
+- `apply_nonactivating_panel` is now applied to the Undo pill and the hover
+  popup as well (it was only on the card), and the toast gets it in
+  `ToastNotification.__init__`.
+
+Tests: `test_an_activation_caused_by_our_own_helper_leaves_the_window_hidden`
+(activations before, during and after the grace window),
+`test_the_cursor_resting_on_a_helper_counts_as_ours`,
+`test_showing_and_hiding_the_card_reports_helper_activity`.
+
+### Table text is prose; the table itself is not
+
+`is_selection_in_table` asked Word for `count of tables of myRange`, and Word
+counts a table as soon as the selection is anywhere **inside** it - so every
+cell text was refused. Probed against Word 16 on this machine (scratch
+document): a cell selection, a sub-range inside a cell and a two-cell selection
+all answer `1`, and the same is true for the whole table; the flag alone cannot
+tell them apart.
+
+`selection_scope()` replaces it and answers `main` / `comments` /
+`whole_table` / `other_story`. It is one call per **new** selection (cached
+against the selection it was probed for), uses Word information flags rather
+than localised story names, and only reports `whole_table` when the selection
+covers a table's whole range:
+
+```applescript
+set tableList to tables of myRange
+repeat with aTable in tableList
+    set tableRange to text object of aTable
+    if selStart ≤ (start of content of tableRange) and selEnd ≥ (end of content of tableRange)
+```
+
+Both flows use it: Live Check skips a whole-table selection (once per app, with
+a toast explaining what to select instead) and the manual flow returns
+`TABLE_SKIPPED_STATUS`. Writing is still guarded: Word ends every cell with a
+`Chr(7)` cell mark, so a suggestion that would change how many of them the span
+holds is refused (`cell_mark_mismatch`, `TABLE_STRUCTURE_MESSAGE`) - table
+structure can never be rewritten by a language edit.
+
+Verified against real Word (scratch document, unsaved, then closed):
+
+```
+cell text   -> main          (proofread)
+whole table -> whole_table   (refused)
+main text   -> main
+```
+
+### Word comments have their own story
+
+A comment selection reports `story type = comments story` and positions
+relative to the **comment** (start 1, end 23 for a 22-character comment), while
+`create range active document start/end` addresses the manuscript. Applying
+through document ranges would therefore have edited the paper instead of the
+comment. Probes also showed that `set range` cannot build a writable sub-range
+inside a comment (the result cannot even be read back), while
+`set content of selection` works and is repeatable.
+
+So comments get their own write path: `replace_comment_selection` rewrites the
+whole selection with the corrected text - guarded by the same document name,
+the same comment text, Track Changes restored, and a read-back. Live Check
+builds that text from the captured comment plus the suggestions being applied
+(`_apply_comment_batch`), re-anchors the suggestions that remain on screen, and
+Undo is the same write in reverse. Selections in headers, footers and notes,
+which have the same coordinate problem, are now skipped instead of written
+through document ranges.
+
+A comment being *written* is not a story yet: AppleScript reports nothing at
+all for it, so Live Check falls back to Accessibility for that selection - but
+only when the focused element says it is a comment area, because writing
+through Accessibility on a guess could land in the body.
+
+Verified against real Word (scratch document, unsaved, then closed):
+
+```
+comment selection -> comments
+read: text='typod wrods in a comment' start=1 end=25 context='' ''
+write -> True 'Applied.'
+comment after: 'typed words in a remark'
+document body: unchanged
+```
+
+Manual flow: comment text is reported as `COMMENT_SKIPPED_STATUS` (that flow
+writes through document ranges) and the GUI says so instead of touching the
+manuscript.
+
+Tests: `test_word_scope_probe_reads_word_information_flags`,
+`test_a_whole_table_is_skipped_but_its_text_is_proofread`,
+`test_a_suggestion_that_drops_a_cell_mark_is_refused`,
+`test_comment_writes_never_use_a_document_range`,
+`test_apply_all_in_a_comment_rewrites_the_comment`,
+`test_apply_one_in_a_comment_keeps_the_other_suggestions`,
+`test_undo_in_a_comment_puts_the_text_back`,
+`test_a_whole_table_selection_never_starts_a_preview`.
+
+Suite: `scripts/run_tests_ci.py` green (test_hardening, test_live_preview,
+test_smoke). `ruff check src tests` clean. Every new/changed AppleScript body
+compile-checked with `osacompile`.

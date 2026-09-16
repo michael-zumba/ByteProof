@@ -21,7 +21,7 @@ from typing import Any, NamedTuple
 
 from PyQt6.QtCore import QObject, QPoint, QRect, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 from .generic_editing import _debug_log, _redact, get_generic_editor
 from .live_overlay import (
@@ -45,6 +45,12 @@ from .live_preview import (
     preview_cache_key,
     settings_fingerprint,
     word_visible_to_doc,
+)
+from .word_integration import (
+    SCOPE_COMMENTS,
+    SCOPE_MAIN,
+    SCOPE_OTHER_STORY,
+    SCOPE_WHOLE_TABLE,
 )
 
 # How often the Mail compose-window check re-runs while Mail is frontmost.
@@ -294,6 +300,11 @@ class LivePreviewService(QObject):
     apply_all_requested = pyqtSignal()
     preview_error = pyqtSignal(str)
     live_status = pyqtSignal(str)  # "ready" | "no_permission" | "disabled"
+    # One of the floating helper windows (suggestion card, undo pill) was
+    # shown, hidden or used. macOS activates the app for those windows even
+    # though they never take focus, so the main window has to know that an
+    # activation was ours rather than a request to come back from the menu bar.
+    helper_activity = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -320,6 +331,12 @@ class LivePreviewService(QObject):
         self._selection_is_word = False
         self._word_document = ""
         self._word_busy_until = 0.0
+        # Where the captured Word selection lives (body, comment, table...) and
+        # the selection it was probed for, so the check costs one AppleScript
+        # call per new selection rather than one per poll tick.
+        self._selection_scope = SCOPE_MAIN
+        self._word_scope_key: tuple[int, int, str] | None = None
+        self._word_scope = SCOPE_MAIN
         # Word position mapping for the batch being applied: prepared once,
         # then shifted by each edit instead of re-scanned per suggestion.
         self._word_prepared = False
@@ -475,8 +492,35 @@ class LivePreviewService(QObject):
                 "context_after": after,
             }
             permission_ok = True
+            if not str(text or "").strip() and target.get("pid"):
+                # A comment being written is not a story yet, so AppleScript
+                # reports nothing at all for it. The box itself is a real text
+                # area in the Accessibility tree, so read that instead - and
+                # let the apply go through Accessibility for this selection.
+                box = self._word_comment_box_details(target)
+                if box is not None:
+                    details = box
+                    text = box["text"]
+                    is_word = False
+            if text and is_word:
+                bundle_id = str(target.get("bundle_id", "")).lower()
+                scope = self._word_scope_for(int(start), int(end), text)
+                if scope in (SCOPE_WHOLE_TABLE, SCOPE_OTHER_STORY):
+                    # A table selection is structure rather than prose, and
+                    # Word's other stories (headers, footers, notes) have no
+                    # write path that cannot damage the body: both are read,
+                    # never edited. Reported once per app, not per tick.
+                    self._log_word_scope_once(scope, bundle_id)
+                    self._seen_text = text
+                    self._previewed_text = text
+                    self._candidate_text = ""
+                    self._candidate_count = 0
+                    self._hide_panel()
+                    return
+                self._selection_scope = scope
         else:
             details = self._editor.selection_details(target)
+            self._selection_scope = SCOPE_MAIN
         text = details.get("text") or ""
 
         bundle = str(target.get("bundle_id", "")).lower()
@@ -996,12 +1040,77 @@ class LivePreviewService(QObject):
             self._log_read_only_once("com.apple.mail", "viewer")
         return self._mail_composing
 
+    def _word_comment_box_details(
+        self, target: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Accessibility view of an open Word comment box, if there is one.
+
+        Word's comment box only joins the document model once the comment is
+        posted, so until then AppleScript cannot see the text being written.
+        The box is an Accessibility text area that says so in its description,
+        and that proof is required: writing through Accessibility without it
+        could put the edit in the document body instead of the comment.
+        """
+        try:
+            details = self._editor.selection_details(target)
+        except Exception as exc:
+            _debug_log(f"LIVE WORD COMMENT BOX: AX read failed: {exc}")
+            return None
+        description = str(details.get("description") or "").lower()
+        if "comment" not in description:
+            return None
+        if not str(details.get("text") or "").strip():
+            return None
+        details["editable"] = True
+        # The body's text around the comment's anchor is not context for what
+        # is being typed in the box.
+        details["context_before"] = ""
+        details["context_after"] = ""
+        _debug_log(
+            f"LIVE WORD COMMENT BOX: reading the open comment box through AX "
+            f"({len(details['text'])} chars)"
+        )
+        return details
+
     def _log_read_only_once(self, bundle: str, role: str) -> None:
         key = f"{bundle}:read_only"
         message = f"LIVE SKIP: read_only bundle={bundle} role={role}"
         if self._read_only_logged.get(key) != message:
             self._read_only_logged[key] = message
             _debug_log(message)
+
+    def _word_scope_for(self, start: int, end: int, text: str) -> str:
+        """Where this Word selection lives, probed once per selection.
+
+        The probe is an AppleScript round trip, so the answer is cached
+        against the selection it was asked about: Word is polled several times
+        a second and the scope can only change with the selection itself.
+        """
+        key = (int(start), int(end), text)
+        if key != self._word_scope_key:
+            self._word_scope_key = key
+            try:
+                from .word_integration import get_word_integration
+
+                self._word_scope = get_word_integration().selection_scope()
+            except Exception as exc:
+                _debug_log(f"LIVE SCOPE: probe failed: {exc}")
+                self._word_scope = SCOPE_MAIN
+        return self._word_scope
+
+    def _log_word_scope_once(self, scope: str, bundle: str) -> None:
+        """Say once why this selection is not proofread (never per tick)."""
+        key = f"{bundle}:{scope}"
+        message = f"LIVE SKIP: {scope} bundle={bundle}"
+        if self._read_only_logged.get(key) == message:
+            return
+        self._read_only_logged[key] = message
+        _debug_log(message)
+        if scope == SCOPE_WHOLE_TABLE:
+            self.preview_error.emit(
+                "A whole table is selected — select the text inside the "
+                "cells you want checked."
+            )
 
     # --- provider ---
 
@@ -1438,6 +1547,7 @@ class LivePreviewService(QObject):
         if not was_visible:
             self._place_panel(panel)
         self._install_escape_monitor()
+        self._touch_helpers()
 
     def _show_clean_panel(self) -> None:
         """Gently confirm that the selected text needs no changes."""
@@ -1448,6 +1558,7 @@ class LivePreviewService(QObject):
         if not was_visible:
             self._place_panel(panel)
         self._install_escape_monitor()
+        self._touch_helpers()
         if self._clean_timer is None:
             self._clean_timer = QTimer(self)
             self._clean_timer.setSingleShot(True)
@@ -1553,7 +1664,10 @@ class LivePreviewService(QObject):
             stop_pop = getattr(self._panel, "stop_pop", None)
             if stop_pop is not None:
                 stop_pop()
+            was_visible = self._panel.isVisible()
             self._panel.hide()
+            if was_visible:
+                self._touch_helpers()
 
     # --- escape key ---
 
@@ -1648,6 +1762,7 @@ class LivePreviewService(QObject):
     def _show_undo_pill(self) -> None:
         if self._undo_pill is None:
             self._undo_pill = UndoPill()
+            apply_nonactivating_panel(self._undo_pill)
             self._undo_pill.undo_requested.connect(self._perform_undo)
         anchor = self._last_anchor or self._anchor_point()
         self._undo_pill.place_near(anchor)
@@ -1657,6 +1772,7 @@ class LivePreviewService(QObject):
             self._undo_timer.setSingleShot(True)
             self._undo_timer.timeout.connect(self._hide_undo_pill)
         self._undo_timer.start(UNDO_AVAILABLE_MS)
+        self._touch_helpers()
 
     def _hide_undo_pill(self) -> None:
         self._undo_state = None
@@ -1664,7 +1780,10 @@ class LivePreviewService(QObject):
         if self._undo_timer is not None:
             self._undo_timer.stop()
         if self._undo_pill is not None:
+            was_visible = self._undo_pill.isVisible()
             self._undo_pill.hide()
+            if was_visible:
+                self._touch_helpers()
 
     def _undo_step(
         self, abs_start: int, applied: str, original: str
@@ -1702,6 +1821,36 @@ class LivePreviewService(QObject):
             needle=live[left:right],
             needle_offset=start - left,
         )
+
+    def _undo_comment(self, state: dict[str, Any]) -> None:
+        """Put a comment back the way it was before the last apply.
+
+        The comment was rewritten as a whole, so the undo is the same write in
+        reverse, and it is only safe while the comment still holds exactly what
+        was written. Word reports nothing if the caret has left the comment,
+        and the integration refuses that case with its own message.
+        """
+        steps = state.get("steps") or []
+        if not steps:
+            return
+        step = steps[0] if isinstance(steps[0], UndoStep) else UndoStep(*steps[0])
+        from .word_integration import get_word_integration
+
+        ok, message = get_word_integration().replace_comment_selection(
+            step.applied, step.original, expected_document=state.get("document") or None
+        )
+        _debug_log(f"LIVE UNDO COMMENT: ok={ok} message={message!r}")
+        if not ok:
+            self.apply_done.emit(message)
+            self._restore_previous_undo()
+            return
+        self._selection_text = step.original
+        self._seen_text = step.original
+        self._previewed_text = step.original
+        self._pending = []
+        self._hide_panel()
+        self.apply_done.emit("Undone.")
+        self._restore_previous_undo()
 
     def _undo_target(self, step: UndoStep, live: str) -> int | None:
         """Where the edit is now: the text around it first, then the offset.
@@ -1742,6 +1891,9 @@ class LivePreviewService(QObject):
             return
         self._undo_state = None
         try:
+            if state.get("mode") == "comment":
+                self._undo_comment(state)
+                return
             if state.get("mode") == "full":
                 # The full-selection apply pasted over the current selection;
                 # undo is only safe while that selection still holds the
@@ -1848,6 +2000,9 @@ class LivePreviewService(QObject):
         if self._timer is not None and self._timer.isActive():
             self._timer.stop()
             self._poll_paused_for_apply = True
+        # The click that started this apply belongs to our own card; the
+        # window it activates must not open.
+        self._touch_helpers()
 
     def _end_apply(self) -> None:
         """Resume polling, without previewing a selection made mid-apply.
@@ -1891,6 +2046,9 @@ class LivePreviewService(QObject):
         self._restore_user_focus(
             self._selection_target, getattr(self, "_apply_previous_app", {})
         )
+        # Returning focus and hiding the card both wake the app up; the result
+        # pill is about to appear too, so keep treating that as ours.
+        self._touch_helpers()
         self._resume_polling_after_apply()
 
     def _suppress_current_selection(self) -> None:
@@ -2324,6 +2482,9 @@ class LivePreviewService(QObject):
             self._end_apply()
 
     def _apply_one_locked(self, index: int) -> None:
+        if self._selection_is_word and self._selection_scope == SCOPE_COMMENTS:
+            self._apply_comment_batch([self._pending[index]], keep_rest=True)
+            return
         if not self._selection_has_range:
             # No absolute range available (Mail/Pages clipboard path): paste
             # the fully corrected selection over the current one.
@@ -2425,6 +2586,139 @@ class LivePreviewService(QObject):
         """Whether the suggestion panel is on screen with something to apply."""
         return bool(self._pending) and self._panel is not None
 
+    def helper_widgets(self) -> list[QWidget]:
+        """The floating windows this service owns, visible or not."""
+        widgets: list[QWidget] = []
+        for widget in (self._panel, self._undo_pill):
+            if widget is not None:
+                widgets.append(widget)
+        return widgets
+
+    def helpers_visible(self) -> bool:
+        """Whether one of this service's floating windows is on screen."""
+        return any(widget.isVisible() for widget in self.helper_widgets())
+
+    def _touch_helpers(self) -> None:
+        """Tell the main window that our floating UI just did something.
+
+        Showing, hiding and clicking these windows all activate ByteProof on
+        macOS; without this the hidden main window would pop up in the middle
+        of a proofread.
+        """
+        self.helper_activity.emit()
+
+    def apply_comment_now(self) -> bool:
+        """Whether the captured selection is Word comment text."""
+        return self._selection_is_word and self._selection_scope == SCOPE_COMMENTS
+
+    def _rebase_spans(
+        self, spans: Sequence[EditSpan], old_text: str, new_text: str
+    ) -> list[EditSpan]:
+        """Move the not-yet-applied suggestions onto the rewritten comment.
+
+        The comment is written back as a whole, so the offsets of the
+        suggestions that are still on screen no longer point anywhere. Each one
+        is re-anchored on its own text; anything that cannot be found exactly
+        once is dropped rather than applied to a guess.
+        """
+        rebased: list[EditSpan] = []
+        for span in spans:
+            needle = span.before or old_text[span.start : span.end]
+            if not needle:
+                continue
+            index = new_text.find(needle)
+            if index < 0 or new_text.find(needle, index + 1) >= 0:
+                _debug_log(
+                    "LIVE COMMENT APPLY: dropping a suggestion that no longer "
+                    f"has one home ({_redact(needle)})"
+                )
+                continue
+            rebased.append(
+                EditSpan(
+                    span.before,
+                    span.after,
+                    span.reason,
+                    index,
+                    index + len(needle),
+                )
+            )
+        return rebased
+
+    def _apply_comment_batch(
+        self, spans: Sequence[EditSpan], keep_rest: bool
+    ) -> None:
+        """Apply suggestions to a Word comment by rewriting the comment text.
+
+        Comment text lives in its own story: document character ranges point
+        into the manuscript, and AppleScript exposes no writable sub-range
+        inside a comment either. So the whole selection is replaced with the
+        corrected text, which is built here from the captured comment and the
+        suggestions being applied. Undo does the same in reverse.
+        """
+        if not spans:
+            return
+        sync_ok, sync_reason = self._sync_selection()
+        for _ in range(2):
+            if sync_ok:
+                break
+            time.sleep(0.12)
+            sync_ok, sync_reason = self._sync_selection()
+        if not sync_ok:
+            _debug_log(f"LIVE COMMENT APPLY SYNC FAIL: {sync_reason}")
+            self._hide_panel()
+            self.apply_done.emit(self._sync_failure_message(sync_reason))
+            return
+        original = self._selection_text
+        corrected = apply_edits_to_text(original, spans)
+        if not corrected or corrected == original:
+            _debug_log("LIVE COMMENT APPLY: nothing to change")
+            self._hide_panel()
+            return
+        _debug_log(
+            f"LIVE COMMENT APPLY: suggestions={len(spans)} "
+            f"chars={len(original)}->{len(corrected)}"
+        )
+        from .word_integration import get_word_integration
+
+        if not self._word_document:
+            self._word_document = self._read_word_document()
+        ok, message = get_word_integration().replace_comment_selection(
+            original, corrected, expected_document=self._word_document or None
+        )
+        _debug_log(f"LIVE COMMENT APPLY RESULT: ok={ok} message={message!r}")
+        self.apply_done.emit(message)
+        if not ok:
+            return
+        self._arm_undo(
+            {
+                "mode": "comment",
+                "target": dict(self._selection_target),
+                "document": self._word_document,
+                "steps": [UndoStep(0, corrected, original)],
+            }
+        )
+        applied_keys = {(span.start, span.end) for span in spans}
+        rest = [
+            span
+            for span in self._pending
+            if (span.start, span.end) not in applied_keys
+        ]
+        # Word hands the selection back over the rewritten comment, so the
+        # captured text is the corrected one from here on.
+        self._selection_text = corrected
+        self._seen_text = corrected
+        self._previewed_text = corrected
+        self._pending = self._rebase_spans(rest, original, corrected)
+        if not keep_rest:
+            self._pending = []
+        if not self._pending:
+            self._hide_panel()
+            return
+        panel = self._panel
+        if panel is not None:
+            panel.set_spans(self._pending)
+            panel.show()
+
     def apply_all_now(self) -> bool:
         """Apply every pending suggestion (used by the Apply All hotkey).
 
@@ -2453,6 +2747,9 @@ class LivePreviewService(QObject):
             self._end_apply()
 
     def _apply_all_locked(self) -> None:
+        if self._selection_is_word and self._selection_scope == SCOPE_COMMENTS:
+            self._apply_comment_batch(list(self._pending), keep_rest=False)
+            return
         if not self._selection_has_range:
             self._apply_full_selection_locked()
             return

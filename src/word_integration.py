@@ -10,6 +10,20 @@ from typing import Any, NamedTuple
 
 WD_WITH_IN_TABLE = 12  # Word constant: wdWithInTable
 
+# WdStoryType values the live preview has to tell apart.
+WD_MAIN_TEXT_STORY = 1
+WD_COMMENTS_STORY = 4
+
+# Where the current selection lives (WordIntegration.selection_scope).
+#   main        - the document body: proofread and write through ranges
+#   comments    - a Word comment: proofread, rewritten as a whole selection
+#   whole_table - a complete table is selected: structure, never proofread
+#   other_story - headers, footers, footnotes: no safe write path
+SCOPE_MAIN = "main"
+SCOPE_COMMENTS = "comments"
+SCOPE_WHOLE_TABLE = "whole_table"
+SCOPE_OTHER_STORY = "other_story"
+
 # Word can block on a modal dialog (file in use, Protected View, password,
 # macro consent). Without a timeout the worker waits forever and the feature
 # silently hangs, so every AppleScript call is bounded.
@@ -70,6 +84,26 @@ def _applescript_status(raw: str) -> str:
 def _applescript_quote(value: str) -> str:
     """Quote a Python string for safe interpolation into AppleScript."""
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# Word ends every table cell (and row) with a Chr(7) cell mark. It is part of
+# the text a cell selection reports, so a suggestion can carry it - and a
+# suggestion that drops it merges the cell with the next one. Table text is
+# editable, the table itself is not.
+CELL_MARK = "\x07"
+
+
+def cell_mark_mismatch(before_text: str | None, replacement: str) -> bool:
+    """Whether writing this replacement would restructure a table."""
+    if not before_text or CELL_MARK not in before_text:
+        return False
+    return before_text.count(CELL_MARK) != replacement.count(CELL_MARK)
+
+
+TABLE_STRUCTURE_MESSAGE = (
+    "That change would alter the table structure — edit the text inside the "
+    "cells."
+)
 
 
 class FieldSpan(NamedTuple):
@@ -146,7 +180,22 @@ class WordIntegration:
         """Returns (text, start_index, end_index, context_before, context_after)"""
         raise NotImplementedError
 
-    def is_selection_in_table(self) -> bool:
+    def selection_scope(self) -> str:
+        """Where the current selection lives: see the SCOPE_* constants.
+
+        The document body is the only story whose character offsets can be
+        written back through document ranges, so everything else has to be
+        either handled on its own terms (comments) or left alone.
+        """
+        raise NotImplementedError
+
+    def replace_comment_selection(
+        self,
+        expected_text: str,
+        new_text: str,
+        expected_document: str | None = None,
+    ) -> tuple[bool, str]:
+        """Replace the text of a selection that sits in a Word comment."""
         raise NotImplementedError
 
     def add_comment(self, comment_text: str) -> None:
@@ -284,6 +333,9 @@ class WindowsWordIntegration(WordIntegration):
         revision) and restored in a ``finally`` block, the range is checked
         before the write, and the result is read back before reporting success.
         """
+        if cell_mark_mismatch(before_text, replacement):
+            _log_word("live edit refused: it would change the table structure")
+            return False, TABLE_STRUCTURE_MESSAGE
         start = selection_start + rel_start
         end = selection_start + rel_end
         try:
@@ -351,7 +403,12 @@ class WindowsWordIntegration(WordIntegration):
             text = sel.Text
             start_pos = sel.Start
             end_pos = sel.End
-            
+
+            if int(sel.StoryType) == WD_COMMENTS_STORY:
+                # Comment offsets only make sense inside the comment story;
+                # reading the body around them would be nonsense context.
+                return str(text), int(start_pos), int(end_pos), "", ""
+
             before_start = max(0, start_pos - 250)
             if before_start < start_pos:
                 context_before = doc.Range(before_start, start_pos).Text
@@ -370,12 +427,46 @@ class WindowsWordIntegration(WordIntegration):
             _log_word(f"Error getting text (Windows): {e}")
             return "", 0, 0, "", ""
 
-    def is_selection_in_table(self) -> bool:
+    def selection_scope(self) -> str:
+        """See WordIntegration.selection_scope."""
         try:
             word = self._get_word()
-            return bool(word.Selection.Information(WD_WITH_IN_TABLE))
+            selection = word.Selection
+            if int(selection.StoryType) == WD_COMMENTS_STORY:
+                return SCOPE_COMMENTS
+            if int(selection.StoryType) != WD_MAIN_TEXT_STORY:
+                return SCOPE_OTHER_STORY
+            if not selection.Information(WD_WITH_IN_TABLE):
+                return SCOPE_MAIN
+            # Inside a table: only a *complete* table counts as a table
+            # selection. Text inside the cells is edited like any other text.
+            if int(selection.Tables.Count) > 0:
+                return SCOPE_WHOLE_TABLE
+            return SCOPE_MAIN
         except Exception:
-            return False
+            return SCOPE_MAIN
+
+    def replace_comment_selection(
+        self,
+        expected_text: str,
+        new_text: str,
+        expected_document: str | None = None,
+    ) -> tuple[bool, str]:
+        """See WordIntegration.replace_comment_selection (Windows/COM)."""
+        try:
+            word = self._get_word()
+            selection = word.Selection
+            if int(selection.StoryType) != WD_COMMENTS_STORY:
+                return False, "That selection is no longer inside a comment."
+            if expected_text and str(selection.Range.Text) != expected_text:
+                return False, "The comment changed — please try again."
+            selection.Range.Text = new_text
+            if str(selection.Range.Text).rstrip("\r") == new_text.rstrip("\r"):
+                return True, "Applied."
+            return True, "Applied — please check the comment."
+        except Exception as exc:
+            _log_word(f"comment edit failed (Windows): {exc}")
+            return False, "Could not write to the Word comment."
 
     def delete_range(self, abs_start: int, abs_end: int) -> None:
         try:
@@ -592,6 +683,9 @@ class MacOSWordIntegration(WordIntegration):
         """
         from .generic_editing import _debug_log, _mac_set_clipboard
 
+        if cell_mark_mismatch(before_text, replacement):
+            _log_word("live edit refused: it would change the table structure")
+            return False, TABLE_STRUCTURE_MESSAGE
         start = selection_start + rel_start
         end = selection_start + rel_end
         _mac_set_clipboard(replacement)
@@ -884,9 +978,17 @@ class MacOSWordIntegration(WordIntegration):
             -- whenever the selection contains a field.
             set endPos to end of content of myRange
             
+            -- Comment text lives in its own story: its offsets point into the
+            -- comment, not the manuscript, so reading the body around them
+            -- would hand the model unrelated text.
+            set inComment to false
+            try
+                set inComment to ((get range information myRange information type in comment pane) as text) is "true"
+            end try
+
             -- Context Before (approx 30 words -> ~250 chars)
             set contextBefore to ""
-            if startPos > 0 then
+            if startPos > 0 and not inComment then
                 set beforeStart to startPos - 250
                 if beforeStart < 0 then set beforeStart to 0
                 set rangeBefore to create range active document start beforeStart end startPos
@@ -898,7 +1000,7 @@ class MacOSWordIntegration(WordIntegration):
             set docEnd to end of content of docRange
             
             set contextAfter to ""
-            if endPos < docEnd then
+            if endPos < docEnd and not inComment then
                 set afterEnd to endPos + 250
                 if afterEnd > docEnd then set afterEnd to docEnd
                 set rangeAfter to create range active document start endPos end afterEnd
@@ -932,29 +1034,190 @@ class MacOSWordIntegration(WordIntegration):
             
         return "", 0, 0, "", ""
 
-    def is_selection_in_table(self) -> bool:
+    def selection_scope(self) -> str:
+        """See WordIntegration.selection_scope.
+
+        One AppleScript call, made once per new selection (not on every poll).
+        Every check is a Word information flag rather than a localised story
+        name, so the answer does not depend on the Word UI language. Any
+        failure answers SCOPE_MAIN, which keeps the previous behaviour.
+        """
         script = """
         try
             tell application "Microsoft Word"
-                if not (exists active document) then return "false"
+                if not (exists active document) then return "main"
+                set myRange to text object of selection
+
+                set inComment to "false"
                 try
-                    set myRange to text object of selection
-                    if (count of tables of myRange) > 0 then
-                        return "true"
-                    end if
+                    set inComment to ((get range information myRange information type in comment pane) as text)
                 end try
-                return "false"
+                if inComment is "true" then return "comments"
+
+                set elsewhere to "false"
+                try
+                    set elsewhere to ((get range information myRange information type in header footer) as text)
+                end try
+                if elsewhere is "true" then return "other_story"
+                set elsewhere to "false"
+                try
+                    set elsewhere to ((get range information myRange information type in footnote endnote pane) as text)
+                end try
+                if elsewhere is "true" then return "other_story"
+                set elsewhere to "false"
+                try
+                    set elsewhere to ((get range information myRange information type in footnote) as text)
+                end try
+                if elsewhere is "true" then return "other_story"
+                set elsewhere to "false"
+                try
+                    set elsewhere to ((get range information myRange information type in endnote) as text)
+                end try
+                if elsewhere is "true" then return "other_story"
+
+                -- Inside a table the selection is only refused when a WHOLE
+                -- table is covered (Word's table handle, Select Table, or a
+                -- Cmd+A in the table). Cell text stays editable.
+                set tableList to tables of myRange
+                if (count of tableList) > 0 then
+                    set selStart to start of content of myRange
+                    set selEnd to end of content of myRange
+                    repeat with aTable in tableList
+                        set tableRange to text object of aTable
+                        if selStart ≤ (start of content of tableRange) and selEnd ≥ (end of content of tableRange) then
+                            return "whole_table"
+                        end if
+                    end repeat
+                end if
+                return "main"
             end tell
         on error errMsg
-            return "false"
+            return "main"
         end try
         """
         try:
-            res = self._run_applescript(script)
-            return res.strip() == "true"
+            res = self._run_applescript(script).strip()
         except Exception as e:
-            _log_word(f"Error checking table status: {e}")
-            return False
+            _log_word(f"Error checking the selection scope: {e}")
+            return SCOPE_MAIN
+        if res in (SCOPE_COMMENTS, SCOPE_WHOLE_TABLE, SCOPE_OTHER_STORY):
+            return res
+        return SCOPE_MAIN
+
+    def replace_comment_selection(
+        self,
+        expected_text: str,
+        new_text: str,
+        expected_document: str | None = None,
+    ) -> tuple[bool, str]:
+        """Rewrite the text of the comment the selection is inside.
+
+        Comment text has no writable sub-ranges through AppleScript (the range
+        returned by ``set range`` there cannot even be read back), so the whole
+        selection is replaced with the corrected text the caller built from it.
+        The write is guarded like the document path: the same document, the
+        same comment text, Track Changes restored, and the result read back.
+        """
+        import tempfile
+
+        from .generic_editing import _debug_log
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(new_text.replace("\r", "\n"))
+            tmp_path = tmp.name
+        expected_doc = _applescript_quote(expected_document or "")
+        expected = _applescript_quote(expected_text or "")
+        script = f"""
+        on run argv
+            set filePath to item 1 of argv
+            try
+                set newContent to read (filePath as POSIX file)
+            on error
+                return "ERROR_READ_FAILED"
+            end try
+            try
+                tell application "Microsoft Word"
+                    if not running then return "NOT_RUNNING"
+                    if not (exists active document) then return "NO_DOCUMENT"
+                    if "{expected_doc}" is not "" then
+                        if (name of active document) is not "{expected_doc}" then return "DOC_CHANGED"
+                    end if
+                    set inComment to "false"
+                    try
+                        set inComment to ((get range information (text object of selection) information type in comment pane) as text)
+                    end try
+                    if inComment is not "true" then return "NOT_COMMENT"
+                    if "{expected}" is not "" then
+                        if (content of (text object of selection)) is not "{expected}" then return "TEXT_CHANGED"
+                    end if
+                    set oldTrack to missing value
+                    try
+                        set oldTrack to track revisions of active document
+                        set track revisions of active document to false
+                    end try
+                    try
+                        set content of selection to newContent
+                    on error errMsg number errNum
+                        try
+                            if oldTrack is not missing value then
+                                set track revisions of active document to oldTrack
+                            end if
+                        end try
+                        return "WRITE_FAILED: " & errMsg
+                    end try
+                    try
+                        if oldTrack is not missing value then
+                            set track revisions of active document to oldTrack
+                        end if
+                    end try
+                    if (content of (text object of selection)) is newContent then return "OK"
+                    return "VERIFY_MISMATCH"
+                end tell
+            on error errMsg
+                return "ERROR:" & errMsg
+            end try
+        end run
+        """
+        try:
+            raw = self._run_applescript(script, tmp_path)
+        except WordBusyError as exc:
+            _log_word(f"comment edit blocked: {exc}")
+            return False, str(exc)
+        except Exception as exc:
+            _log_word(f"comment edit failed: {exc}")
+            return False, "Could not write to the Word comment."
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+        status = _applescript_status(raw)
+        if status == "OK":
+            return True, "Applied."
+        if status == "TEXT_CHANGED":
+            _debug_log("WORD COMMENT: the comment changed before the write")
+            return False, "The comment changed — please try again."
+        if status == "DOC_CHANGED":
+            _debug_log("WORD COMMENT: active document changed; refusing")
+            return False, "The active Word document changed — please try again."
+        if status == "NOT_COMMENT":
+            _debug_log("WORD COMMENT: the selection left the comment; refusing")
+            return False, "Select the comment text again to apply this change."
+        if status == "NOT_RUNNING":
+            return False, "Microsoft Word is not running."
+        if status == "NO_DOCUMENT":
+            return False, "No Word document is open."
+        if status == "VERIFY_MISMATCH":
+            _log_word("comment edit read-back differs; reporting for review")
+            return True, "Applied — please check the comment."
+        if status.startswith("WRITE_FAILED"):
+            _log_word(f"comment edit write failed: {status}")
+            return False, "Could not write to the Word comment."
+        _log_word(f"comment edit unexpected status: {status!r}")
+        return False, "Could not apply the edit in the comment."
             
     def delete_range(self, abs_start: int, abs_end: int) -> None:
         script = """

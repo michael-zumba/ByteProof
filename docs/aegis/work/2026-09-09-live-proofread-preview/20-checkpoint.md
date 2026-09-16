@@ -56,6 +56,15 @@
       borders/buttons/diff wells; spurious "could not verify" fixed
       (two-poll glitch debounce, sync compares the previewed text only,
       frontmost-target check for stale results, 3× sync retry)
+- [x] Tenth fix round (2.1.1-beta.7): the hidden main window stays hidden
+      while our own card/pill is on screen (helper life-cycle signal + a
+      pointer check, non-activating mask on every helper); table **cell**
+      text is proofread again while a whole-table selection stays refused
+      (Word `information` flags + real table-range coverage, cell-mark
+      write guard); Word **comments** are proofread live (own story: read
+      through the selection, rewritten as a whole, undo included) and
+      headers/footers/notes are skipped instead of written through
+      document ranges
 - [x] Editable-context gate (1.9.0-beta.11): suggestions only in editable
       contexts — settable-attribute probing (PDF/webpage reads skipped),
       Word/Pages/Mail context rules incl. Mail compose-window detection
