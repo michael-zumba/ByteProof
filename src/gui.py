@@ -82,7 +82,7 @@ from .activation import (
 from .app_version import check_for_updates, download_update
 from .autostart import set_launch_at_login
 from .cache_cleanup import cleanup_cache, local_storage_usage
-from .generic_editing import get_generic_editor, normalize_selection_text
+from .generic_editing import _debug_log, get_generic_editor, normalize_selection_text
 from .licensing import (
     ensure_trial_started,
     get_access_status,
@@ -5012,6 +5012,9 @@ class ProofreaderApp(QMainWindow):
         clicking Apply on the suggestion card looks like.
         """
         if time.monotonic() < self._suppress_activate_until:
+            _debug_log(
+                "APP: activation ignored — a floating helper was just used"
+            )
             return True
         try:
             point = QCursor.pos()
@@ -5019,6 +5022,10 @@ class ProofreaderApp(QMainWindow):
             return False
         for rect in self._helper_rects():
             if rect.contains(point):
+                _debug_log(
+                    "APP: activation ignored — the pointer is on a floating "
+                    "helper"
+                )
                 return True
         return False
 
@@ -5349,6 +5356,7 @@ class ProofreaderApp(QMainWindow):
                 and not self._tray_menu_open
                 and not self._helper_woke_the_app()
             ):
+                _debug_log("APP: activation — showing the main window")
                 self.show()
                 self.raise_()
                 self.activateWindow()

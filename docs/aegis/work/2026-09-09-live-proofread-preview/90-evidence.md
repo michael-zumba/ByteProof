@@ -321,9 +321,18 @@ how a Dock-icon click gets the window back. The suggestion card, the Undo pill
 and the toast are non-activating Qt tool windows, but macOS still activates the
 app when one of them is clicked - so the click that started an apply looked
 exactly like "the user wants the window back", and the window opened over the
-document mid-apply. The evidence is in `capture.log`: `LIVE APPLY ALL SYNC
-FAIL: selection changed ... now=<len=0>` - the frontmost app at that moment was
-ByteProof, not Word.
+document mid-apply.
+
+What the log shows is the same activation from the other side: at 11:40:09 the
+owner clicked Apply All, and one second later `LIVE APPLY ALL SYNC FAIL:
+selection changed: previewed=<len=205 ...> now=<len=0>` - Word's own selection
+read back empty immediately after the click. Word reports no selection while it
+is not the active application, so the click on the card must have taken
+activation away from Word; an activation is exactly what the window handler
+acts on. (The handler could not be exercised by hand here - synthesising a
+click needs an Accessibility grant this shell does not have - so the behaviour
+is pinned by tests that deliver `ApplicationActivate` in both states, and the
+beta logs which branch it took.)
 
 Fix, both halves:
 
@@ -429,3 +438,9 @@ Tests: `test_word_scope_probe_reads_word_information_flags`,
 Suite: `scripts/run_tests_ci.py` green (test_hardening, test_live_preview,
 test_smoke). `ruff check src tests` clean. Every new/changed AppleScript body
 compile-checked with `osacompile`.
+
+The background-window path is logged: `APP: activation ignored — a floating
+helper was just used` / `... the pointer is on a floating helper` when an
+activation is treated as ours, and `APP: activation — showing the main window`
+when it is not. The owner's next beta run can therefore say exactly which one
+happened if the window still appears.
