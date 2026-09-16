@@ -3620,6 +3620,128 @@ def test_undo_says_why_when_the_app_cannot_be_reached(monkeypatch):
     service.stop()
 
 
+def test_undo_marks_the_restored_selection_as_seen(monkeypatch):
+    """Undoing must not bounce the old suggestion panel straight back.
+
+    The apply updates the seen text to the corrected one. Undo restores the
+    original, so without updating that state the next poll sees a "new"
+    selection and can pop the cached suggestions again - the user would
+    reasonably read that as the undo having failed.
+    """
+    service, _editor, written, original, messages = _undo_service(monkeypatch)
+    service._undo_state["selection_before"] = original
+    service._selection_text = written
+    service._seen_text = written
+    service._previewed_text = written
+
+    service._perform_undo()
+
+    assert messages == ["Undone."]
+    assert service._selection_text == original
+    assert service._seen_text == original
+    assert service._previewed_text == original
+    service.stop()
+
+
+def test_full_undo_brings_the_clipboard_app_forward_first(monkeypatch):
+    """The same focus trap exists for the clipboard-only Mail/Pages path.
+
+    Its undo compares the current selection with the corrected text, but
+    clicking the pill makes ByteProof frontmost and a background Mail/Pages
+    exposes no selection at all - so the read came back empty and the undo
+    refused as "changed" before it ever reached the paste.
+    """
+    from src.live_service import LivePreviewService
+
+    corrected = "the cat sat on the mat"
+    original = "teh cat sat on the mat"
+    target = {"bundle_id": "com.apple.mail", "pid": 9, "name": "Mail"}
+
+    class FakeMail:
+        def __init__(self) -> None:
+            self.frontmost = "byteproof"
+            self.activated: list[dict] = []
+            self.replaced: list[str] = []
+            self.current = corrected
+
+        def is_frontmost(self, _target) -> bool:
+            return self.frontmost == "mail"
+
+        def activate(self, _target) -> bool:
+            self.activated.append(dict(target))
+            self.frontmost = "mail"
+            return True
+
+        def get_selection_light(self, _target) -> str:
+            return self.current if self.frontmost == "mail" else ""
+
+        def replace_selection(self, _target, new_text):
+            if self.frontmost != "mail":
+                return False, "Could not read the focused text field."
+            self.replaced.append(new_text)
+            self.current = new_text
+            return True, "Applied."
+
+    editor = FakeMail()
+    service = LivePreviewService()
+    service.refresh_settings({"live_preview": {"enabled": True}})
+    service._editor = editor
+    service._selection_target = dict(target)
+    service._undo_state = {
+        "mode": "full",
+        "target": dict(target),
+        "selection_before": original,
+        "original": original,
+        "corrected": corrected,
+    }
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._perform_undo()
+
+    assert editor.activated == [target], "Mail is brought forward before reading"
+    assert editor.replaced == [original]
+    assert messages == ["Undone."]
+    assert service._seen_text == original
+    service.stop()
+
+
+def test_full_undo_refuses_when_the_app_is_unreachable(monkeypatch):
+    """Refusing honestly is the correct answer when the app cannot come back."""
+    from src.live_service import LivePreviewService
+
+    class UnreachableMail:
+        def is_frontmost(self, _target) -> bool:
+            return False
+
+        def activate(self, _target) -> bool:
+            return False
+
+        def get_selection_light(self, _target) -> str:
+            raise AssertionError("must not read the selection before activating")
+
+        def replace_selection(self, _target, _new_text):
+            raise AssertionError("must not paste into an unreachable app")
+
+    service = LivePreviewService()
+    service.refresh_settings({"live_preview": {"enabled": True}})
+    service._editor = UnreachableMail()
+    service._undo_state = {
+        "mode": "full",
+        "target": {"bundle_id": "com.apple.mail", "pid": 9, "name": "Mail"},
+        "selection_before": "original",
+        "original": "original",
+        "corrected": "corrected",
+    }
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._perform_undo()
+
+    assert messages and "could not reach" in messages[0].lower()
+    service.stop()
+
+
 def test_a_word_undo_records_what_word_stored(monkeypatch):
     """Word normalises what it is given; the guard must compare against that.
 
@@ -3923,3 +4045,41 @@ def test_undo_reads_the_app_it_wrote_to_after_a_switch(monkeypatch):
 
     assert editor.restored == [(0, len(written), original, written)]
     service.stop()
+
+
+def test_upgrade_persists_the_long_selection_limit(monkeypatch, tmp_path):
+    """The 1,500 -> 4,000 character migration must reach settings.json.
+
+    ``_stamp_version_and_save`` compared the default's APP_VERSION with itself
+    when the loaded version was never copied, so a migration could change the
+    in-memory value and still leave the old file behind forever. Reopening
+    Settings then showed the old limit again.
+    """
+    import json
+
+    from src import settings as settings_mod
+
+    support = tmp_path / "support"
+    support.mkdir()
+    settings_file = support / "settings.json"
+    monkeypatch.setattr(settings_mod, "APP_SUPPORT_DIR", str(support))
+    monkeypatch.setattr(settings_mod, "SETTINGS_FILE", str(settings_file))
+    settings_file.write_text(
+        json.dumps(
+            {
+                "app_version": "2.1.1-beta.7",
+                "last_run_version": "2.1.1-beta.7",
+                "live_preview": {"enabled": True, "max_chars": 1500},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = settings_mod.load_runtime_settings()
+
+    assert loaded["live_preview"]["max_chars"] == 4000
+    assert loaded["app_version"] == settings_mod.APP_VERSION
+    saved = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert saved["app_version"] == settings_mod.APP_VERSION
+    assert saved["live_preview"]["max_chars"] == 4000
+    assert saved["last_run_version"] == "2.1.1-beta.7"

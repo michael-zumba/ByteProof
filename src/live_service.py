@@ -2056,6 +2056,7 @@ class LivePreviewService(QObject):
         self._selection_text = step.original
         self._seen_text = step.original
         self._previewed_text = step.original
+        self._remember_selection_after_undo(state)
         self._pending = []
         self._hide_panel()
         self.apply_done.emit("Undone.")
@@ -2106,17 +2107,32 @@ class LivePreviewService(QObject):
             if state.get("mode") == "full":
                 # The full-selection apply pasted over the current selection;
                 # undo is only safe while that selection still holds the
-                # corrected text.
-                current = self._editor.get_selection_light(
-                    state.get("target") or {}
-                )
+                # corrected text. Clicking the Undo pill makes ByteProof
+                # frontmost, and a clipboard-only app (Mail, Pages) exposes no
+                # selection while it is in the background: bring it forward
+                # first, exactly as the range undo does.
+                target = state.get("target") or {}
+                if not self._activate_for_undo(target):
+                    self.apply_done.emit(
+                        self._undo_failure_message(state, ["unreachable"])
+                    )
+                    self._restore_previous_undo()
+                    return
+                # Reading is a real Copy command for Mail/Pages, and the copy
+                # path is rate-limited: one attempt made too close to the
+                # apply's own copy read would come back empty and be blamed on
+                # the text. The bounded retry is the same read the apply uses.
+                current_state = self._read_full_selection_with_retries(attempts=2)
+                current = current_state[0] if current_state is not None else ""
                 if (current or "").strip() != state["corrected"].strip():
                     self.apply_done.emit("Selection changed — could not undo.")
                     self._restore_previous_undo()
                     return
                 ok, message = self._editor.replace_selection(
-                    state.get("target") or {}, state["original"]
+                    target, state["original"]
                 )
+                if ok:
+                    self._remember_selection_after_undo(state)
                 self.apply_done.emit("Undone." if ok else message)
                 if ok:
                     self._restore_previous_undo()
@@ -2190,6 +2206,7 @@ class LivePreviewService(QObject):
             if total == 0:
                 self.apply_done.emit("Could not undo.")
             elif restored == total:
+                self._remember_selection_after_undo(state)
                 self.apply_done.emit("Undone.")
             elif restored:
                 self.apply_done.emit(
@@ -2216,17 +2233,29 @@ class LivePreviewService(QObject):
         pid = int((target or {}).get("pid") or 0)
         if not pid:
             return False
+        is_frontmost = getattr(self._editor, "is_frontmost", None)
+        activate = getattr(self._editor, "activate", None)
+        if not callable(is_frontmost) and not callable(activate):
+            # Editors used by tests, and any future platform adapter without
+            # window activation, write directly. Not being able to answer the
+            # question is not a reason to refuse an otherwise valid undo.
+            return True
         try:
-            if self._editor.is_frontmost(target):
+            if callable(is_frontmost) and is_frontmost(target):
+                return True
+            if not callable(activate):
                 return True
             _debug_log(
                 f"LIVE UNDO: bringing {target.get('name')!r} forward before "
                 "restoring"
             )
-            self._editor.activate(target)
+            activate(target)
             deadline = time.monotonic() + TARGET_ACTIVATE_TIMEOUT_S
             while time.monotonic() < deadline:
-                if self._editor.is_frontmost(target):
+                if not callable(is_frontmost):
+                    time.sleep(0.15)
+                    return True
+                if is_frontmost(target):
                     # Give the app a moment to install its focus, which is what
                     # the focused-element lookup needs.
                     time.sleep(0.15)
@@ -2239,6 +2268,26 @@ class LivePreviewService(QObject):
         except Exception as exc:
             _debug_log(f"LIVE UNDO: could not activate the target: {exc}")
             return False
+
+    def _remember_selection_after_undo(self, state: dict[str, Any]) -> None:
+        """Mark the restored selection as seen so it cannot bounce back.
+
+        Undo restores the text the user had before the apply. Without this the
+        poll would read a different selection, spend another preview request
+        (or pop the cached panel) a moment after the undo toast - undo would
+        look broken even though the document was restored correctly.
+        """
+        before = state.get("selection_before")
+        if not isinstance(before, str) or not before:
+            return
+        self._selection_text = before
+        self._seen_text = before
+        self._previewed_text = before
+        self._candidate_text = ""
+        self._candidate_count = 0
+        self._selection_rect = None
+        self._changed_at = time.monotonic()
+        self._idle_read_done = True
 
     def _undo_failure_message(
         self, state: dict[str, Any], failures: list[str]
@@ -2816,6 +2865,7 @@ class LivePreviewService(QObject):
             {
                 "mode": "range",
                 "target": dict(self._selection_target),
+                "selection_before": self._selection_text,
                 "is_word": self._selection_is_word,
                 "document": self._word_document,
                 "steps": [
@@ -2971,6 +3021,7 @@ class LivePreviewService(QObject):
             {
                 "mode": "comment",
                 "target": dict(self._selection_target),
+                "selection_before": original,
                 "document": self._word_document,
                 "steps": [UndoStep(0, corrected, original)],
             }
@@ -3123,6 +3174,7 @@ class LivePreviewService(QObject):
                 {
                     "mode": "range",
                     "target": dict(self._selection_target),
+                    "selection_before": self._selection_text,
                     "is_word": self._selection_is_word,
                     "document": self._word_document,
                     "steps": list(reversed(undo_steps)),
@@ -3235,6 +3287,7 @@ class LivePreviewService(QObject):
                 {
                     "mode": "full",
                     "target": dict(self._selection_target),
+                    "selection_before": self._selection_text,
                     "original": self._selection_text,
                     "corrected": corrected,
                 }

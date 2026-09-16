@@ -13,7 +13,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.1.1-beta.8"
+APP_VERSION = "2.1.1-beta.9"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -377,6 +377,17 @@ def load_runtime_settings() -> dict[str, Any]:
         settings["general"]["temperature"] = 0.3
         settings["app_version"] = APP_VERSION
         return settings
+
+    # The defaults carry the running build's version, but the file's own
+    # version must survive until _stamp_version_and_save: that function writes
+    # the file back when the recorded version differs, which is how the
+    # one-time migrations below (long-selection limit, corrupted hotkeys) are
+    # persisted. Comparing APP_VERSION with itself silently skipped every save.
+    # last_run_version is copied for the same reason: note_launch_version needs
+    # it across launches to show the post-update Accessibility hint.
+    settings["app_version"] = loaded.get("app_version") or ""
+    if isinstance(loaded.get("last_run_version"), str):
+        settings["last_run_version"] = loaded["last_run_version"]
 
     # Migration logic
     if "api_keys" in loaded and isinstance(loaded["api_keys"], list):
