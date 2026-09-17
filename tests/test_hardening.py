@@ -1929,6 +1929,180 @@ def test_live_toggle_hotkey_flips_the_setting(monkeypatch):
     window.close()
 
 
+def test_hotkey_parser_accepts_the_shifted_punctuation_macos_reports():
+    """Cmd+Shift+. arrives as ">"; both spellings must match the same key.
+
+    This is the bug that made the owner's stored apply-all shortcut
+    (<cmd>+<shift>+.) look configured but never fire.
+    """
+    from src.hotkeys import _MacOSHotkeyManager, canonical_hotkey
+
+    class FakeAppKit:
+        NSEventModifierFlagCommand = 1
+        NSEventModifierFlagShift = 2
+        NSEventModifierFlagControl = 4
+        NSEventModifierFlagOption = 8
+
+    manager = _MacOSHotkeyManager({})
+    manager._appkit = FakeAppKit
+
+    _flags, char, variants = manager._parse_hotkey("<cmd>+<shift>+.")
+    assert char == "."
+    assert variants == {".", ">"}
+
+    _flags, char, variants = manager._parse_hotkey("<cmd>+<shift>+>")
+    assert char == ">"
+    assert variants == {">", "."}
+
+    # Duplicate detection sees the two spellings as one shortcut.
+    assert canonical_hotkey("<cmd>+<shift>+.") == canonical_hotkey(
+        "<cmd>+<shift>+>"
+    )
+
+
+def test_hotkey_conflicts_report_duplicates_and_system_keys(monkeypatch):
+    from src import hotkeys
+
+    monkeypatch.setattr(hotkeys, "_running_app_hotkeys", lambda timeout=1.5: [])
+    conflicts = hotkeys.find_hotkey_conflicts(
+        {
+            "Open Window": "<cmd>+<shift>+;",
+            "Proofread Selection": "<cmd>+<shift>+;",
+            "Apply all suggestions": "<cmd>+<space>",
+        },
+        check_running_apps=True,
+    )
+    assert any("both assigned" in message for message in conflicts)
+    if platform.system() == "Darwin":
+        assert any("Spotlight" in message for message in conflicts)
+    else:
+        assert len(conflicts) == 1
+
+
+def test_restore_defaults_resets_preferences_but_keeps_keys_and_license():
+    from src.settings import reset_user_settings
+
+    current = {
+        "general": {
+            "temperature": 1.8,
+            "menu_bar_only": False,
+            "open_hotkey": "<cmd>+1",
+        },
+        "live_preview": {"enabled": False, "max_chars": 123},
+        "automation": {"enabled": False, "rules": {"outlook": False}},
+        "providers": {"DeepSeek": {"api_keys": ["secret"]}},
+        "license": {"status": "licensed", "key": "paid-key"},
+        "active_provider": "DeepSeek",
+    }
+
+    restored = reset_user_settings(current)
+
+    assert restored["general"]["temperature"] == 0.3
+    assert restored["general"]["menu_bar_only"] is True
+    assert restored["general"]["apply_all_hotkey"] == "<cmd>+<shift>+<return>"
+    assert restored["live_preview"]["enabled"] is True
+    assert restored["live_preview"]["max_chars"] == 4000
+    assert restored["automation"]["enabled"] is True
+    # Access-relevant state is deliberately preserved.
+    assert restored["providers"]["DeepSeek"]["api_keys"] == ["secret"]
+    assert restored["license"]["key"] == "paid-key"
+    assert restored["active_provider"] == "DeepSeek"
+
+
+def test_menu_bar_only_mode_blocks_the_activation_popup(monkeypatch):
+    """A Cmd-Tab activation must not pull the hidden window over the document."""
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtWidgets import QApplication
+
+    from src import gui as gui_mod
+    from src import settings as settings_mod
+
+    QApplication.instance() or QApplication([])
+    window = gui_mod.ProofreaderApp(1024, settings_mod.load_runtime_settings())
+    shown: list[int] = []
+    monkeypatch.setattr(window, "_tray_menu_open", False)
+    monkeypatch.setattr(window, "_helper_woke_the_app", lambda: False)
+    monkeypatch.setattr(window, "isHidden", lambda: True)
+    monkeypatch.setattr(window, "show", lambda: shown.append(1))
+
+    assert window.settings["general"]["menu_bar_only"] is True
+    assert window._menu_bar_only_enabled() is True
+    window.eventFilter(window, QEvent(QEvent.Type.ApplicationActivate))
+    assert shown == []
+    window.close()
+
+
+def test_undo_pill_anchors_at_the_edited_range():
+    from PyQt6.QtCore import QPoint
+
+    from src.live_service import LivePreviewService, UndoStep
+
+    captured: list[tuple[int, int]] = []
+
+    class FakeEditor:
+        def ax_bounds_for_range(self, target, start, length):
+            captured.append((start, length))
+            return [(200, 300, 10, 20)]
+
+    service = LivePreviewService()
+    service._editor = FakeEditor()
+    service._selection_is_word = False
+    state = {
+        "mode": "range",
+        "steps": [UndoStep(100, "the", "teh")],
+    }
+
+    point = service._undo_anchor_point(state)
+
+    assert captured == [(100, 3)]
+    assert point == QPoint(217, 300)
+    service.stop()
+
+
+def test_general_settings_expose_menu_bar_only_and_restore_defaults():
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import SettingsDialog
+
+    QApplication.instance() or QApplication([])
+    dialog = SettingsDialog(settings_mod.load_runtime_settings())
+
+    assert hasattr(dialog, "chk_menu_bar_only")
+    assert dialog.chk_menu_bar_only.isChecked() is True
+    assert hasattr(dialog, "btn_restore_defaults")
+    assert dialog.btn_restore_defaults.text() == "Restore default settings"
+    dialog.deleteLater()
+
+
+def test_restore_defaults_button_resets_controls(monkeypatch):
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+
+    from src import settings as settings_mod
+    from src.gui import SettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    dialog = SettingsDialog(settings_mod.load_runtime_settings())
+    dialog.settings["general"]["temperature"] = 1.9
+    dialog.settings["general"]["menu_bar_only"] = False
+    dialog.settings["live_preview"]["max_chars"] = 700
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+
+    dialog.restore_default_settings()
+    app.processEvents()
+
+    restored = dialog.get_settings()
+    assert restored["general"]["temperature"] == 0.3
+    assert restored["general"]["menu_bar_only"] is True
+    assert restored["live_preview"]["max_chars"] == 4000
+    assert restored["general"]["apply_all_hotkey"] == "<cmd>+<shift>+<return>"
+    dialog.deleteLater()
+
+
 # --- no beeping: no copy keystrokes after an apply --------------------------
 
 
@@ -2639,9 +2813,13 @@ def test_quit_is_always_a_quit(monkeypatch):
 
 
 def test_keep_running_in_menu_bar_setting_round_trips() -> None:
-    """The General switch is honoured and saved."""
+    """The General switch is honoured and saved in regular Dock mode."""
     app, owner, dialog = _make_settings_dialog()
     assert dialog.chk_keep_running.isChecked() is True  # default: stay running
+    assert dialog.chk_menu_bar_only.isChecked() is True
+    # In menu-bar-only mode, closing must keep the app alive or it would be
+    # unreachable; turn the mode off before testing the switch itself.
+    dialog.chk_menu_bar_only.setChecked(False)
     dialog.chk_keep_running.setChecked(False)
     assert (
         dialog.get_settings()["general"]["keep_running_in_menu_bar"] is False
@@ -3441,6 +3619,9 @@ def test_an_activation_caused_by_our_own_helper_leaves_the_window_hidden(
 
     _gui_mod, window = _new_window(monkeypatch)
     try:
+        # Test the regular Dock-app activation path; the menu-bar-only path is
+        # covered by test_menu_bar_only_mode_blocks_the_activation_popup.
+        window.settings["general"]["menu_bar_only"] = False
         activate = QEvent(QEvent.Type.ApplicationActivate)
 
         # Nothing of ours is on screen: this is the user (Dock icon, Cmd-Tab)

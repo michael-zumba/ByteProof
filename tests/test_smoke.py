@@ -2885,6 +2885,9 @@ def test_dock_activation_restores_window() -> None:
     from src.gui import ProofreaderApp
 
     window = ProofreaderApp(1024, settings.load_runtime_settings())
+    # Regular Dock mode: in the default menu-bar-only mode an activation is
+    # deliberately ignored so Cmd-Tab can never pop the window over a document.
+    window.settings["general"]["menu_bar_only"] = False
     window.show()
     app.processEvents()
     window.hide()

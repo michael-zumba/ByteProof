@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import platform
@@ -13,7 +14,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.1.1-beta.10"
+APP_VERSION = "2.1.1-beta.11"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -284,9 +285,8 @@ def _normalise_base_url(base_url: str) -> str:
 def _clean_api_keys(keys: list[str]) -> list[str]:
     return [key.strip() for key in keys if isinstance(key, str) and key.strip()]
 
-def load_runtime_settings() -> dict[str, Any]:
-    # Default structure
-    settings: dict[str, Any] = {
+def _default_settings() -> dict[str, Any]:
+    return {
         "app_version": APP_VERSION,
         "general": {
             "launch_at_login": False,
@@ -294,6 +294,10 @@ def load_runtime_settings() -> dict[str, Any]:
             # Closing the window hides ByteProof and keeps Live Check running
             # from the menu bar; quitting is explicit (menu bar icon or Cmd+Q).
             "keep_running_in_menu_bar": True,
+            # Default: a background utility with a menu bar icon, no Dock icon
+            # and no place in the Cmd-Tab switcher. Turning this off restores a
+            # normal Dock app.
+            "menu_bar_only": True,
             "auto_apply": True,
             "track_changes": True,
             "play_sound_on_proofread": True,
@@ -350,6 +354,26 @@ def load_runtime_settings() -> dict[str, Any]:
             "style": "strict",
         },
     }
+
+
+def reset_user_settings(current: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``current`` with the user-facing sections reset.
+
+    Only behaviour and appearance preferences are reset: provider API keys,
+    the licence, the local model choice, and the update state are deliberately
+    preserved. A non-expert user can press "Restore default settings" without
+    losing access to their paid provider or activation.
+    """
+    defaults = _default_settings()
+    updated = copy.deepcopy(current)
+    for section in ("general", "live_preview", "automation"):
+        updated[section] = copy.deepcopy(defaults[section])
+    return updated
+
+
+def load_runtime_settings() -> dict[str, Any]:
+    # Default structure
+    settings: dict[str, Any] = _default_settings()
     
     # Initialize providers with defaults
     for name, config in PROVIDERS.items():

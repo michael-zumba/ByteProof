@@ -73,10 +73,10 @@ USER_ACTIVE_WINDOW_S = 0.6
 ACCESS_CACHE_TTL_S = 30.0
 # After a refusal, do not re-check on every selection change.
 ACCESS_RETRY_S = 60.0
-# How long the Undo pill stays offered. Ten seconds was too short when the
-# target app takes a moment to settle; a new preview, a new selection or
-# another apply dismisses it earlier.
-UNDO_AVAILABLE_MS = 15000
+# How long the Undo pill stays offered. Long enough to notice and reach it,
+# short enough not to hover over the document once the user has moved on; a
+# new preview, a new selection or another apply dismisses it earlier anyway.
+UNDO_AVAILABLE_MS = 12000
 # How many previous applies can still be undone.
 UNDO_STACK_MAX = 5
 # An app that is not active exposes no focused Accessibility element, so a
@@ -1824,29 +1824,58 @@ class LivePreviewService(QObject):
         if self._panel is not None:
             self._remembered_pos = QPoint(self._panel.pos())
 
+    def _range_anchor_point(self, start: int, length: int) -> QPoint | None:
+        """Top-right of a specific edited range, when the app reports bounds."""
+        if self._selection_is_word:
+            return None
+        try:
+            bounds = self._editor.ax_bounds_for_range(
+                self._selection_target,
+                int(start),
+                min(80, max(1, int(length))),
+            )
+            if bounds:
+                rect = QRect(
+                    int(min(b[0] for b in bounds)),
+                    int(min(b[1] for b in bounds)),
+                    int(max(b[0] + b[2] for b in bounds))
+                    - int(min(b[0] for b in bounds)),
+                    int(max(b[1] + b[3] for b in bounds))
+                    - int(min(b[1] for b in bounds)),
+                )
+                if not rect.isNull():
+                    return QPoint(rect.right() + 8, rect.top())
+        except Exception:
+            pass
+        return None
+
     def _anchor_point(self) -> QPoint:
         """Anchor the panel at the selection when bounds exist, else cursor."""
-        if not self._selection_is_word:
-            try:
-                bounds = self._editor.ax_bounds_for_range(
-                    self._selection_target,
-                    self._selection_start,
-                    min(80, max(1, len(self._selection_text))),
+        point = self._range_anchor_point(
+            self._selection_start, len(self._selection_text)
+        )
+        return point if point is not None else QCursor.pos()
+
+    def _undo_anchor_point(self, state: dict[str, Any]) -> QPoint:
+        """Anchor the Undo pill at the text that was just edited.
+
+        The pill used to use the suggestion card's last position, so dragging
+        the card (or the card's initial spot) decided where Undo appeared.
+        Computing it from the applied range keeps the button next to the words
+        the user is reviewing, where they expect the correction to be.
+        """
+        if state.get("mode") == "range":
+            steps = state.get("steps") or []
+            step = steps[0] if steps else None
+            if isinstance(step, (list, tuple)) and step:
+                step = UndoStep(*step)
+            if isinstance(step, UndoStep):
+                point = self._range_anchor_point(
+                    step.abs_start, max(1, len(step.original))
                 )
-                if bounds:
-                    rect = QRect(
-                        int(min(b[0] for b in bounds)),
-                        int(min(b[1] for b in bounds)),
-                        int(max(b[0] + b[2] for b in bounds))
-                        - int(min(b[0] for b in bounds)),
-                        int(max(b[1] + b[3] for b in bounds))
-                        - int(min(b[1] for b in bounds)),
-                    )
-                    if not rect.isNull():
-                        return QPoint(rect.right() + 8, rect.top())
-            except Exception:
-                pass
-        return QCursor.pos()
+                if point is not None:
+                    return point
+        return self._anchor_point()
 
     def _on_panel_dismissed(self) -> None:
         """Remember that the user closed the panel for this selection.
@@ -1970,7 +1999,8 @@ class LivePreviewService(QObject):
             self._undo_pill = UndoPill()
             apply_nonactivating_panel(self._undo_pill)
             self._undo_pill.undo_requested.connect(self._perform_undo)
-        anchor = self._last_anchor or self._anchor_point()
+        state = self._undo_state or {}
+        anchor = self._undo_anchor_point(state)
         self._undo_pill.place_near(anchor)
         self._undo_pill.show()
         if self._undo_timer is None:

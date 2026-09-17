@@ -81,7 +81,9 @@ app = BUNDLE(
         'NSAppleScriptEnabled': False,
         'NSHighResolutionCapable': 'True',
         'LSBackgroundOnly': 'False',
-        'LSUIElement': 'False',
+        # Menu-bar-only is the default. The app promotes itself back to a
+        # regular Dock app at runtime when the user turns that setting off.
+        'LSUIElement': 'True',
         'CFBundleShortVersionString': APP_VERSION,
         'CFBundleVersion': APP_VERSION,
         'CFBundleURLTypes': [

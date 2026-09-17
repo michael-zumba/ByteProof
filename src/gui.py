@@ -134,6 +134,7 @@ from .settings import (
     SUPPORT_EMAIL,
     get_app_support_dir,
     note_launch_version,
+    reset_user_settings,
     resource_path,
     save_runtime_settings,
 )
@@ -1141,6 +1142,9 @@ class SettingsDialog(QDialog):
     chk_launch_login: QCheckBox
     chk_keep_top: QCheckBox
     chk_keep_running: QCheckBox
+    chk_menu_bar_only: QCheckBox
+    btn_restore_defaults: QPushButton
+    restore_status_label: QLabel
     chk_auto_apply: QCheckBox
     chk_live_preview: QCheckBox
     chk_live_local: QCheckBox
@@ -1324,6 +1328,12 @@ class SettingsDialog(QDialog):
         self.init_local_tab()
         self.init_license_tab()
         self.init_updates_tab()
+
+        # Hotkey conflict checks are only worth a prompt when the user has
+        # actually changed a shortcut; saving an unchanged form should not nag
+        # about an app that happens to use the same key.
+        self._hotkey_conflict_acknowledged = False
+        self._original_hotkeys = self._hotkey_snapshot()
         
         self.setStyleSheet("""
             QDialog {
@@ -1598,6 +1608,25 @@ class SettingsDialog(QDialog):
         )
         prefs_layout.addWidget(self.chk_keep_running)
 
+        self.chk_menu_bar_only = QCheckBox(
+            "Run in the menu bar only (no Dock icon, hidden from Cmd-Tab)"
+        )
+        self.chk_menu_bar_only.setChecked(
+            self.settings.get("general", {}).get("menu_bar_only", True)
+        )
+        self.chk_menu_bar_only.setToolTip(
+            "On (recommended): ByteProof behaves like a background utility. "
+            "It appears only as a menu bar icon, stays out of the app "
+            "switcher, and never pops its window open when you Cmd-Tab.\n\n"
+            "Off: ByteProof appears in the Dock and Cmd-Tab like a normal app."
+        )
+        self.chk_menu_bar_only.toggled.connect(self._on_menu_bar_only_toggled)
+        prefs_layout.addWidget(self.chk_menu_bar_only)
+
+        if platform.system() != "Darwin":
+            # The menu-bar-only mode is a macOS activation-policy feature.
+            self.chk_menu_bar_only.setVisible(False)
+
         self.chk_sound = QCheckBox("Play a sound when proofreading starts")
         self.chk_sound.setChecked(
             self.settings.get("general", {}).get("play_sound_on_proofread", True)
@@ -1830,6 +1859,31 @@ class SettingsDialog(QDialog):
         spelling_layout.addWidget(note)
         layout.addWidget(spelling_group)
 
+        reset_group = QGroupBox("Start Fresh")
+        reset_layout = QVBoxLayout(reset_group)
+        reset_layout.setSpacing(10)
+        reset_hint = QLabel(
+            "Put every preference back to its recommended default. Your API "
+            "keys, license, local model and update state are kept."
+        )
+        reset_hint.setWordWrap(True)
+        reset_hint.setStyleSheet("color: #78716C; font-size: 12px;")
+        reset_layout.addWidget(reset_hint)
+        reset_row = QHBoxLayout()
+        reset_row.setContentsMargins(0, 0, 0, 0)
+        self.btn_restore_defaults = QPushButton("Restore default settings")
+        self.btn_restore_defaults.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_restore_defaults.clicked.connect(self.restore_default_settings)
+        reset_row.addWidget(self.btn_restore_defaults)
+        self.restore_status_label = QLabel("")
+        self.restore_status_label.setStyleSheet(
+            "color: #1F5335; font-size: 12px; font-weight: 600;"
+        )
+        reset_row.addWidget(self.restore_status_label)
+        reset_row.addStretch(1)
+        reset_layout.addLayout(reset_row)
+        layout.addWidget(reset_group)
+
         scroll.setWidget(content)
         outer_layout.addWidget(scroll)
         self.pages.addWidget(page)
@@ -1837,6 +1891,59 @@ class SettingsDialog(QDialog):
     def update_temp_label(self, value: int) -> None:
         temp = value / 10.0
         self.temp_label.setText(f"{temp:.1f}")
+
+    def _on_menu_bar_only_toggled(self, checked: bool) -> None:
+        """Menu-bar-only mode only works when closing keeps the app alive."""
+        if checked:
+            self.chk_keep_running.setChecked(True)
+
+    def _replace_settings_page(self, attr_name: str, init_method: Any) -> None:
+        """Rebuild a settings page in place, keeping the sidebar order."""
+        old_page = getattr(self, attr_name, None)
+        index = self.pages.indexOf(old_page) if old_page is not None else -1
+        if old_page is not None:
+            self.pages.removeWidget(old_page)
+            old_page.deleteLater()
+        init_method()
+        new_page = getattr(self, attr_name, None)
+        if new_page is None:
+            return
+        self.pages.removeWidget(new_page)
+        if index >= 0:
+            self.pages.insertWidget(index, new_page)
+        else:
+            self.pages.addWidget(new_page)
+
+    def restore_default_settings(self) -> None:
+        """Put the user-facing preferences back without touching licence/keys."""
+        answer = QMessageBox.question(
+            self,
+            "Restore default settings?",
+            "Reset every preference on the General, Live Check and Automation "
+            "pages to its recommended default?\n\n"
+            "Your API keys, license, local model and update state are kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.settings = reset_user_settings(self.settings)
+        self._live_hidden_apps = set()
+        # The button that was clicked lives on the page being replaced; do the
+        # rebuild after this slot returns so Qt is not deleting it mid-signal.
+        QTimer.singleShot(0, self._apply_restored_defaults)
+
+    def _apply_restored_defaults(self) -> None:
+        self._replace_settings_page("general_page", self.init_general_tab)
+        self._replace_settings_page("live_page", self.init_live_check_tab)
+        self._replace_settings_page("automation_page", self.init_automation_tab)
+        try:
+            self.sidebar.setCurrentRow(0)
+        except Exception:
+            pass
+        label = getattr(self, "restore_status_label", None)
+        if label is not None:
+            label.setText("Defaults restored — click Save to apply.")
 
     # Apps offered as one-click rows on the Live Check page. Anything else can
     # be added from the running apps.
@@ -4323,12 +4430,98 @@ class SettingsDialog(QDialog):
         else:
             QMessageBox.warning(self, "Activation Failed", message)
         
+    def _hotkey_snapshot(
+        self, general: dict[str, Any] | None = None
+    ) -> dict[str, str]:
+        data = general if general is not None else self.settings.get("general", {})
+        return {
+            key: str(data.get(key, ""))
+            for key in (
+                "open_hotkey",
+                "proofread_hotkey",
+                "live_toggle_hotkey",
+                "apply_all_hotkey",
+            )
+        }
+
+    def _hotkey_conflicts(self) -> list[str]:
+        """Check the four shortcuts for duplicates, system keys and menus."""
+        from .hotkeys import find_hotkey_conflicts
+
+        general = self.get_settings().get("general", {})
+        hotkeys = {
+            "Open Window": str(general.get("open_hotkey", "")),
+            "Proofread Selection": str(general.get("proofread_hotkey", "")),
+            "Turn Live Check on/off": str(general.get("live_toggle_hotkey", "")),
+            "Apply all suggestions": str(general.get("apply_all_hotkey", "")),
+        }
+        hotkeys = {name: value for name, value in hotkeys.items() if value}
+        if not hotkeys:
+            return []
+        app = QApplication.instance()
+        offscreen = bool(app is not None and "offscreen" in app.platformName())
+        return find_hotkey_conflicts(
+            hotkeys, check_running_apps=not offscreen
+        )
+
+    def _focus_hotkey_editor(self) -> None:
+        for attr_name in (
+            "open_hotkey_edit",
+            "proofread_hotkey_edit",
+            "live_toggle_hotkey_edit",
+            "apply_all_hotkey_edit",
+        ):
+            editor = getattr(self, attr_name, None)
+            if editor is not None:
+                editor.setFocus()
+                return
+
+    def accept(self) -> None:
+        """Save, but gently surface a shortcut that another action owns."""
+        current_general = self.get_settings().get("general", {})
+        current_hotkeys = self._hotkey_snapshot(current_general)
+        if (
+            self._hotkey_conflict_acknowledged
+            and current_hotkeys == self._original_hotkeys
+        ):
+            # The user already chose "Save Anyway" for these exact shortcuts;
+            # do not ask again on a later save that changed something else.
+            super().accept()
+            return
+        conflicts = self._hotkey_conflicts()
+        if conflicts:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("That shortcut is already in use")
+            box.setText(
+                "You can save it anyway, but the other action may also run "
+                "when you press it."
+            )
+            box.setInformativeText(
+                "\n".join(f"• {conflict}" for conflict in conflicts)
+            )
+            choose_button = box.addButton(
+                "Choose Another", QMessageBox.ButtonRole.RejectRole
+            )
+            box.addButton("Save Anyway", QMessageBox.ButtonRole.AcceptRole)
+            box.exec()
+            if box.clickedButton() is choose_button:
+                self._focus_hotkey_editor()
+                return
+            self._hotkey_conflict_acknowledged = True
+        super().accept()
+
     def get_settings(self) -> dict[str, Any]:
         self.settings["general"]["launch_at_login"] = self.chk_launch_login.isChecked()
         self.settings["general"]["keep_on_top"] = self.chk_keep_top.isChecked()
         self.settings["general"]["keep_running_in_menu_bar"] = (
             self.chk_keep_running.isChecked()
         )
+        menu_bar_only = bool(self.chk_menu_bar_only.isChecked())
+        self.settings["general"]["menu_bar_only"] = menu_bar_only
+        if menu_bar_only and platform.system() == "Darwin":
+            # A background utility the user cannot reopen would be a trap.
+            self.settings["general"]["keep_running_in_menu_bar"] = True
         self.settings["general"]["auto_apply"] = self.chk_auto_apply.isChecked()
         self.settings["general"]["track_changes"] = self.chk_track_changes.isChecked()
         self.settings["general"]["play_sound_on_proofread"] = self.chk_sound.isChecked()
@@ -4813,6 +5006,7 @@ class ProofreaderApp(QMainWindow):
                         ),
                     )
         register_url_scheme()
+        self._apply_activation_policy()
 
         app_inst = QApplication.instance()
         if app_inst is not None:
@@ -5194,24 +5388,55 @@ class ProofreaderApp(QMainWindow):
             self.hotkey_hint.setText(f"Hotkeys: {proof_display} to proofread  ·  {open_display} to open window")
         
         hotkeys_dict = {}
-        if open_hk:
-            hotkeys_dict[open_hk] = lambda: self.request_show.emit()
-        if proofread_hk:
-            hotkeys_dict[proofread_hk] = lambda: self.proofread_hotkey_pressed.emit()
+        registered: dict[str, str] = {}
+        try:
+            from .hotkeys import canonical_hotkey, log_debug
+        except Exception:
+            canonical_hotkey = None  # type: ignore[assignment]
+            log_debug = None  # type: ignore[assignment]
+
+        def register_hotkey(label: str, hotkey: str, callback: Any) -> None:
+            if not hotkey:
+                return
+            if canonical_hotkey is not None:
+                norm = canonical_hotkey(hotkey) or hotkey
+            else:
+                norm = hotkey
+            owner = registered.get(norm)
+            if owner is not None:
+                if log_debug is not None:
+                    log_debug(
+                        f"Hotkey conflict ignored: {label} and {owner} are "
+                        f"both {hotkey}"
+                    )
+                return
+            registered[norm] = label
+            hotkeys_dict[hotkey] = callback
+
+        register_hotkey(
+            "Open Window", open_hk, lambda: self.request_show.emit()
+        )
+        register_hotkey(
+            "Proofread Selection",
+            proofread_hk,
+            lambda: self.proofread_hotkey_pressed.emit(),
+        )
         live_toggle_hk = self.settings.get("general", {}).get(
             "live_toggle_hotkey", "<cmd>+<shift>+l"
         )
-        if live_toggle_hk and live_toggle_hk not in hotkeys_dict:
-            hotkeys_dict[live_toggle_hk] = (
-                lambda: self.live_toggle_hotkey_pressed.emit()
-            )
+        register_hotkey(
+            "Turn Live Check on/off",
+            live_toggle_hk,
+            lambda: self.live_toggle_hotkey_pressed.emit(),
+        )
         apply_all_hk = self.settings.get("general", {}).get(
             "apply_all_hotkey", "<cmd>+<shift>+<return>"
         )
-        if apply_all_hk and apply_all_hk not in hotkeys_dict:
-            hotkeys_dict[apply_all_hk] = (
-                lambda: self.apply_all_hotkey_pressed.emit()
-            )
+        register_hotkey(
+            "Apply all suggestions",
+            apply_all_hk,
+            lambda: self.apply_all_hotkey_pressed.emit(),
+        )
             
         if not hotkeys_dict:
             print("No hotkeys defined.")
@@ -5402,13 +5627,15 @@ class ProofreaderApp(QMainWindow):
             self.show_and_raise()
 
     def eventFilter(self, a0: Any, a1: Any) -> bool:  # pyright: ignore[reportAny]
-        # Clicking the Dock icon (or otherwise switching to ByteProof) brings
-        # the hidden main window back, unless the activation was caused by our
-        # own floating helpers while proofreading in the background, or by
-        # opening the tray menu.
+        # An ApplicationActivate can come from the Dock, a Cmd-Tab pass, or one
+        # of our own floating helpers. In menu-bar-only mode the app is not in
+        # Cmd-Tab and the window is opened deliberately from the tray icon, so
+        # activation must never pop it over the user's document. If the user
+        # chose regular Dock mode, opening from the Dock still works.
         if a1.type() == QEvent.Type.ApplicationActivate:
             if (
                 self.isHidden()
+                and not self._menu_bar_only_enabled()
                 and not self._tray_menu_open
                 and not self._helper_woke_the_app()
             ):
@@ -6319,7 +6546,58 @@ class ProofreaderApp(QMainWindow):
     def current_settings(self) -> dict[str, Any]:
         return self.settings
 
+    def _menu_bar_only_enabled(self) -> bool:
+        return bool(
+            platform.system() == "Darwin"
+            and self.settings.get("general", {}).get("menu_bar_only", True)
+        )
+
+    def _apply_activation_policy(self) -> None:
+        """Hide ByteProof from the Dock and Cmd-Tab in menu-bar-only mode.
+
+        The main window still exists and opens from the menu bar icon, but an
+        accessory app is not activated by Cmd-Tab, so switching apps can never
+        drag the proofreading window over the user's document by accident.
+        """
+        if platform.system() != "Darwin":
+            return
+        app = QApplication.instance()
+        if app is None or "offscreen" in app.platformName():
+            return
+        try:
+            from AppKit import (
+                NSApplication,
+                NSApplicationActivationPolicyAccessory,
+                NSApplicationActivationPolicyRegular,
+            )
+
+            from .generic_editing import _debug_log
+
+            desired = (
+                NSApplicationActivationPolicyAccessory
+                if self._menu_bar_only_enabled()
+                else NSApplicationActivationPolicyRegular
+            )
+            ns_app = NSApplication.sharedApplication()
+            if int(ns_app.activationPolicy()) != int(desired):
+                ns_app.setActivationPolicy_(desired)
+            _debug_log(
+                "APP: activation policy "
+                + ("menu-bar-only" if self._menu_bar_only_enabled() else "regular")
+            )
+        except Exception as exc:
+            print(f"Could not apply activation policy: {exc}")
+
     def show_and_raise(self):
+        if self._menu_bar_only_enabled():
+            # An accessory app must ask AppKit to activate before Qt can raise
+            # its hidden window back over the menu bar.
+            try:
+                from AppKit import NSApplication
+
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except Exception:
+                pass
         self.show()
         self.raise_()
         self.activateWindow()
@@ -7927,6 +8205,7 @@ class ProofreaderApp(QMainWindow):
                     self.activateWindow()
             
             save_runtime_settings(updated)
+            self._apply_activation_policy()
             self._refresh_live_service()
             if self.keep_top_action is not None:
                 self.keep_top_action.setChecked(
