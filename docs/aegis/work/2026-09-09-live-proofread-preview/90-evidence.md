@@ -709,3 +709,98 @@ stored `\r`/`\r\n` representation with the requested `\n` byte-for-byte.
 * Build: Apple Silicon DMG built, notarized, stapled and installed; running
   app is 2.1.1-beta.10. DMG sha256
   `8a5a75822d41109b36c586f5a8aa4727a5a91546b6911d1dbc71816380bb849c`.
+
+## Fourteenth fix round (2.1.1-beta.11) — the owner UX pass
+
+Owner report, five items: the main window popped up on every Cmd-Tab after
+using the app; Apply All and the other live hotkeys did not fire reliably;
+chosen hotkeys could silently collide with another app; a non-expert needed a
+"restore defaults" button; and the Undo pill appeared at the old suggestion
+card position for an unclear length of time.
+
+### The Cmd-Tab popup
+
+`capture.log` had repeated pairs: a helper activation was ignored, then a few
+seconds later `APP: activation — showing the main window`. The 8-second helper
+grace was the only defence; after it expired, any `ApplicationActivate` (Dock,
+Cmd-Tab pass, or an accessory window waking the app) ran the
+`show(); raise(); activateWindow()` branch. ByteProof was also a regular Dock
+app, so it appeared in the Cmd-Tab list at all.
+
+Fix, default-on:
+
+* `general.menu_bar_only` defaults to `True`.
+* On macOS the app sets `NSApplicationActivationPolicyAccessory` at startup;
+  it has no Dock icon and is not in Cmd-Tab. Turning the setting off promotes
+  it back to `Regular` at runtime.
+* `Info.plist` ships `LSUIElement=True` so the packaged app starts that way.
+* The activation event filter refuses to show the hidden window in this mode;
+  the window is opened deliberately from the menu bar icon or its hotkey.
+* The "Keep running in the menu bar" switch is forced on while menu-bar-only
+  is on, so the user cannot make the app unreachable.
+
+Verified live: `/Applications/ByteProof.app` 2.1.1-beta.11 runs with
+`activationPolicy() == 1` (accessory), and `capture.log` shows
+`APP: activation policy menu-bar-only`.
+
+### Hotkeys: stored Cmd+Shift+. could never match
+
+`settings.json` held `apply_all_hotkey: "<cmd>+<shift>+."`, and
+`debug_hotkeys.log` showed it parsed as char `.` with `variants={'.'}`. On
+macOS, Shift+period produces `>` in `charactersIgnoringModifiers`, so the
+handler never matched. The parser only knew the `:`/`"` shifted pairs for `;`
+and `'`. It now covers every shifted US punctuation key (`.>`, `,<`, `/?`,
+`- _`, `= +`, `[{`, `]}`, `\|`, `` `~ `` and the number row), in both
+directions, so a stored shortcut matches the event whichever spelling arrives.
+Duplicate canonical registration is also logged instead of silently letting a
+later shortcut overwrite an earlier one. The General > Hotkeys and Live Check >
+Hotkeys fields round-trip unchanged; Apply All defaults to Cmd+Shift+Return
+again via Restore Default Settings.
+
+### Hotkey conflict warning
+
+`find_hotkey_conflicts` now checks, on Save:
+
+* duplicates between the four ByteProof actions;
+* a short curated list of OS shortcuts (Spotlight, screenshots, Emoji,
+  Force Quit, standard Copy/Paste/Save/Quit/…);
+* the menu equivalents of currently running apps, read from their AX menu
+  bars (`AXMenuItemCmdChar` + `AXMenuItemCmdModifiers`) in a daemon thread
+  bounded at 1.5 s so a busy app cannot freeze Settings.
+
+The result appears as a gentle "That shortcut is already in use" dialog with
+**Choose Another** (focuses the field and keeps the dialog open) and **Save
+Anyway**. An unchanged form the user has already acknowledged is not nagged
+again.
+
+### Restore Default Settings
+
+General now has a **Restore default settings** button. It resets the
+`general`, `live_preview` and `automation` sections to the shipped defaults
+(hotkeys, menu-bar mode, timing, app rules, style, context, automation),
+rebuilds those three Settings pages in place, and leaves `providers` (API
+keys), `license`, `local_model`, `active_provider` and update state untouched.
+
+### Undo pill placement and lifetime
+
+The pill used `_last_anchor`, which is the suggestion card's remembered
+position; dragging the card decided where Undo appeared. It now anchors to the
+**applied range** (`UndoStep.abs_start` via `AXBoundsForRange`), falling back
+to the selection/cursor when the app exposes no bounds (Word), so it appears
+next to the words that were actually changed. `UNDO_AVAILABLE_MS` is 12
+seconds: long enough to notice and reach, short enough not to hover over the
+document after the user moves on.
+
+### Evidence
+
+* Tests: 369 green — `test_hardening.py` 128 (new: shifted-punctuation
+  parser, duplicate/system conflict report, reset preserves keys/license,
+  menu-bar-only blocks the activation popup, Undo anchors to the edited
+  range, Reset rebuilds the pages), `test_live_preview.py` 137,
+  `test_smoke.py` 104. Ruff clean; version markers agree.
+* Build: Apple Silicon DMG built, notarized, stapled, installed and launched.
+  `Info.plist` carries `LSUIElement=True`; the running process is accessory.
+  DMG sha256
+  `7e722067acdc895fc5d4f9400252141112ebcf027503ba1c6f60e4ad7405d881`.
+* `debug_hotkeys.log` from the new build shows
+  `Parsed hotkey: <cmd>+<shift>+. -> variants={'.', '>'}`.

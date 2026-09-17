@@ -80,6 +80,15 @@
       write verification tolerates CR/LF rewriting while still comparing
       spaces, quotes and words exactly; apply starts from a freshly discovered
       AX element instead of one cached before a focus move inside the window
+- [x] Fourteenth fix round (2.1.1-beta.11), owner UX pass: menu-bar-only is
+      the default (accessory activation policy: no Dock icon, no Cmd-Tab
+      entry, and an activation no longer opens the hidden window);
+      shifted-punctuation hotkeys match macOS (Cmd+Shift+. arrives as ">",
+      which the parser previously missed); Settings warns gently when a
+      shortcut duplicates another ByteProof action, a system shortcut, or a
+      running app's menu equivalent; General gains a Restore Default Settings
+      button (API keys, license and local model preserved); the Undo pill is
+      anchored to the edited range and lives 12 seconds
 - [x] Tenth fix round (2.1.1-beta.7): the hidden main window stays hidden
       while our own card/pill is on screen (helper life-cycle signal + a
       pointer check, non-activating mask on every helper); table **cell**
