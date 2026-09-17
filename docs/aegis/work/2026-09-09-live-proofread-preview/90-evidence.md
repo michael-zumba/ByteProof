@@ -651,3 +651,61 @@ second source of truth that can be stale after a crash, and the 15-second pill
 is the only undo entry point, so a disk record buys no capability. The
 matching was tightened instead (unique needle, 64-character relocation window,
 editor-side `before_text` guard, Word read-back).
+
+## Thirteenth fix round (2.1.1-beta.10) — Apply All lost the position after an Outlook paste
+
+Owner report: after applying live suggestions, the document content was
+mismatched/misplaced - edits no longer landed on the selected words.
+
+### What `capture.log` showed
+
+The 18:59 and 19:00 Outlook sessions both went wrong the same way:
+
+* the first span was written with the fallback clipboard paste;
+* the AX read-back still did not match (`paste verify: mismatch`);
+* a second read showed the range *had* changed, so the retry was refused
+  (`range changed after paste ... refusing retry`);
+* the next span could no longer be located (`could not locate a span ...
+  near rel=81`), and every following span was skipped or failed the same way,
+  while the document had already shifted under the first write.
+
+The old code applied suggestions left-to-right and shifted every following
+offset by the previous edit's length delta. After an unverified write it kept
+going, using an AXValue that was stale or only partly updated. The next paste
+therefore targeted an offset that no longer existed in the real field. A
+correctly applied edit could also be misread as a failure when Outlook stored
+a newline in its own form: the failing spans were all shorter/longer by 1-14
+characters around paragraph text, and `_verify_range_write` compared the
+stored `\r`/`\r\n` representation with the requested `\n` byte-for-byte.
+
+### The fix
+
+* **Apply backwards.** `_apply_all_locked` now sorts pending spans by start
+  descending. An edit can only move text *after* the spans still waiting, so
+  their preview offsets stay valid without any delta arithmetic. Word's
+  `_word_doc_delta` is reset to 0 before each reverse step for the same
+  reason. This is the same right-to-left order `apply_corrections_with_diff`
+  already uses for the manual Word flow.
+* **Verify newline form, not newline bytes.** `normalize_line_endings` was
+  added to `utils`; `_same_text`, `_range_write_candidates` and
+  `_value_holds` let write verification accept `\n`, `\r` and `\r\n`
+  spellings of the same text. Spaces, quotes and words are still compared
+  exactly, and the length search is bounded by the number of line breaks, so
+  a genuine mismatch cannot be papered over. The selected-text check, the
+  delayed-write check, the pre-paste range guard, the retry guard and the
+  full-selection paste wait all use the same rule.
+* **Never apply from a stale element.** `_sync_selection` invalidates the
+  per-pid AX element cache before reading the selection. The cache is what
+  makes the 350 ms poll cheap, but its only key is the pid - a focus move from
+  Outlook's list/search field into the compose body could otherwise leave the
+  range selection on one element while the paste landed in another.
+
+### Evidence
+
+* Tests: 362 green — `test_hardening.py` 121, `test_live_preview.py` 137
+  (new: backwards apply keeps a stale AXValue from moving the next span;
+  newline-normalised write verification), `test_smoke.py` 104. Ruff clean;
+  version markers agree.
+* Build: Apple Silicon DMG built, notarized, stapled and installed; running
+  app is 2.1.1-beta.10. DMG sha256
+  `8a5a75822d41109b36c586f5a8aa4727a5a91546b6911d1dbc71816380bb849c`.

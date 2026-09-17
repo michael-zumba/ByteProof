@@ -73,6 +73,13 @@
       and the loaded `last_run_version` are actually persisted to
       settings.json (APP_VERSION had been compared with itself, so migration
       saves were skipped)
+- [x] Thirteenth fix round (2.1.1-beta.10): Apply All writes suggestions from
+      the end of the selection backwards, so a write can only move text after
+      the spans still waiting - a lagging AXValue (Outlook at 18:59/19:00)
+      can no longer make the next suggestion paste at a stale offset;
+      write verification tolerates CR/LF rewriting while still comparing
+      spaces, quotes and words exactly; apply starts from a freshly discovered
+      AX element instead of one cached before a focus move inside the window
 - [x] Tenth fix round (2.1.1-beta.7): the hidden main window stays hidden
       while our own card/pill is on screen (helper life-cycle signal + a
       pointer check, non-activating mask on every helper); table **cell**
