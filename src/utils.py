@@ -24,6 +24,17 @@ def normalize_text(text: str, collapse_whitespace: bool = True) -> str:
     return text
 
 
+def normalize_line_endings(text: str) -> str:
+    """Canonical CR/LF form for write-verification, without losing anything.
+
+    Editor and clipboard representations disagree on newlines (``\\n`` vs
+    ``\\r`` vs ``\\r\\n``, especially in Outlook and other WebKit surfaces).
+    The apply verification must tolerate that without collapsing spaces, so it
+    cannot use :func:`normalize_text`'s whitespace folding.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def clean_api_keys(keys: list[str]) -> list[str]:
     return [key.strip() for key in keys if isinstance(key, str) and key.strip()]
 

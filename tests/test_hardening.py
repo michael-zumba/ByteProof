@@ -712,8 +712,7 @@ def test_apply_all_works_while_another_app_is_frontmost(monkeypatch):
 
     service._apply_all()
 
-    assert applied[0] == (10, 3, "the")
-    assert len(applied) == 2
+    assert applied == [(14, 3, "dog"), (10, 3, "the")]
     assert messages and messages[0].startswith("Applied")
     service.stop()
 

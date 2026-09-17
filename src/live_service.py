@@ -1488,6 +1488,25 @@ class LivePreviewService(QObject):
         except Exception:
             return None
 
+    def _invalidate_ax_element(self) -> None:
+        """Forget the cached Accessibility element for the captured app.
+
+        The cache exists so the 350 ms poll does not walk the tree every tick.
+        It is keyed only by pid, though, so it can outlive a focus move inside
+        a complex window (Outlook switches between its search, list and compose
+        elements). Applying against such a stale element can make the range
+        selection happen in one field while the paste lands in another. A
+        user-initiated apply can afford one fresh walk, so it starts here.
+        """
+        pid = int(self._selection_target.get("pid") or 0)
+        invalidate = getattr(self._editor, "invalidate_ax_element", None)
+        if not pid or not callable(invalidate):
+            return
+        try:
+            invalidate(pid)
+        except Exception:
+            pass
+
     def _sync_selection(self) -> tuple[bool, str]:
         """Verify the previewed selection still holds and re-anchor to it.
 
@@ -1500,6 +1519,9 @@ class LivePreviewService(QObject):
         transiently glitched read, and failing the user's click because of
         it produced spurious "could not verify" toasts.
         """
+        # The read below decides where every later write goes: start from a
+        # freshly discovered element instead of one cached before a focus move.
+        self._invalidate_ax_element()
         state = self._read_selection_state()
         read_text = state[0] if state is not None else ""
         if read_text == self._selection_text and state is not None:
@@ -3111,31 +3133,39 @@ class LivePreviewService(QObject):
         # per-suggestion rescan is what made Word with tracked changes crawl.
         self._prepare_word_batch(batch)
         applied = 0
-        delta = 0
         failure_message = ""
         skipped: list[EditSpan] = []
         undo_steps: list[UndoStep] = []
-        live_text = self._live_edit_text()
-        for span in sorted(batch, key=lambda s: s.start):
+        # Apply from the end of the selection backwards. Every edit then changes
+        # text only *after* the spans still waiting, so their offsets stay the
+        # offsets the preview computed. The old left-to-right order had to
+        # re-locate every following span after each write; when an app's AX
+        # value lagged a paste (Outlook does), the next span was placed from a
+        # stale offset and the document around it was rewritten in the wrong
+        # place. Right-to-left removes that whole class of drift.
+        for span in sorted(batch, key=lambda s: s.start, reverse=True):
             before_text = span.before or self._selection_text[span.start : span.end]
-            rel_start, rel_end = span.start + delta, span.end + delta
-            if live_text:
-                located = self._relocate_rel_start(before_text, rel_start)
-                if located is None:
-                    # Teams and friends rewrite what they insert, so after an
-                    # earlier edit the arithmetic offset is only a hint. Not
-                    # finding the text means "do not write": a guess would edit
-                    # the wrong words. Skip this one and keep going, so the
-                    # rest of the suggestions still land.
-                    _debug_log(
-                        "LIVE APPLY ALL: could not locate a span "
-                        f"({_redact(before_text)}) near rel={rel_start}; "
-                        "skipping it"
-                    )
-                    skipped.append(span)
-                    continue
-                rel_start = located
-                rel_end = located + len(before_text)
+            rel_start, rel_end = span.start, span.end
+            located = self._relocate_rel_start(before_text, rel_start)
+            if located is None:
+                # The app moved or rewrote the text. Not finding the span
+                # means "do not write": a guess would edit the wrong words.
+                # Skipping it leaves every span to its left exactly where the
+                # preview put it, so the rest can still be applied safely.
+                _debug_log(
+                    "LIVE APPLY ALL: could not locate a span "
+                    f"({_redact(before_text)}) near rel={rel_start}; "
+                    "skipping it"
+                )
+                skipped.append(span)
+                continue
+            rel_start = located
+            rel_end = located + len(before_text)
+            if self._selection_is_word:
+                # Word's position map is in original document coordinates. The
+                # delta accumulated by a right-hand edit does not apply to a
+                # span to its left, so each reverse step starts from the map.
+                self._word_doc_delta = 0
             ok, message, abs_start = self._apply_abs(
                 rel_start,
                 rel_end - rel_start,
@@ -3144,9 +3174,9 @@ class LivePreviewService(QObject):
                 visible_start=span.start,
             )
             if not ok:
-                # Keep going: the previous behaviour stopped here and left the
-                # remaining suggestions unapplied, which is what "Apply All"
-                # must never do.
+                # Keep going: every remaining span lies before this one, so a
+                # failed or unverified write cannot have moved it. (The old
+                # left-to-right order could not make that promise.)
                 failure_message = message or "Could not apply the edit in this app."
                 _debug_log(
                     "LIVE APPLY ALL: skipping a span after failure "
@@ -3155,19 +3185,9 @@ class LivePreviewService(QObject):
                 skipped.append(span)
                 continue
             applied += 1
-            delta = rel_start + len(span.after) - span.start - len(before_text)
             undo_steps.append(
                 self._undo_step(abs_start, span.after, span.before)
             )
-            refreshed = self._live_edit_text()
-            if refreshed:
-                live_text = refreshed
-            elif live_text:
-                live_text = (
-                    live_text[:rel_start]
-                    + span.after
-                    + live_text[rel_start + len(before_text) :]
-                )
         self.apply_all_requested.emit()
         if applied:
             self._arm_undo(

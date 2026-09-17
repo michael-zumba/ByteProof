@@ -22,7 +22,7 @@ import time
 from typing import Any
 
 from .settings import get_app_support_dir
-from .utils import normalize_text
+from .utils import normalize_line_endings, normalize_text
 
 SYSTEM = platform.system()
 CONTEXT_CHARS = 400
@@ -118,6 +118,51 @@ def _log_once(key: str, msg: str) -> None:
         _debug_log(msg)
 
 
+def _same_text(got: str | None, expected: str) -> bool:
+    """Exact match, or the same text after canonicalising CR/LF variants.
+
+    Apply verification must accept what the editor actually stores. Outlook
+    and other WebKit surfaces rewrite ``\\n`` as ``\\r``/``\\r\\n`` (and the
+    reverse), which used to make a correctly applied edit read back as a
+    mismatch. Only newline form is ignored: spaces, quotes and words are still
+    compared exactly, so a genuinely different write cannot pass.
+    """
+    if got is None:
+        return False
+    if got == expected:
+        return True
+    return normalize_line_endings(got) == normalize_line_endings(expected)
+
+
+def _range_write_candidates(new_text: str) -> list[int]:
+    """Slice lengths worth trying for a newline-normalised write.
+
+    If the app expanded each ``\\n`` to ``\\r\\n`` the stored text is longer
+    than requested; if it collapsed ``\\r\\n`` to ``\\n`` it is shorter. The
+    bound is the number of line breaks in the text, so an ordinary mismatch is
+    never papered over by a length guess.
+    """
+    lengths = {len(new_text)}
+    normalised = normalize_line_endings(new_text)
+    breaks = normalised.count("\n")
+    for delta in range(1, min(breaks, 8) + 1):
+        lengths.add(len(new_text) + delta)
+        shorter = len(new_text) - delta
+        if shorter > 0:
+            lengths.add(shorter)
+    return sorted(length for length in lengths if length > 0)
+
+
+def _value_holds(value: str, start: int, new_text: str) -> bool:
+    """Whether the AX value at ``start`` holds the written text."""
+    if start < 0:
+        return False
+    return any(
+        _same_text(value[start : start + length], new_text)
+        for length in _range_write_candidates(new_text)
+    )
+
+
 def _verify_range_write(
     AS: Any, elements: list[Any], start: int, new_text: str
 ) -> str:
@@ -130,10 +175,7 @@ def _verify_range_write(
             )
             if err == 0 and isinstance(value, str):
                 value_readable = True
-                if (
-                    0 <= start
-                    and value[start : start + len(new_text)] == new_text
-                ):
+                if _value_holds(value, start, new_text):
                     return "ok"
                 _debug_log(
                     "ax_replace_range verify: value slice "
@@ -151,7 +193,7 @@ def _verify_range_write(
             if err == 0:
                 selection_readable = True
                 got = str(text or "")
-                if got == new_text or new_text in got:
+                if _same_text(got, new_text) or new_text in got:
                     return "ok"
                 if got:
                     _debug_log(
@@ -221,7 +263,9 @@ def _wait_for_paste_consumed(
                 texts.append(value)
         except Exception:
             pass
-        if any(new_text in text for text in texts):
+        if any(
+            _same_text(new_text, text) or new_text in text for text in texts
+        ):
             return "ok"
         if texts:
             readable = True
@@ -1555,7 +1599,7 @@ class GenericTextEditor:
                 )
                 if err != 0 or not isinstance(got, str):
                     return False
-                return got == text or got.strip() == text.strip()
+                return _same_text(got, text) or got.strip() == text.strip()
             except Exception:
                 return False
 
@@ -1666,9 +1710,12 @@ class GenericTextEditor:
         if (
             expected_before is not None
             and current is not None
-            and current != expected_before
+            and not _same_text(current, expected_before)
         ):
-            if _range_slice(len(new_text)) == new_text:
+            if any(
+                _same_text(_range_slice(size), new_text)
+                for size in _range_write_candidates(new_text)
+            ):
                 # A delayed AX write from step 2 already applied the edit;
                 # nothing left to paste.
                 _debug_log("ax_replace_range: edit already present")
@@ -1705,9 +1752,8 @@ class GenericTextEditor:
                 # ORIGINAL text — if the document changed at all, a second
                 # paste would land on shifted content and corrupt it.
                 still_original = _range_slice()
-                if (
-                    still_original is not None
-                    and still_original == expected_before
+                if still_original is not None and _same_text(
+                    still_original, expected_before
                 ):
                     _debug_log(
                         "ax_replace_range: retrying paste via System Events"

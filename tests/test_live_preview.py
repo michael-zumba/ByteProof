@@ -712,7 +712,15 @@ def test_service_applies_one_suggestion_through_ax(monkeypatch):
     assert applied == [(100, 3, "the")]
 
 
-def test_service_apply_all_applies_each_suggestion_with_delta(monkeypatch):
+def test_service_apply_all_applies_each_suggestion_backwards(monkeypatch):
+    """Right-to-left apply keeps every not-yet-written span's offsets valid.
+
+    The old forward order had to shift each following offset by the previous
+    edit's length delta. When the app's AX text lagged a paste (Outlook), that
+    arithmetic pointed at stale text and the next paste could land in the
+    wrong place. Backwards, an edit can only move text after the spans that
+    are still waiting.
+    """
     from src.live_preview import EditSpan
     from src.live_service import LivePreviewService
 
@@ -749,7 +757,7 @@ def test_service_apply_all_applies_each_suggestion_with_delta(monkeypatch):
     service._selection_text = text
     service._seen_text = text
     service._apply_all()
-    assert applied == [(0, 3, "there"), (33, 5, "was")]
+    assert applied == [(31, 5, "was"), (0, 3, "there")]
 
 
 def _fake_subprocess_run(stdout: bytes = b"OK"):
@@ -1309,7 +1317,8 @@ def test_service_apply_all_reports_partial_failure(monkeypatch):
     messages = []
     service.apply_done.connect(messages.append)
     service._apply_all()
-    # A failed suggestion no longer stops the batch: the rest still land, the
+    # A failed suggestion no longer stops the batch: backwards, every span
+    # still waiting lies before the failure, so it is safe to keep going. The
     # one that failed stays on screen so it can be retried, and the reason is
     # reported instead of a bare "0 of 2".
     assert messages == [
@@ -1318,7 +1327,7 @@ def test_service_apply_all_reports_partial_failure(monkeypatch):
             "Press Apply All to retry."
         )
     ]
-    assert [span.before for span in service._pending] == ["teh"]
+    assert [span.before for span in service._pending] == ["cat"]
     assert service._undo_state is not None  # the edit that landed is undoable
 
 
@@ -1501,10 +1510,10 @@ def test_apply_all_relocates_edits_when_the_app_moves_the_text(monkeypatch):
 
     service._apply_all()
 
-    # Both suggestions landed in one press, the second at its real position:
-    # the document grew by the three inserted characters, and the naive
-    # offset (15) would have written over " on".
-    assert applied == [(0, 3, "the"), (18, 3, "the")]
+    # Both suggestions landed in one press. Applying backwards means the
+    # right-hand span is written first; inserting there cannot move the
+    # left-hand span at all, so its original offset stays true.
+    assert applied == [(15, 3, "the"), (0, 3, "the")]
     assert messages == ["Applied 2 suggestions."]
     assert service._pending == []
     service.stop()
@@ -1681,7 +1690,7 @@ def test_service_apply_all_reports_partial_success(monkeypatch):
             before_text=None,
         ):
             self.calls += 1
-            if self.calls == 2:  # the second suggestion fails
+            if self.calls == 2:  # the second attempt (the left-hand span) fails
                 return False, "Could not apply."
             return True, "Applied."
 
@@ -1709,7 +1718,7 @@ def test_service_apply_all_reports_partial_success(monkeypatch):
             "Press Apply All to retry."
         )
     ]
-    assert [span.before for span in service._pending] == ["cat"]
+    assert [span.before for span in service._pending] == ["teh"]
     assert service._undo_state is not None  # the applied span stays undoable
 
 
@@ -1820,11 +1829,88 @@ def test_word_batch_maps_positions_once_for_every_suggestion(monkeypatch):
     assert word.calls["map"] == 1
     assert word.calls["scan"] == 0
     assert word.calls["selection_info"] <= 3
-    # The first edit added a character, so the second span moved by one.
+    # Backwards: the right-hand span is written first at its mapped position;
+    # its length change is after the left-hand span, so the left-hand map
+    # offset stays valid and no cumulative document delta is applied to it.
     assert word.calls["applied"] == [
+        (122, 125, "the"),
         (100, 103, "the,"),
-        (123, 126, "the"),
     ]
+    service.stop()
+
+
+def test_apply_all_backwards_survives_a_stale_ax_value(monkeypatch):
+    """A lagging AXValue must not move the following suggestions.
+
+    This is the Outlook 18:59 failure: the editor kept returning the pre-write
+    value while the real document had already shifted. Forward order then
+    located the next span in the stale snapshot and pasted at an offset that
+    was already wrong in the real field. Backwards, an edit only moves text
+    after the spans still waiting, so their preview offsets stay valid even
+    when every live read is stale.
+    """
+    from src.live_preview import EditSpan, apply_edits_to_text
+    from src.live_service import LivePreviewService
+
+    original = "teh cat sat on teh mat"
+    state = {"text": original}
+    applied: list[tuple[int, int, str]] = []
+
+    class StaleEditor:
+        def selection_details(self, target):
+            return {
+                "text": original,
+                "range": (0, len(original)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return original  # deliberately never refreshed
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            current = state["text"]
+            assert current[start : start + length] == before_text, (
+                "the write must land where the preview put it"
+            )
+            applied.append((start, length, new))
+            state["text"] = current[:start] + new + current[start + length :]
+            return True, "Applied."
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._editor = StaleEditor()
+    service._selection_target = {
+        "bundle_id": "com.microsoft.outlook",
+        "pid": 9,
+        "name": "Microsoft Outlook",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = original
+    service._seen_text = original
+    spans = [
+        EditSpan("teh", "the!", "Spelling", 0, 3),
+        EditSpan("teh", "the?", "Spelling", 15, 18),
+    ]
+    service._pending = list(spans)
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert state["text"] == apply_edits_to_text(original, spans)
+    assert applied == [(15, 3, "the?"), (0, 3, "the!")]
+    assert messages == ["Applied 2 suggestions."]
     service.stop()
 
 
@@ -4109,3 +4195,30 @@ def test_ax_replace_range_reports_applied_when_delayed_write_landed(
     )
     assert ok is True and message == "Applied."
     assert posted == []  # the edit was already present; no paste needed
+
+
+def test_write_verification_accepts_newline_normalisation():
+    """Outlook/WebKit rewrite newline form; a stored edit must not fail verify.
+
+    The live failure showed an Outlook paste followed by a value-slice
+    mismatch, then ``range changed after paste; refusing retry`` - which under
+    the old left-to-right order moved every following suggestion. CR/LF form
+    is now tolerated exactly, without collapsing spaces or words.
+    """
+    from src.generic_editing import (
+        _range_write_candidates,
+        _same_text,
+        _value_holds,
+    )
+
+    # The same content in each editor's newline spelling.
+    assert _same_text("a\r\nb", "a\nb")
+    assert _same_text("a\rb", "a\nb")
+    assert _same_text("a\nb", "a\r\nb")
+    # Only newline form is ignored - not spaces, quotes, or letters.
+    assert not _same_text("a b", "a  b")
+    assert not _same_text("a\nb", "a\nc")
+    assert _value_holds("a\r\nb tail", 0, "a\nb")
+    assert _value_holds("a\nb tail", 0, "a\r\nb")  # collapsed CRLF
+    # No line breaks: no length guessing.
+    assert _range_write_candidates("abc") == [3]
