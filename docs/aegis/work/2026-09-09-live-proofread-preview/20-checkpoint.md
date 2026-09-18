@@ -832,3 +832,164 @@ The tests exercise the live service, which writes diagnostics to `capture.log`
 in the real support folder - the same file the owner reads to report a problem.
 `conftest.py` now points every support-directory lookup at a temporary folder;
 a full run adds no lines to the real log (verified by line count).
+
+## 2026-09-18 - Settings restyled to ByteMail's design language (2.1.1-beta.13)
+
+The owner asked for ByteProof's settings to follow ByteMail's settings window,
+which reads cleaner. The gap was structural, not decorative: the dialog carried
+36 distinct hex colours in 202 places, 128 inline setStyleSheet calls and 11
+nested QGroupBox cards, while ByteMail draws one token file and flat switch
+rows. The owner chose the middle option - restyle, keep Save/Cancel, and
+consolidate feedback into one status line.
+
+**One sheet instead of a palette per widget.** src/ui_theme.py gains the SHELL_*
+tokens and settings_stylesheet(); the dialog applies it once. Every colour
+inside SettingsDialog is now a token reference - the region contains zero hex
+literals, which a test asserts - and the live panel keeps its blue palette.
+
+**Flat rows instead of nested cards.** The 11 group boxes became
+settings_section() blocks: a micro heading, then rows. A row is
+settings_row(title, helper, control). The 12 bare checkboxes became
+settings_toggle() switches that hold state only. The combo rows on the General
+page were a second, quieter shape - an inline label with the explanation hidden
+in a tooltip, indented 14px from the page edge, and the section layouts carried
+their own indents, which is what made two row widths appear on one page. There
+is now one row shape and one left edge; the orphaned labelled_with_info helper
+is retired.
+
+**Tracking has to come from the font.** The QSS rule carried
+letter-spacing: 0.08em, which Qt ignores - an 11px upper-case heading rendered
+as a flat run of capitals. The section heading now sets its size, weight and
+0.8px tracking on the font itself, and a test asserts the tracking is present.
+
+**Rows are targets.** Clicking anywhere on a switch row toggles it, which is
+how the same row behaves in ByteMail; before, only the 40x23 switch itself
+responded.
+
+**One status line.** restore_status_label and update_status_label are gone;
+_set_status(text, kind) writes the footer line left of Save/Cancel and the
+licence, update and connection paths report through it.
+
+The two tests that asserted the old structure (Live Check's sections found
+through findChildren(QGroupBox)) now assert section headings, and eight new
+tests hold the replacement in place: no colour of the dialog's own, the type
+scale and its tracking, one left edge and one control column, switches that
+actually paint from assets/toggle-*.svg, status routing for
+info/success/error, an icon on every rail row, a switch row that keeps the
+words out of the checkbox, and a control inventory that fails if a restyle
+drops one.
+
+### 2026-09-18 (later) - Controls, cards and lists made consistent (2.1.1-beta.14)
+
+The owner reviewed beta.13 and reported that the font sizes and shapes still
+differed between the settings pages and their lists. They were right, and it
+was measurable: nine font sizes in play, card titles at 12px bold on one page
+and 13px medium on another, badges at 9px against 10-13px body text, the Live
+Check app list 34px per row beside 40px switch rows, fifteen buttons with their
+own padding and radius, and the licence card taking Qt's default padding while
+every other card took 14/12.
+
+One scale and one shape per role now (table in the protocol above). The
+mechanical part: card titles, hero lines, badges and statuses moved from
+setFont/setStyleSheet to object names and the tone() helper; thirteen bespoke
+button and card stylesheets were deleted in favour of the four button roles;
+the provider and model cards' three-way badge-style branches collapsed into one
+badge role; the automation trigger card's selected state became a property; the
+install guide became SettingsCallout; and every card layout was set to the same
+16/14 padding.
+
+Five new tests measure the result rather than trusting it: no control may carry
+a private stylesheet, no inline sheet may set a font size, every button role and
+every select must share one height across all seven pages, every card must pad
+16/14, and the app-list row must still cover its item rect.
+
+### 2026-09-18 (third pass) - The stylesheet leak that broke the look (2.1.1-beta.15)
+
+The owner reported that the settings menu and its lists still rendered with
+mismatched fonts and shapes, and suspected conflicting code in gui.py. The
+suspicion was right, and the mechanism was stylesheet ownership: the
+SettingsDialog is a child of the main window, whose sheet used bare selectors
+(48 of them), so everything in the dialog inherited that sheet on top of its
+own:
+
+- the bare QWidget rule leaked a 13px base font into the dialog, so any widget
+  without an explicit role rendered at the wrong size;
+- the bare QCheckBox::indicator rule put a 20px bordered white box behind the
+  40x23 switch art, which is what made the toggles look wrong;
+- the bare QComboBox rule (10px 40px padding, 12px radius) and its 12x8 arrow
+  fought the dialog's own field metrics and 10x6 chevron, which is what made
+  the dropdowns look wrong.
+
+Fixes: the window's sheet is now scoped to #RootPanel (only QMainWindow, QMenu,
+QToolTip and QMessageBox stay global, as they are top-level windows), and the
+dialog's sheet was hardened to own every state it uses - a base font for
+role-less widgets, the switch indicator pinned to image-only with hover and
+focus resets, all combo states and popup rows, pressed and disabled buttons, and
+thin scrollbars.
+
+Tests: two new ones. One reads the window sheet and fails if any selector is
+neither #RootPanel-scoped nor an allowed top-level type. The other builds the
+real ProofreaderApp, opens the Settings dialog as its child, and asserts the
+dialog is identical to the standalone one - same combo height, same 17/13/12/11
+type scale, and switch pixels that show the toggle art rather than a box.
+
+### 2026-09-18 (owner review round) - Numbers, triggers and structure (2.1.1-beta.16)
+
+The owner tested beta.15 in the running app and reported two things, then asked
+for a general polish pass. Both reports were precise and both had a mechanical
+cause.
+
+The number fields: the sheet set padding-right: 24px for the arrow column while
+Qt already reserves that column, so a 64px field showed no digits. Windows
+came off the fields; the sheet owns their size (88px minimum).
+
+Automation: the page mixed a paragraph, a floating count, a floating button and
+an unconstrained list. It is now page blurb + rows (the count inside the row it
+belongs to, the hint as that row's tooltip) + a list with a 240px floor. The
+Add Trigger window it opens was rebuilt on the same three rows, so the dialog
+and the page it belongs to finally look like one product.
+
+Also fixed in the same pass: the -apple-system font stack Qt could not resolve
+(now the platform font), and the licence page's buttons, which stretched to the
+full window width.
+
+After the owner confirmed the look, beta.16 was packaged: Apple Silicon DMG,
+notarized, stapled, installed and launched, and the source-run instance was
+stopped so only the installed build runs.
+
+## 2026-09-18 - The menu bar icon crashed the app (2.1.1-beta.17)
+
+Symptom, as the owner reported it: clicking the menu bar logo quit ByteProof,
+and the main app window could not be opened. The application logs had no quit
+and no window-show, and the crash reports did have the answer:
+
+  NSStatusItem popUpStatusItemMenu:            (the click on our icon)
+    -> NSSceneStatusItem _beginExpandedInterfaceSession:   (macOS 27 scene items)
+      -> NSMenuTrackingSession beginTrackingSession
+        -> libqcocoa.dylib
+          -> -[NSEvent clickCount]             (reads a scene action as an event)
+            -> NSException -> SIGABRT
+
+Both symptoms are one bug: AppKit's own status-item popup asserts on macOS 27
+before the menu is on screen, so the process dies and nothing in the menu can
+ever run - including the Show Window action the owner was reaching for.
+
+Fix: on macOS the app owns the popup. The icon click reaches us (activated) and
+we raise the menu ourselves at the pointer; AppKit is never asked to pop a
+status item menu. Double click still shows the window, and every successful open
+logs "APP: tray menu opened" so the log can confirm it.
+
+Two further crash classes turned up while investigating, both fixed:
+
+* PyQt6 answers an exception escaping a Qt virtual override with qFatal, which
+  aborts. eventFilter (the window and the trigger card), resizeEvent, the
+  drag/drop handlers and the live overlay's paintEvent and resizeEvent are now
+  guarded: an error logs instead of taking the app down.
+* The test suite ran on the real cocoa platform, so a startup timer opened the
+  modal welcome dialog with nobody to answer it; whole runs blocked or aborted
+  (those are the crash reports filed under "Python"). conftest.py now forces
+  QT_QPA_PLATFORM=offscreen: three consecutive hardening runs were clean and
+  the file got faster (24s against 40-65s).
+
+The owner verified the fix in the running app before packaging; beta.17 was then
+built, installed and launched.

@@ -804,3 +804,108 @@ document after the user moves on.
   `7e722067acdc895fc5d4f9400252141112ebcf027503ba1c6f60e4ad7405d881`.
 * `debug_hotkeys.log` from the new build shows
   `Parsed hotkey: <cmd>+<shift>+. -> variants={'.', '>'}`.
+
+## 2026-09-18 - Settings restyle evidence (2.1.1-beta.13)
+
+* Tests: 377 green - test_hardening.py 136, test_live_preview.py 137,
+  test_smoke.py 104. Each file run through scripts/run_tests_ci.py.
+* Lint: python -m ruff check src tests clean. scripts/check_version.py agrees:
+  2.1.1-beta.13 (tuple 2, 1, 1, 13).
+* Palette: no #[0-9A-Fa-f]{6} literal inside the SettingsDialog region
+  (was 36 distinct values, 202 occurrences).
+* Type and geometry, asserted rather than eyeballed: page title 17px, blurb
+  12px, section heading 11px DemiBold with letter spacing 0.8, row title 13px,
+  row helper 12px; every SettingsRow on the General page shares x=0, one width,
+  and one right edge for its control column.
+* Switches paint: sampling a grabbed dialog finds the green track (#1a3a2a) on
+  a checked switch and the light track (#e2ddd1) on an unchecked one, so the
+  indicator images really load.
+* Structure, read off the built dialog: General 6 sections / 11 rows, Live
+  Check 3 / 21, Automation 1 / 1, Updates 1 / 0, zero QGroupBox on any page.
+* Renders for comparison: /tmp/byteproof-settings-review/before (2.1.1-beta.11)
+  and /after (2.1.1-beta.13), 7 pages each at 1000x700, offscreen. The vision
+  audit tool in this session has no backend configured, so these were verified
+  by measurement (above) and are for the owner's eye.
+* Build: Apple Silicon DMG built, notarized, stapled and installed; the
+  installed bundle reports 2.1.1-beta.13 and is signed by team 9AMNWJRC93.
+  DMG sha256 c71ad0a4ca8439a8a048a41644be01759a5c9ac4e8b5d17ffebd70329b063f9f.
+  (2.1.1-beta.12 was built and superseded before hand-off by the type-tracking
+  and row-unification fixes; only beta.13 was installed for testing.)
+
+### 2026-09-18 - Consistency evidence (2.1.1-beta.14)
+
+* Tests: 381 green - test_hardening.py 140 (5 new: no private control
+  stylesheets, typography owned by the sheet, one height per button/select role
+  across every page, one card padding, app-list rows cover their items),
+  test_live_preview.py 137, test_smoke.py 104.
+* Lint: ruff clean across src and tests. scripts/check_version.py agrees:
+  2.1.1-beta.14 (tuple 2, 1, 1, 14).
+* Font sizes in the dialog: 11 (hint, status, section label), 12 (helper,
+  value, button and control labels), 13 (row, card title, badge-free names),
+  15 (hero), 17 (page title), 22 (version). Nine sizes before, six roles now,
+  and no inline font-size survives in the SettingsDialog region.
+* Buttons: 13 bespoke stylesheets removed. Measured through the sheet: base
+  buttons 32px, small disclosure buttons 26px, link buttons text-height, one
+  height per role on every page.
+* Cards: ProviderCard, LicenseCard, SettingsCard and SettingsCallout all
+  measured at 16/14 padding; the licence card no longer falls back to Qt's
+  default.
+* Build: Apple Silicon DMG built, notarized, stapled and installed; the
+  installed bundle reports 2.1.1-beta.14. DMG sha256
+  a9eba88c99454afc55502c97e313aa1d9c807b62cc87ec4734d8965e1fa80c42.
+  Renders: /tmp/byteproof-settings-review/before (beta.11) and /after (beta.14).
+
+### 2026-09-18 - Stylesheet-boundary evidence (2.1.1-beta.15)
+
+* Tests: 384 green - test_hardening.py 143 (new: the window sheet stays inside
+  the window; the running app's window cannot restyle the dialog, measured
+  through combo height, the 17/13/12/11 type scale and switch pixels), plus the
+  sheet-state inventory test; test_live_preview.py 137, test_smoke.py 104.
+* Lint: ruff clean. scripts/check_version.py agrees: 2.1.1-beta.15 (tuple
+  2, 1, 1, 15).
+* Boundary: 48 window selectors scoped to #RootPanel; 0 bare widget selectors
+  remain outside the allowlist (asserted).
+* Dialog sheet: 102 rules, braces balanced; owns the base font, the checkbox
+  indicator (including hover and focus), every combo state and popup row,
+  button pressed and disabled, and scrollbars.
+* Build: Apple Silicon DMG built, notarized, stapled and installed; the
+  installed bundle reports 2.1.1-beta.15. DMG sha256
+  68e60ad3c0d19076161a39e7105fc267b83f51412691c4010cbec4620021a8c8.
+  Renders: /tmp/byteproof-settings-review/before (beta.11) and /after (beta.15).
+
+### 2026-09-18 - beta.16 evidence
+
+* Tests: 390 green - test_hardening.py 149 (new: number fields show their
+  number; the Automation page is structured like the others and its list has
+  room), test_live_preview.py 137, test_smoke.py 104. One intermittent
+  teardown crash was seen twice across many runs (offscreen Qt, after all tests
+  passed); three consecutive hardening runs were clean afterwards.
+* Lint: ruff clean. scripts/check_version.py agrees: 2.1.1-beta.16 (tuple
+  2, 1, 1, 16).
+* Packaging: Apple Silicon DMG built, notarized, stapled and installed.
+  Gatekeeper: spctl reports "accepted, source=Notarized Developer ID"; the
+  bundle reports 2.1.1-beta.16, signed by team 9AMNWJRC93, bundle id
+  nz.co.bytemind.byteproof. DMG sha256
+  a80326196f10468c9e706783b7133ff68eadd194bb786b41826a310d89806280.
+* The owner installs from /Applications/ByteProof.app; the previous source-run
+  instance is stopped so hotkeys belong to one process.
+
+### 2026-09-18 - beta.17 evidence (menu bar crash and packaging)
+
+* Crash reports read in full:
+  ByteProof-2026-09-18-202742.ips and ByteProof-2026-09-18-202816.ips, both
+  SIGABRT ("Abort trap: 6") with the same lastExceptionBacktrace:
+  NSStatusItem popUpStatusItemMenu: -> NSSceneStatusItem
+  _beginExpandedInterfaceSession: -> NSMenuTrackingSession beginTrackingSession
+  -> libqcocoa.dylib -> -[NSEvent clickCount] -> objc_exception_throw.
+* Reproduction note: synthetic CGEvent clicks do not take the crashing path (a
+  posted click leaves the app alive), so the owner's real click was the
+  verification - the menu opened and the app survived.
+* Tests: 391 green twice in a row - test_hardening.py 150 (new: the menu bar
+  menu is opened by us on macOS; the test opens the real popup and asserts the
+  click and double-click wiring), test_live_preview.py 137, test_smoke.py 104. Ruff clean;
+  scripts/check_version.py agrees: 2.1.1-beta.17 (tuple 2, 1, 1, 17).
+* Packaging: Apple Silicon DMG built, notarized, stapled and installed. spctl:
+  accepted, source=Notarized Developer ID; bundle reports 2.1.1-beta.17, signed
+  by team 9AMNWJRC93, bundle id nz.co.bytemind.byteproof. DMG sha256
+  5b23c7e4b0c8d894caf5491810a35e852039766fb21b0d7a31e73471477c7a8e.

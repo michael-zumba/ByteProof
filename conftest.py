@@ -19,6 +19,16 @@ import os
 
 import pytest
 
+# The widgets under test are Qt widgets, and Qt's default platform on macOS is
+# cocoa: the suite was building real windows and, when a startup timer fired,
+# showing the modal welcome dialog with nobody there to answer it. That blocked
+# or aborted whole runs (crash reports under ~/Library/Logs/DiagnosticReports
+# for "Python"), and it flashed windows over whatever the owner was doing.
+# Offscreen also makes the app's own "is a human watching?" check answer
+# correctly, so the welcome dialogs stay closed. Set QT_QPA_PLATFORM yourself
+# to override this.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 _PROGRESS = os.environ.get("BYTEPROOF_CI_PROGRESS") == "1"
 
 

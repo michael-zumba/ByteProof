@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 from PyQt6.QtCore import (
+    QByteArray,
     QEvent,
     QFileInfo,
     QObject,
@@ -32,8 +33,10 @@ from PyQt6.QtGui import (
     QIcon,
     QKeySequence,
     QPainter,
+    QPixmap,
     QTextCharFormat,
 )
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6.QtWidgets import (
     QApplication,
@@ -45,7 +48,6 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QKeySequenceEdit,
@@ -139,6 +141,14 @@ from .settings import (
     save_runtime_settings,
 )
 from .sound import play_start_sound
+from .ui_theme import (
+    SHELL_BORDER_LIGHT,
+    SHELL_PRIMARY,
+    SHELL_PRIMARY_FG,
+    SHELL_TEXT_FAINT,
+    SHELL_TEXT_MUTED,
+    settings_stylesheet,
+)
 from .word_integration import get_word_integration
 
 
@@ -181,24 +191,30 @@ class AppNameLineEdit(QLineEdit):
         self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event: Any) -> None:  # pyright: ignore[reportAny]
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
+        try:
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+            else:
+                super().dragEnterEvent(event)
 
+        except Exception as exc:  # see the note above
+            print(f"ByteProof: dragEnterEvent failed: {exc}")
     def dropEvent(self, event: Any) -> None:  # pyright: ignore[reportAny]
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if not path:
-                continue
-            base = os.path.basename(path)
-            base = base.removesuffix(".app")
-            if base:
-                self.setText(base)
-                return
-        super().dropEvent(event)
+        try:
+            for url in event.mimeData().urls():
+                path = url.toLocalFile()
+                if not path:
+                    continue
+                base = os.path.basename(path)
+                base = base.removesuffix(".app")
+                if base:
+                    self.setText(base)
+                    return
+            super().dropEvent(event)
 
 
+        except Exception as exc:  # see the note above
+            print(f"ByteProof: dropEvent failed: {exc}")
 class AutomationRuleCard(QWidget):
     """A compact trigger card used in the Automation settings page."""
 
@@ -219,7 +235,7 @@ class AutomationRuleCard(QWidget):
         self._apply_selected_style(False)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(15, 12, 15, 12)
+        layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(13)
 
         icon_label = QLabel()
@@ -231,22 +247,15 @@ class AutomationRuleCard(QWidget):
             )
         else:
             icon_label.setText("·")
-            icon_label.setStyleSheet(
-                "color: #A89F9A; font-size: 20px; background: transparent; border: none;"
-            )
+            icon_label.setObjectName("SettingsHint")
         layout.addWidget(icon_label)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(2)
         value_lbl = QLabel(value_label)
-        value_lbl.setStyleSheet(
-            "font-size: 13px; font-weight: 640; color: #292524; "
-            "background: transparent; border: none;"
-        )
+        value_lbl.setObjectName("SettingsRowTitle")
         type_lbl = QLabel(type_label)
-        type_lbl.setStyleSheet(
-            "font-size: 11px; color: #A89F9A; background: transparent; border: none;"
-        )
+        type_lbl.setObjectName("SettingsHint")
         text_col.addWidget(value_lbl)
         text_col.addWidget(type_lbl)
         layout.addLayout(text_col, 1)
@@ -264,7 +273,6 @@ class AutomationRuleCard(QWidget):
             self.context_combo.addItem(context)
             index = self.context_combo.count() - 1
         self.context_combo.setCurrentIndex(index)
-        self.context_combo.setMinimumWidth(190)
         self.context_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addWidget(self.context_combo)
 
@@ -273,29 +281,22 @@ class AutomationRuleCard(QWidget):
             child.installEventFilter(self)
 
     def _apply_selected_style(self, selected: bool) -> None:
-        if selected:
-            self.setStyleSheet(
-                "#AutomationRuleCard { background-color: #E7F0EA; "
-                "border: 1px solid #1A3A2A; border-radius: 14px; }"
-                "#AutomationRuleCard:hover { background-color: #D6E4DB; "
-                "border-color: #143024; }"
-            )
-        else:
-            self.setStyleSheet(
-                "#AutomationRuleCard { background-color: #FFFFFF; "
-                "border: 1px solid #E8E1D9; border-radius: 14px; }"
-                "#AutomationRuleCard:hover { border-color: #CBBFB5; }"
-            )
+        self.setProperty("selected", "true" if selected else "false")
+        restyle(self)
 
     def eventFilter(self, obj: Any, event: Any) -> bool:  # pyright: ignore[reportAny]
-        if (
-            event.type() == QEvent.Type.MouseButtonPress
-            and self._select_callback is not None
-        ):
-            self._select_callback()
-        return super().eventFilter(obj, event)
+        try:
+            if (
+                event.type() == QEvent.Type.MouseButtonPress
+                and self._select_callback is not None
+            ):
+                self._select_callback()
+            return super().eventFilter(obj, event)
 
 
+        except Exception as exc:  # see the note above
+            print(f"ByteProof: eventFilter failed: {exc}")
+            return False
 def model_size_label(model: dict[str, Any]) -> str:
     return f"{model['size_bytes'] / (1024 ** 3):.1f} GB"
 
@@ -382,7 +383,7 @@ class LiveAppsList(QListWidget):
     list into overlapping text.
     """
 
-    ROW_HEIGHT = 34
+    ROW_HEIGHT = 40
 
     def refresh_row_widths(self) -> None:
         width = self.viewport().width()
@@ -392,10 +393,13 @@ class LiveAppsList(QListWidget):
                 item.setSizeHint(QSize(width, self.ROW_HEIGHT))
 
     def resizeEvent(self, event: Any) -> None:  # pyright: ignore[reportAny]
-        super().resizeEvent(event)
-        self.refresh_row_widths()
+        try:
+            super().resizeEvent(event)
+            self.refresh_row_widths()
 
 
+        except Exception as exc:  # see the note above
+            print(f"ByteProof: resizeEvent failed: {exc}")
 class BlankRowDelegate(QStyledItemDelegate):
     """Paint nothing for an item: its row widget is the whole visual."""
 
@@ -1085,21 +1089,25 @@ class UpdateDialog(QDialog):
 
         layout.addLayout(buttons)
 
-        self.setStyleSheet(
-            "QDialog { background-color: #F7F4F0; }"
-            "QPushButton { background-color: #FFFFFF; border: 1px solid #E8E4E0; "
-            "border-radius: 10px; color: #292524; padding: 8px 18px; "
-            "font-size: 13px; font-weight: 600; }"
-            "QPushButton:hover { background-color: #FAF8F5; border-color: #C4BDB7; }"
-            "QPushButton:default { background-color: #1A3A2A; color: #FFFFFF; "
-            "border: 1px solid #143024; }"
-            "QPushButton:default:hover { background-color: #143024; }"
-        )
         self.adjustSize()
 
     def _finish(self, action: str) -> None:
         self.result_action = action
         self.accept()
+
+
+def restyle(widget: QWidget) -> None:
+    """Re-run the sheet after a role or state change on a live widget."""
+    style = widget.style()
+    if style is not None:
+        style.unpolish(widget)
+        style.polish(widget)
+
+
+def tone(widget: QWidget, kind: str) -> None:
+    """Colour a label by state, from the single set of state colours."""
+    widget.setProperty("kind", kind)
+    restyle(widget)
 
 
 def info_icon(text: str) -> QLabel:
@@ -1114,24 +1122,171 @@ def info_icon(text: str) -> QLabel:
     label.setCursor(Qt.CursorShape.WhatsThisCursor)
     label.setToolTip(text)
     label.setStyleSheet(
-        "color: #9AA0A6; font-size: 12px; font-weight: 700;"
+        f"color: {SHELL_TEXT_FAINT}; font-size: 12px; font-weight: 700;"
         "background: transparent;"
     )
     return label
 
 
-def labelled_with_info(text: str, explanation: str) -> QWidget:
-    """A checkbox/label row followed by its ⓘ icon."""
+def settings_icon(name: str, size: int = 16) -> QIcon:
+    """A sidebar glyph rendered twice, so it reads on the selected green pill.
+
+    Qt draws the selected-mode pixmap itself when the row is current, which is
+    why both colours are baked in here instead of swapped by hand on every
+    selection change.
+    """
+    icon = QIcon()
+    for mode, colour in (
+        (QIcon.Mode.Normal, SHELL_TEXT_MUTED),
+        (QIcon.Mode.Selected, SHELL_PRIMARY_FG),
+    ):
+        pixmap = _tinted_pixmap(name, colour, size)
+        if pixmap is not None:
+            icon.addPixmap(pixmap, mode, QIcon.State.Off)
+    return icon
+
+
+def _tinted_pixmap(name: str, colour: str, size: int) -> QPixmap | None:
+    """Render one monochrome asset in a colour, or None when it is missing.
+
+    Each glyph carries a single dark-green stroke, so recolouring the source
+    string keeps one file per icon instead of one per icon per state.
+    """
+    path = resource_path(os.path.join("assets", name))
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+    except OSError:
+        return None
+    source = source.replace("#1A3A2A", colour).replace("#1a3a2a", colour)
+    renderer = QSvgRenderer(QByteArray(source.encode("utf-8")))
+    if not renderer.isValid():
+        return None
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return pixmap
+
+
+def settings_page_header(title: str, blurb: str = "") -> QWidget:
+    """One thing per screen: the title, and the reason the screen exists."""
+    block = QWidget()
+    layout = QVBoxLayout(block)
+    layout.setContentsMargins(0, 0, 0, 4)
+    layout.setSpacing(3)
+    heading = QLabel(title)
+    heading.setObjectName("SettingsTitle")
+    layout.addWidget(heading)
+    if blurb:
+        subtitle = QLabel(blurb)
+        subtitle.setObjectName("SettingsSubtitle")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+    return block
+
+
+def settings_section(title: str, first: bool = False) -> tuple[QWidget, QVBoxLayout]:
+    """A flat section: a quiet micro heading over its rows, no card chrome.
+
+    The group boxes this replaces drew a border inside a card inside a page,
+    which is what made a long page read as nested boxes; a heading and the
+    space above it separate sections well enough on their own.
+    """
+    block = QWidget()
+    layout = QVBoxLayout(block)
+    layout.setContentsMargins(0, 0 if first else 12, 0, 0)
+    layout.setSpacing(0)
+    heading = QLabel(title.upper())
+    heading.setObjectName("SettingsSectionLabel")
+    font = heading.font()
+    font.setPixelSize(11)
+    font.setWeight(QFont.Weight.DemiBold)
+    # QSS has no letter-spacing property: tracking comes from the font or
+    # from nowhere, and an 11px upper-case heading needs it to stay readable.
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
+    heading.setFont(font)
+    layout.addWidget(heading)
+    rows = QVBoxLayout()
+    rows.setContentsMargins(0, 5, 0, 0)
+    rows.setSpacing(0)
+    layout.addLayout(rows)
+    return block, rows
+
+
+def settings_row(
+    title: str,
+    detail: str = "",
+    control: QWidget | None = None,
+    divider: bool = True,
+    note: str = "",
+    note_widget: QWidget | None = None,
+) -> QWidget:
+    """The row every setting shares: what it is on the left, control right.
+
+    Why a setting behaves as it does belongs in the ⓘ tooltip beside its name,
+    not in a second grey line under it. Two-line rows turned a page of settings
+    into a wall of prose, and the reader who wants the reason can hover for it.
+    A row that has state to report (a countdown, a download) passes note.
+    """
     row = QWidget()
-    layout = QHBoxLayout(row)
+    row.setObjectName("SettingsRow")
+    layout = QVBoxLayout(row)
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(6)
-    label = QLabel(text)
-    label.setStyleSheet("font-size: 13px; color: #292524;")
-    layout.addWidget(label)
-    layout.addWidget(info_icon(explanation))
-    layout.addStretch(1)
+    layout.setSpacing(0)
+    line = QWidget()
+    line_layout = QHBoxLayout(line)
+    line_layout.setContentsMargins(0, 9, 0, 9)
+    line_layout.setSpacing(16)
+    text = QVBoxLayout()
+    text.setContentsMargins(0, 0, 0, 0)
+    text.setSpacing(2)
+    heading_line = QHBoxLayout()
+    heading_line.setContentsMargins(0, 0, 0, 0)
+    heading_line.setSpacing(6)
+    heading = QLabel(title)
+    heading.setObjectName("SettingsRowTitle")
+    heading.setWordWrap(True)
+    heading_line.addWidget(heading)
+    if detail:
+        heading_line.addWidget(info_icon(detail), 0, Qt.AlignmentFlag.AlignVCenter)
+    heading_line.addStretch(1)
+    text.addLayout(heading_line)
+    if note_widget is not None:
+        text.addWidget(note_widget)
+    elif note:
+        note_label = QLabel(note)
+        note_label.setObjectName("SettingsRowHelper")
+        note_label.setWordWrap(True)
+        text.addWidget(note_label)
+    line_layout.addLayout(text, 1)
+    if control is not None:
+        line_layout.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
+    layout.addWidget(line)
+    if divider:
+        rule = QFrame()
+        rule.setObjectName("SettingsRowDivider")
+        rule.setFixedHeight(1)
+        layout.addWidget(rule)
     return row
+
+
+def settings_toggle(
+    title: str, detail: str = "", checked: bool = False
+) -> tuple[QWidget, QCheckBox]:
+    """A switch row: the checkbox holds the state, the row holds the words."""
+    box = QCheckBox()
+    box.setChecked(checked)
+    row = settings_row(title, detail, box)
+    row.setCursor(Qt.CursorShape.PointingHandCursor)
+    row.mousePressEvent = lambda _event, target=box: target.toggle()
+    return row, box
+
+
+
 
 
 class SettingsDialog(QDialog):
@@ -1144,7 +1299,9 @@ class SettingsDialog(QDialog):
     chk_keep_running: QCheckBox
     chk_menu_bar_only: QCheckBox
     btn_restore_defaults: QPushButton
-    restore_status_label: QLabel
+    status_bar: QFrame
+    status_glyph: QLabel
+    status_text: QLabel
     chk_auto_apply: QCheckBox
     chk_live_preview: QCheckBox
     chk_live_local: QCheckBox
@@ -1153,7 +1310,6 @@ class SettingsDialog(QDialog):
     proofread_hotkey_edit: QKeySequenceEdit
     version_label: QLabel
     update_check_btn: QPushButton
-    update_status_label: QLabel
     temp_label: QLabel
     temp_slider: QSlider
     combo_spelling: QComboBox
@@ -1254,32 +1410,29 @@ class SettingsDialog(QDialog):
         side_layout.setContentsMargins(0, 0, 0, 0)
         side_layout.setSpacing(0)
 
-        side_heading = QLabel("SETTINGS")
-        side_heading.setStyleSheet(
-            "color: #8A8177; font-size: 11px; font-weight: 700;"
-            "letter-spacing: 1px; padding: 18px 0 6px 22px;"
-        )
-        side_layout.addWidget(side_heading)
+        side_layout.addWidget(self._sidebar_identity())
 
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("SettingsSidebar")
-        # License and Updates are labelled pages. They previously also had
-        # icon-only duplicates in a small bar underneath, which gave the same
-        # destination two entry points and made the pages harder to find, so
-        # the icons moved onto the rows themselves.
-        for label, page_attr in (
-            ("General", "general_page"),
-            ("Live Check", "live_page"),
-            ("Automation", "automation_page"),
-            ("Connect", "connect_page"),
-            ("Local AI", "local_page"),
-            ("License", "license_page"),
-            ("Updates", "updates_page"),
+        # One row per page, and the row carries the icon: the duplicate
+        # icon-only shortcuts that used to sit under the list gave the same
+        # destination two entry points and made the pages harder to find.
+        for label, page_attr, icon_name in (
+            ("General", "general_page", "settings-general.svg"),
+            ("Live Check", "live_page", "settings-live.svg"),
+            ("Automation", "automation_page", "settings-automation.svg"),
+            ("Connect", "connect_page", "settings-connect.svg"),
+            ("Local AI", "local_page", "settings-local.svg"),
+            ("License", "license_page", "license.svg"),
+            ("Updates", "updates_page", "update.svg"),
         ):
             item = QListWidgetItem(label)
             # The label may gain a status suffix later ("License  ✓"), so the
             # page is stored on the row rather than parsed back out of it.
             item.setData(Qt.ItemDataRole.UserRole, page_attr)
+            icon = settings_icon(icon_name)
+            if not icon.isNull():
+                item.setIcon(icon)
             self.sidebar.addItem(item)
         self.sidebar.currentRowChanged.connect(self.change_page)
         self.sidebar.setVerticalScrollBarPolicy(
@@ -1301,7 +1454,7 @@ class SettingsDialog(QDialog):
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.VLine)
-        divider.setStyleSheet("background-color: #E8E4E0; border: none; max-width: 1px;")
+        divider.setStyleSheet(f"background-color: {SHELL_BORDER_LIGHT}; border: none; max-width: 1px;")
         divider.setFixedWidth(1)
         main_layout.addWidget(divider)
 
@@ -1311,13 +1464,30 @@ class SettingsDialog(QDialog):
         
         self.pages = QStackedWidget()
         content_layout.addWidget(self.pages)
+
+        # Feedback lives in one place. It used to be page-level labels that
+        # were only on screen while their own page was, so the answer to a
+        # click could land somewhere the user was not looking.
+        self.status_bar = QFrame()
+        self.status_bar.setObjectName("SettingsStatusBar")
+        status_layout = QHBoxLayout(self.status_bar)
+        status_layout.setContentsMargins(2, 10, 0, 0)
+        status_layout.setSpacing(8)
+        self.status_glyph = QLabel("")
+        self.status_glyph.setObjectName("SettingsStatusGlyph")
+        self.status_glyph.setFixedWidth(12)
+        self.status_text = QLabel("")
+        self.status_text.setObjectName("SettingsStatusText")
+        status_layout.addWidget(self.status_glyph)
+        status_layout.addWidget(self.status_text, 1)
         
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-        content_layout.addWidget(self.button_box)
+        status_layout.addWidget(self.button_box)
+        content_layout.addWidget(self.status_bar)
         
         main_layout.addWidget(content_container)
 
@@ -1335,94 +1505,44 @@ class SettingsDialog(QDialog):
         self._hotkey_conflict_acknowledged = False
         self._original_hotkeys = self._hotkey_snapshot()
         
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #F7F4F0;
-            }
-            QScrollArea, QStackedWidget {
-                background: transparent;
-            }
-            QGroupBox {
-                background-color: rgba(255, 255, 255, 238);
-                border: 1px solid #E8E1D9;
-                border-radius: 16px;
-                margin-top: 20px;
-                padding-top: 28px;
-                font-size: 12px;
-                font-weight: 700;
-                color: #1F5335;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 16px;
-                padding: 0 8px;
-                background-color: transparent;
-            }
-            QKeySequenceEdit {
-                background-color: #FFFFFF;
-                border: 1px solid #DDD6CF;
-                border-radius: 10px;
-                padding: 8px 10px;
-                color: #292524;
-                selection-background-color: #D6E4DB;
-            }
-            QKeySequenceEdit:focus {
-                border-color: #1A3A2A;
-            }
-            QDialogButtonBox QPushButton {
-                min-width: 88px;
-                padding: 9px 18px;
-                border-radius: 10px;
-                font-weight: 600;
-            }
-            QDialogButtonBox QPushButton:default {
-                background-color: #1A3A2A;
-                color: #FFFFFF;
-                border: 1px solid #143024;
-            }
-            QDialogButtonBox QPushButton:default:hover {
-                background-color: #143024;
-            }
-            QProgressBar {
-                background-color: #EFE9E3;
-                border: none;
-                border-radius: 6px;
-                text-align: center;
-                color: transparent;
-            }
-            QProgressBar::chunk {
-                background-color: #1A3A2A;
-                border-radius: 6px;
-            }
-        """)
-        self.sidebar.setStyleSheet("""
-            QListWidget {
-                background-color: #F2EDE6;
-                border: none;
-                font-size: 13px;
-                padding: 2px 0 12px 0;
-                outline: 0;
-            }
-            QListWidget::item {
-                height: 42px;
-                padding-left: 18px;
-                padding-right: 12px;
-                margin: 2px 10px;
-                color: #57534E;
-                border-radius: 10px;
-                font-weight: 520;
-            }
-            QListWidget::item:selected {
-                background-color: #1A3A2A;
-                color: #FFFFFF;
-                font-weight: 620;
-            }
-            QListWidget::item:hover:!selected {
-                background-color: #E7DFD6;
-            }
-        """)
+        self.setStyleSheet(settings_stylesheet(resource_path("assets")))
         self.sidebar.setCurrentRow(0)
+
+    def _sidebar_identity(self) -> QWidget:
+        """Who this window belongs to, above the list of its pages."""
+        block = QWidget()
+        layout = QHBoxLayout(block)
+        layout.setContentsMargins(18, 18, 14, 14)
+        layout.setSpacing(10)
+        logo_path = resource_path(os.path.join("logo", "logo.svg"))
+        if os.path.exists(logo_path):
+            mark = QSvgWidget(logo_path)
+            mark.setFixedSize(24, 24)
+            layout.addWidget(mark)
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(0)
+        title = QLabel(APP_NAME)
+        title.setObjectName("SettingsIdentityTitle")
+        meta = QLabel("Settings")
+        meta.setObjectName("SettingsIdentityMeta")
+        text.addWidget(title)
+        text.addWidget(meta)
+        layout.addLayout(text, 1)
+        return block
+
+    def _set_status(self, text: str, kind: str = "info") -> None:
+        """Say what just happened, in the one line every page reports to.
+
+        A saved key, a restored default and a failed update check each used to
+        announce themselves on their own page, so the message was invisible
+        from anywhere else in the dialog.
+        """
+        glyphs = {"info": "", "success": "✓", "error": "!"}
+        self.status_glyph.setText(glyphs.get(kind, ""))
+        self.status_text.setText(text or "")
+        tone(self.status_glyph, kind)
+        tone(self.status_text, kind)
 
     def _row_for_page(self, page_attr: str) -> int:
         """Sidebar row that opens a page, by the page it stores (-1 if none)."""
@@ -1439,22 +1559,19 @@ class SettingsDialog(QDialog):
         glance the user can see whether the licence is active and whether an
         update is waiting, without a second set of controls.
         """
-        icons = {
-            "license_page": ("license.svg", "License Status"),
-            "updates_page": ("update.svg", "Updates"),
+        tooltips = {
+            "license_page": "License Status",
+            "updates_page": "Updates",
         }
         parent = self.parent()
         self._pending_update_label = str(
             getattr(parent, "pending_update_version", "") or ""
         )
-        for page_attr, (filename, tooltip) in icons.items():
+        for page_attr, tooltip in tooltips.items():
             row = self._row_for_page(page_attr)
             item = self.sidebar.item(row) if row >= 0 else None
             if item is None:
                 continue
-            icon_path = resource_path(os.path.join("assets", filename))
-            if os.path.exists(icon_path):
-                item.setIcon(QIcon(icon_path))
             item.setToolTip(tooltip)
         self.refresh_sidebar_status()
 
@@ -1535,7 +1652,7 @@ class SettingsDialog(QDialog):
             return
         self.update_check_btn.setEnabled(False)
         self.update_check_btn.setText("Checking…")
-        self.update_status_label.setText("Checking for updates…")
+        self._set_status("Checking for updates…")
         checker(
             force=True,
             done_callback=self._finish_update_check,
@@ -1546,9 +1663,7 @@ class SettingsDialog(QDialog):
         try:
             self.update_check_btn.setEnabled(True)
             self.update_check_btn.setText("Check for Updates")
-            self.update_status_label.setText(
-                message if message else "Check complete."
-            )
+            self._set_status(message if message else "Check complete.")
         except RuntimeError:
             # The settings dialog was closed while the check was running.
             pass
@@ -1561,40 +1676,46 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(content)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setSpacing(18)
         
-        title = QLabel("General")
-        title.setObjectName("SettingsTitle")
+        title = settings_page_header("General")
         layout.addWidget(title)
 
         subtitle = QLabel("How ByteProof behaves while you write.")
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet(
-            "color: #6B6259; font-size: 12px; background: transparent;"
-        )
+        subtitle.setObjectName("SettingsSubtitle")
         layout.addWidget(subtitle)
 
 
-        app_group = QGroupBox("App & Window")
-        prefs_layout = QVBoxLayout(app_group)
-        prefs_layout.setSpacing(12)
+        app_group, prefs_layout = settings_section("App & Window")
 
-        self.chk_launch_login = QCheckBox("Launch at login")
+        
+        self.chk_launch_login = QCheckBox()
         self.chk_launch_login.setChecked(self.settings.get("general", {}).get("launch_at_login", False))
-        prefs_layout.addWidget(self.chk_launch_login)
-
-        self.chk_keep_top = QCheckBox("Keep window on top")
-        self.chk_keep_top.setChecked(self.settings.get("general", {}).get("keep_on_top", True))
-        prefs_layout.addWidget(self.chk_keep_top)
-
-        self.chk_keep_running = QCheckBox(
-            "Keep ByteProof in the menu bar when the window is closed"
+        prefs_layout.addWidget(
+            settings_row(
+                "Launch at login",
+                "Start ByteProof automatically when you sign in.",
+                self.chk_launch_login,
+            )
         )
+
+        
+        self.chk_keep_top = QCheckBox()
+        self.chk_keep_top.setChecked(self.settings.get("general", {}).get("keep_on_top", True))
+        prefs_layout.addWidget(
+            settings_row(
+                "Keep window on top",
+                "The window stays above the document you are reading.",
+                self.chk_keep_top,
+            )
+        )
+
+        
+        self.chk_keep_running = QCheckBox()
         self.chk_keep_running.setChecked(
             self.settings.get("general", {}).get(
                 "keep_running_in_menu_bar", True
@@ -1606,11 +1727,16 @@ class SettingsDialog(QDialog):
             "with Cmd+Q to exit completely.\n\n"
             "Off: closing the window quits ByteProof."
         )
-        prefs_layout.addWidget(self.chk_keep_running)
-
-        self.chk_menu_bar_only = QCheckBox(
-            "Run in the menu bar only (no Dock icon, hidden from Cmd-Tab)"
+        prefs_layout.addWidget(
+            settings_row(
+                "Keep ByteProof running",
+                "Closing the window leaves it in the menu bar.",
+                self.chk_keep_running,
+            )
         )
+
+        
+        self.chk_menu_bar_only = QCheckBox()
         self.chk_menu_bar_only.setChecked(
             self.settings.get("general", {}).get("menu_bar_only", True)
         )
@@ -1621,35 +1747,60 @@ class SettingsDialog(QDialog):
             "Off: ByteProof appears in the Dock and Cmd-Tab like a normal app."
         )
         self.chk_menu_bar_only.toggled.connect(self._on_menu_bar_only_toggled)
-        prefs_layout.addWidget(self.chk_menu_bar_only)
+        prefs_layout.addWidget(
+            settings_row(
+                "Menu bar only",
+                "No Dock icon and hidden from Cmd-Tab.",
+                self.chk_menu_bar_only,
+            )
+        )
 
         if platform.system() != "Darwin":
             # The menu-bar-only mode is a macOS activation-policy feature.
             self.chk_menu_bar_only.setVisible(False)
 
-        self.chk_sound = QCheckBox("Play a sound when proofreading starts")
+        
+        self.chk_sound = QCheckBox()
         self.chk_sound.setChecked(
             self.settings.get("general", {}).get("play_sound_on_proofread", True)
         )
-        prefs_layout.addWidget(self.chk_sound)
+        prefs_layout.addWidget(
+            settings_row(
+                "Play a sound when proofreading starts",
+                "A short cue as the check begins.",
+                self.chk_sound,
+            )
+        )
 
-        word_group = QGroupBox("Microsoft Word")
-        word_layout = QVBoxLayout(word_group)
-        word_layout.setSpacing(12)
+        word_group, word_layout = settings_section("Microsoft Word")
 
-        self.chk_auto_apply = QCheckBox("Auto-apply corrections to Word document")
+        
+        self.chk_auto_apply = QCheckBox()
         self.chk_auto_apply.setChecked(self.settings.get("general", {}).get("auto_apply", True))
         self.chk_auto_apply.setToolTip("When enabled, proofreading changes are applied directly to the Word document. When disabled, suggestions appear as comments instead.")
-        word_layout.addWidget(self.chk_auto_apply)
+        word_layout.addWidget(
+            settings_row(
+                "Auto-apply corrections to Word",
+                "Edits go straight in rather than arriving as comments.",
+                self.chk_auto_apply,
+            )
+        )
 
-        self.chk_track_changes = QCheckBox("Enable Track Changes in Word")
+        
+        self.chk_track_changes = QCheckBox()
         self.chk_track_changes.setChecked(self.settings.get("general", {}).get("track_changes", True))
         self.chk_track_changes.setToolTip(
             "When enabled, ByteProof turns on Track Changes in Word so edits appear as "
             "tracked revisions you can accept or reject. When disabled, ByteProof turns "
             "Track Changes off during proofreading and applies edits directly."
         )
-        word_layout.addWidget(self.chk_track_changes)
+        word_layout.addWidget(
+            settings_row(
+                "Turn on Track Changes in Word",
+                "Edits arrive as tracked revisions you can accept.",
+                self.chk_track_changes,
+            )
+        )
         self.chk_track_changes.setToolTip(
             "Track Changes keeps every edit reviewable in Word, so you can "
             "accept or reject each one. Turn it off to have ByteProof apply "
@@ -1662,10 +1813,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(app_group)
         layout.addWidget(word_group)
 
-        hotkey_group = QGroupBox("Hotkeys")
-        hotkey_layout = QFormLayout(hotkey_group)
-        hotkey_layout.setSpacing(12)
-        hotkey_layout.setContentsMargins(12, 18, 12, 12)
+        hotkey_group, hotkey_rows = settings_section("Hotkeys")
         
         self.open_hotkey_edit = QKeySequenceEdit()
         try:
@@ -1674,7 +1822,13 @@ class SettingsDialog(QDialog):
             pass
         open_seq_str = self.pynput_to_qt(self.settings.get("general", {}).get("open_hotkey", "<cmd>+<shift>+;"))
         self.open_hotkey_edit.setKeySequence(QKeySequence(open_seq_str))
-        hotkey_layout.addRow("Open Window:", self.open_hotkey_edit)
+        hotkey_rows.addWidget(
+            settings_row(
+                "Open Window",
+                "Brings ByteProof forward from anywhere.",
+                self.open_hotkey_edit,
+            )
+        )
         
         self.proofread_hotkey_edit = QKeySequenceEdit()
         try:
@@ -1683,30 +1837,35 @@ class SettingsDialog(QDialog):
             pass
         proofread_seq_str = self.pynput_to_qt(self.settings.get("general", {}).get("proofread_hotkey", "<cmd>+<shift>+'"))
         self.proofread_hotkey_edit.setKeySequence(QKeySequence(proofread_seq_str))
-        hotkey_layout.addRow("Proofread Selection:", self.proofread_hotkey_edit)
+        hotkey_rows.addWidget(
+            settings_row(
+                "Proofread Selection",
+                "Checks the selected text in one pass.",
+                self.proofread_hotkey_edit,
+            )
+        )
 
         layout.addWidget(hotkey_group)
         
-        temp_group = QGroupBox("Proofreading Style (Temperature)")
-        temp_layout = QVBoxLayout(temp_group)
-        temp_layout.setSpacing(12)
+        temp_group, temp_layout = settings_section("Proofreading Style (Temperature)")
         
         slider_grid = QGridLayout()
         slider_grid.setContentsMargins(0, 5, 0, 0)
         slider_grid.setVerticalSpacing(2)
         
         lbl_precise = QLabel("Precise")
-        lbl_precise.setStyleSheet("color: #78716C; font-size: 12px; font-weight: 520;")
+        lbl_precise.setObjectName("SettingsHint")
         lbl_precise.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
         lbl_creative = QLabel("Creative")
-        lbl_creative.setStyleSheet("color: #78716C; font-size: 12px; font-weight: 520;")
+        lbl_creative.setObjectName("SettingsHint")
         lbl_creative.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         
         self.temp_label = QLabel()
         self.temp_label.setFixedWidth(40)
         self.temp_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.temp_label.setStyleSheet("font-size: 14px; font-weight: 680; color: #1A3A2A;")
+        self.temp_label.setObjectName("SettingsHero")
+        tone(self.temp_label, "primary")
         
         self.temp_slider = QSlider(Qt.Orientation.Horizontal)
         self.temp_slider.setRange(0, 20)
@@ -1736,27 +1895,13 @@ class SettingsDialog(QDialog):
         
         layout.addWidget(temp_group)
         
-        spelling_group = QGroupBox("Proofreading Settings")
-        spelling_layout = QVBoxLayout(spelling_group)
-        spelling_layout.setSpacing(14)
-        spelling_layout.setContentsMargins(14, 18, 14, 16)
+        spelling_group, spelling_layout = settings_section("Proofreading Settings")
 
         def make_setting_row(title: str, hint: str, combo: QComboBox) -> QWidget:
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(16)
-
-            # The explanation lives in the ⓘ tooltip, so the page stays clean.
-            row_layout.addWidget(
-                labelled_with_info(title, hint), 1
-            )
-
             combo.setMinimumWidth(220)
             combo.setMaximumWidth(250)
             combo.setCursor(Qt.CursorShape.PointingHandCursor)
-            row_layout.addWidget(combo, 0, Qt.AlignmentFlag.AlignVCenter)
-            return row
+            return settings_row(title, hint, combo)
 
         self.combo_spelling = QComboBox()
         self.combo_spelling.addItems(["UK/AU/NZ", "US English"])
@@ -1853,35 +1998,23 @@ class SettingsDialog(QDialog):
         )
 
         note = QLabel("Changes apply to your next proofread.")
-        note.setStyleSheet(
-            "color: #A89F9A; font-size: 11px; background: transparent; border: none;"
-        )
+        note.setObjectName("SettingsHint")
         spelling_layout.addWidget(note)
         layout.addWidget(spelling_group)
 
-        reset_group = QGroupBox("Start Fresh")
-        reset_layout = QVBoxLayout(reset_group)
-        reset_layout.setSpacing(10)
-        reset_hint = QLabel(
-            "Put every preference back to its recommended default. Your API "
-            "keys, license, local model and update state are kept."
-        )
-        reset_hint.setWordWrap(True)
-        reset_hint.setStyleSheet("color: #78716C; font-size: 12px;")
-        reset_layout.addWidget(reset_hint)
-        reset_row = QHBoxLayout()
-        reset_row.setContentsMargins(0, 0, 0, 0)
+        reset_group, reset_layout = settings_section("Start Fresh")
         self.btn_restore_defaults = QPushButton("Restore default settings")
+        self.btn_restore_defaults.setObjectName("SmallBtn")
         self.btn_restore_defaults.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_restore_defaults.clicked.connect(self.restore_default_settings)
-        reset_row.addWidget(self.btn_restore_defaults)
-        self.restore_status_label = QLabel("")
-        self.restore_status_label.setStyleSheet(
-            "color: #1F5335; font-size: 12px; font-weight: 600;"
+        reset_layout.addWidget(
+            settings_row(
+                "Restore default settings",
+                "Puts every preference back to its recommended default. Your "
+                "API keys, license, local model and update state are kept.",
+                self.btn_restore_defaults,
+            )
         )
-        reset_row.addWidget(self.restore_status_label)
-        reset_row.addStretch(1)
-        reset_layout.addLayout(reset_row)
         layout.addWidget(reset_group)
 
         scroll.setWidget(content)
@@ -1941,9 +2074,7 @@ class SettingsDialog(QDialog):
             self.sidebar.setCurrentRow(0)
         except Exception:
             pass
-        label = getattr(self, "restore_status_label", None)
-        if label is not None:
-            label.setText("Defaults restored — click Save to apply.")
+        self._set_status("Defaults restored — click Save to apply.")
 
     # Apps offered as one-click rows on the Live Check page. Anything else can
     # be added from the running apps.
@@ -1986,65 +2117,47 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(content)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setSpacing(16)
 
-        title = QLabel("Live Check")
-        title.setObjectName("SettingsTitle")
-        layout.addWidget(title)
-        subtitle = QLabel(
-            "Suggestions appear next to your text while you write."
+        title = settings_page_header(
+            "Live Check",
+            "Suggestions appear next to your text while you write. "
+            f"color: {SHELL_TEXT_MUTED}; font-size: 12px; "
         )
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
-        layout.addWidget(subtitle)
+        layout.addWidget(title)
 
         # --- the master switch -------------------------------------------
-        main_group = QGroupBox("Live Check")
-        main_layout = QVBoxLayout(main_group)
-        main_layout.setSpacing(10)
+        main_group, main_layout = settings_section("Live Check")
 
-        self.chk_live_preview = QCheckBox(
-            "Suggest changes as I select text"
-        )
+        
+        self.chk_live_preview = QCheckBox()
         self.chk_live_preview.setChecked(
             self.settings.get("live_preview", {}).get("enabled", True)
         )
-        main_layout.addWidget(self.chk_live_preview)
-
-        toggle_row = QWidget()
-        toggle_layout = QHBoxLayout(toggle_row)
-        toggle_layout.setContentsMargins(0, 0, 0, 0)
-        toggle_layout.setSpacing(6)
-        toggle_label = QLabel("Apps that trigger it")
-        toggle_label.setStyleSheet(
-            "font-size: 13px; font-weight: 600; color: #292524;"
-        )
-        toggle_layout.addWidget(toggle_label)
-        toggle_layout.addWidget(
-            info_icon(
-                "Suggestions never run in ByteProof itself. Turn an app off "
-                "here to write in it without the panel appearing. The ✕ takes "
-                "an app out of the list; Add App brings it back."
+        main_layout.addWidget(
+            settings_row(
+                "Suggest changes as I select text",
+                "Select text anywhere and ByteProof offers edits.",
+                self.chk_live_preview,
             )
         )
-        toggle_layout.addStretch(1)
+
         self.live_apps_toggle_btn = QPushButton("Show Apps")
+        self.live_apps_toggle_btn.setObjectName("SmallBtn")
         self.live_apps_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.live_apps_toggle_btn.setMinimumWidth(104)
-        self.live_apps_toggle_btn.setStyleSheet(
-            "QPushButton { background-color: #EDF3EF; color: #143024; "
-            "border: 1px solid #A9C7B3; border-radius: 8px; padding: 6px 12px; "
-            "font-size: 12px; font-weight: 620; }"
-            "QPushButton:hover { background-color: #D6E4DB; }"
-        )
         self.live_apps_toggle_btn.clicked.connect(self._toggle_live_apps)
-        toggle_layout.addWidget(self.live_apps_toggle_btn)
-        main_layout.addWidget(toggle_row)
+        main_layout.addWidget(
+            settings_row(
+                "Apps that trigger it",
+                "Suggestions never run inside ByteProof. Turn an app off to "
+                "write in it without the panel; the cross removes it from the "
+                "list and Add App brings it back.",
+                self.live_apps_toggle_btn,
+            )
+        )
 
         self.live_apps_list = LiveAppsList()
         self.live_apps_list.setItemDelegate(BlankRowDelegate(self.live_apps_list))
@@ -2052,91 +2165,81 @@ class SettingsDialog(QDialog):
         self.live_apps_list.setMinimumHeight(220)
         self.live_apps_list.setVisible(False)
         self.live_apps_list.setFrameShape(QFrame.Shape.NoFrame)
-        self.live_apps_list.setStyleSheet(
-            "QListWidget { background-color: #FFFFFF; border: 1px solid #E8E4E0;"
-            " border-radius: 10px; padding: 4px; }"
-            "QListWidget::item { border: none; }"
-        )
+        self.live_apps_list.setObjectName("SettingsAppList")
         main_layout.addWidget(self.live_apps_list)
 
-        apps_buttons = QHBoxLayout()
-        apps_buttons.setSpacing(8)
         self.live_add_app_btn = QPushButton("Add App…")
+        self.live_add_app_btn.setObjectName("SmallBtn")
         self.live_add_app_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.live_add_app_btn.clicked.connect(self._add_live_app)
-        apps_buttons.addWidget(self.live_add_app_btn)
-        apps_buttons.addWidget(self.live_other_apps_check())
-        apps_buttons.addStretch(1)
+
+        # The add button belongs to the list it adds to, so it appears and
+        # disappears with it.
         self.live_apps_buttons = QWidget()
-        self.live_apps_buttons.setLayout(apps_buttons)
+        apps_buttons = QVBoxLayout(self.live_apps_buttons)
+        apps_buttons.setContentsMargins(0, 0, 0, 0)
+        apps_buttons.setSpacing(0)
+        apps_buttons.addWidget(
+            settings_row(
+                "Add an app",
+                "For an app that is not running right now.",
+                self.live_add_app_btn,
+            )
+        )
         self.live_apps_buttons.setVisible(False)
         main_layout.addWidget(self.live_apps_buttons)
+
+        main_layout.addWidget(
+            settings_row(
+                "Allow other apps",
+                "Apps outside this list still get suggestions.",
+                self.live_other_apps_check(),
+            )
+        )
 
         layout.addWidget(main_group)
 
         # --- how the suggestions behave -----------------------------------
-        style_group = QGroupBox("Suggestions")
-        style_layout = QVBoxLayout(style_group)
-        style_layout.setSpacing(14)
+        style_group, style_layout = settings_section("Suggestions")
 
-        style_row = QWidget()
-        style_row_layout = QHBoxLayout(style_row)
-        style_row_layout.setContentsMargins(0, 0, 0, 0)
-        style_row_layout.setSpacing(8)
-        style_label = QLabel("Style")
-        style_label.setStyleSheet("font-size: 13px; color: #292524;")
         self.live_style_combo = QComboBox()
         self.live_style_combo.addItem("Corrections only", "strict")
-        self.live_style_combo.addItem(
-            "Polish language (keep meaning)", "polish"
-        )
+        self.live_style_combo.addItem("Polish language (keep meaning)", "polish")
         style_value = self.settings.get("live_preview", {}).get("style", "strict")
         index = self.live_style_combo.findData(style_value)
         self.live_style_combo.setCurrentIndex(max(0, index))
-        style_row_layout.addWidget(style_label)
-        style_row_layout.addWidget(self.live_style_combo)
-        style_row_layout.addWidget(
-            info_icon(
-                "'Corrections only' fixes grammar, spelling and obvious errors. "
-                "'Polish language' also improves flow, word choice and "
-                "conciseness while keeping your meaning and tone."
+        style_layout.addWidget(
+            settings_row(
+                "Style",
+                "Corrections only fixes grammar, spelling and obvious errors. "
+                "Polish language also improves flow and word choice while "
+                "keeping your meaning and tone.",
+                self.live_style_combo,
             )
         )
-        style_row_layout.addStretch(1)
-        style_layout.addWidget(style_row)
 
-        words_row = QWidget()
-        words_layout = QHBoxLayout(words_row)
-        words_layout.setContentsMargins(0, 0, 0, 0)
-        words_layout.setSpacing(8)
-        words_label = QLabel("Suggest for selections of")
-        words_label.setStyleSheet("font-size: 13px; color: #292524;")
         self.live_min_words_spin = QSpinBox()
         self.live_min_words_spin.setRange(1, 10)
-        self.live_min_words_spin.setFixedWidth(64)
         self.live_min_words_spin.setValue(
             int(self.settings.get("live_preview", {}).get("min_words", 3))
         )
-        words_suffix = QLabel("words or more")
-        words_suffix.setStyleSheet("font-size: 13px; color: #292524;")
-        words_layout.addWidget(words_label)
-        words_layout.addWidget(self.live_min_words_spin)
-        words_layout.addWidget(words_suffix)
-        words_layout.addWidget(
-            info_icon(
+        words_control = QWidget()
+        words_control_layout = QHBoxLayout(words_control)
+        words_control_layout.setContentsMargins(0, 0, 0, 0)
+        words_control_layout.setSpacing(8)
+        words_control_layout.addWidget(self.live_min_words_spin)
+        words_suffix = QLabel("words")
+        words_suffix.setObjectName("SettingsHint")
+        words_control_layout.addWidget(words_suffix)
+        style_layout.addWidget(
+            settings_row(
+                "Only suggest for longer selections",
                 "Shorter selections are ignored, so a stray word or two never "
-                "triggers a suggestion."
+                "triggers a suggestion.",
+                words_control,
             )
         )
-        words_layout.addStretch(1)
-        style_layout.addWidget(words_row)
 
-        delay_row = QWidget()
-        delay_layout = QHBoxLayout(delay_row)
-        delay_layout.setContentsMargins(0, 0, 0, 0)
-        delay_layout.setSpacing(8)
-        delay_label = QLabel("Wait after selecting")
-        delay_label.setStyleSheet("font-size: 13px; color: #292524;")
         self.live_delay_slider = QSlider(Qt.Orientation.Horizontal)
         self.live_delay_slider.setRange(400, 2000)
         self.live_delay_slider.setSingleStep(100)
@@ -2145,33 +2248,30 @@ class SettingsDialog(QDialog):
             int(self.settings.get("live_preview", {}).get("delay_ms", 600))
         )
         self.live_delay_label = QLabel(f"{self.live_delay_slider.value()} ms")
+        self.live_delay_label.setObjectName("SettingsValue")
         self.live_delay_label.setFixedWidth(56)
         self.live_delay_slider.valueChanged.connect(
             lambda v: self.live_delay_label.setText(f"{v} ms")
         )
-        delay_layout.addWidget(delay_label)
-        delay_layout.addWidget(self.live_delay_slider)
-        delay_layout.addWidget(self.live_delay_label)
-        delay_layout.addWidget(
-            info_icon(
+        delay_control = QWidget()
+        delay_control_layout = QHBoxLayout(delay_control)
+        delay_control_layout.setContentsMargins(0, 0, 0, 0)
+        delay_control_layout.setSpacing(10)
+        delay_control_layout.addWidget(self.live_delay_slider)
+        delay_control_layout.addWidget(self.live_delay_label)
+        style_layout.addWidget(
+            settings_row(
+                "Wait after selecting",
                 "How long the selection must stay unchanged before suggestions "
                 "are requested. Lower feels faster; higher avoids firing while "
-                "you are still selecting."
+                "you are still selecting.",
+                delay_control,
             )
         )
-        delay_layout.addStretch(1)
-        style_layout.addWidget(delay_row)
 
-        length_row = QWidget()
-        length_layout = QHBoxLayout(length_row)
-        length_layout.setContentsMargins(0, 0, 0, 0)
-        length_layout.setSpacing(8)
-        length_label = QLabel("Check selections up to")
-        length_label.setStyleSheet("font-size: 13px; color: #292524;")
         self.live_max_chars_spin = QSpinBox()
         self.live_max_chars_spin.setRange(MIN_MAX_CHARS, MAX_MAX_CHARS)
         self.live_max_chars_spin.setSingleStep(500)
-        self.live_max_chars_spin.setFixedWidth(92)
         self.live_max_chars_spin.setValue(
             int(
                 self.settings.get("live_preview", {}).get(
@@ -2179,24 +2279,26 @@ class SettingsDialog(QDialog):
                 )
             )
         )
+        length_control = QWidget()
+        length_control_layout = QHBoxLayout(length_control)
+        length_control_layout.setContentsMargins(0, 0, 0, 0)
+        length_control_layout.setSpacing(8)
+        length_control_layout.addWidget(self.live_max_chars_spin)
         length_suffix = QLabel("characters")
-        length_suffix.setStyleSheet("font-size: 13px; color: #292524;")
-        length_layout.addWidget(length_label)
-        length_layout.addWidget(self.live_max_chars_spin)
-        length_layout.addWidget(length_suffix)
-        length_layout.addWidget(
-            info_icon(
+        length_suffix.setObjectName("SettingsHint")
+        length_control_layout.addWidget(length_suffix)
+        style_layout.addWidget(
+            settings_row(
+                "Check selections up to",
                 "Longer selections are left alone, because a whole section in "
-                "one panel is rarely what you want. Around 4,000 characters "
-                "is six to eight paragraphs."
+                "one panel is rarely what you want. About 4,000 characters is "
+                "six to eight paragraphs.",
+                length_control,
             )
         )
-        length_layout.addStretch(1)
-        style_layout.addWidget(length_row)
 
-        self.chk_live_pointer_near = QCheckBox(
-            "Only suggest while the pointer is still at the selected text"
-        )
+        
+        self.chk_live_pointer_near = QCheckBox()
         self.chk_live_pointer_near.setChecked(
             bool(
                 self.settings.get("live_preview", {}).get(
@@ -2204,23 +2306,31 @@ class SettingsDialog(QDialog):
                 )
             )
         )
-        style_layout.addWidget(self.chk_live_pointer_near)
-
-        self.chk_live_local = QCheckBox(
-            "Prefer the local AI for suggestions (saves cloud tokens)"
+        style_layout.addWidget(
+            settings_row(
+                "Only when the pointer stays at the selection",
+                "Move the pointer away and the suggestion waits.",
+                self.chk_live_pointer_near,
+            )
         )
+
+        
+        self.chk_live_local = QCheckBox()
         self.chk_live_local.setChecked(
             self.settings.get("live_preview", {}).get("use_local_model", True)
         )
-        style_layout.addWidget(self.chk_live_local)
+        style_layout.addWidget(
+            settings_row(
+                "Prefer the local AI for suggestions",
+                "Runs on this Mac and spends no cloud tokens.",
+                self.chk_live_local,
+            )
+        )
 
         layout.addWidget(style_group)
 
         # --- hotkeys -------------------------------------------------------
-        hotkey_group = QGroupBox("Hotkeys")
-        hotkey_layout = QFormLayout(hotkey_group)
-        hotkey_layout.setSpacing(12)
-        hotkey_layout.setContentsMargins(12, 18, 12, 12)
+        hotkey_group, hotkey_rows = settings_section("Hotkeys")
 
         self.live_toggle_hotkey_edit = QKeySequenceEdit()
         try:
@@ -2239,7 +2349,13 @@ class SettingsDialog(QDialog):
         self.live_toggle_hotkey_edit.setToolTip(
             "Turns Live Check on or off from any app."
         )
-        hotkey_layout.addRow("Turn Live Check on/off:", self.live_toggle_hotkey_edit)
+        hotkey_rows.addWidget(
+            settings_row(
+                "Turn Live Check on/off",
+                "From any app.",
+                self.live_toggle_hotkey_edit,
+            )
+        )
 
         self.apply_all_hotkey_edit = QKeySequenceEdit()
         try:
@@ -2259,7 +2375,14 @@ class SettingsDialog(QDialog):
             "While the suggestion panel is on screen, applies every suggestion "
             "at once."
         )
-        hotkey_layout.addRow("Apply all suggestions:", self.apply_all_hotkey_edit)
+        hotkey_rows.addWidget(
+            settings_row(
+                "Apply all suggestions",
+                "While the suggestion panel is on screen, applies every "
+                "suggestion at once.",
+                self.apply_all_hotkey_edit,
+            )
+        )
         layout.addWidget(hotkey_group)
 
         if platform.system() != "Darwin":
@@ -2269,7 +2392,7 @@ class SettingsDialog(QDialog):
                 "select text and press the proofread hotkey instead."
             )
             note.setWordWrap(True)
-            note.setStyleSheet("color: #57534E; font-size: 12px;")
+            note.setObjectName("SettingsValue")
             layout.addWidget(note)
             for widget in (
                 self.chk_live_preview,
@@ -2291,7 +2414,7 @@ class SettingsDialog(QDialog):
 
     def live_other_apps_check(self) -> QCheckBox:
         """The 'any other app' fallback toggle for the app list."""
-        self.chk_live_other_apps = QCheckBox("Allow other apps")
+        self.chk_live_other_apps = QCheckBox()
         rules = self.settings.get("live_preview", {}).get("app_rules", {})
         self.chk_live_other_apps.setChecked(
             bool(rules.get("*", True)) if isinstance(rules, dict) else True
@@ -2350,10 +2473,6 @@ class SettingsDialog(QDialog):
         # WA_StyledBackground lets a plain QWidget actually paint it.
         row.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        row.setStyleSheet(
-            "#LiveAppRow { background: transparent; border-radius: 6px; }"
-            "#LiveAppRow:hover { background-color: #FAFAF9; }"
-        )
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(8, 0, 6, 0)
         row_layout.setSpacing(10)
@@ -2381,7 +2500,7 @@ class SettingsDialog(QDialog):
         display = name if len(name) <= 48 else name[:47] + "…"
         name_label = QLabel(display)
         name_label.setToolTip(name)
-        name_label.setStyleSheet("font-size: 13px; color: #292524;")
+        name_label.setObjectName("SettingsRowTitle")
         name_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
@@ -2391,11 +2510,7 @@ class SettingsDialog(QDialog):
         remove.setText("✕")
         remove.setCursor(Qt.CursorShape.PointingHandCursor)
         remove.setToolTip(f"Remove {name} from this list")
-        remove.setStyleSheet(
-            "QToolButton { border: none; color: #A8A29E; font-size: 14px; "
-            "font-weight: 700; padding: 2px 6px; border-radius: 6px; }"
-            "QToolButton:hover { color: #B91C1C; background-color: #FEF2F2; }"
-        )
+        remove.setObjectName("LiveAppRemove")
         remove.clicked.connect(
             lambda _checked=False, target=item: self._remove_live_app(target)
         )
@@ -2565,64 +2680,54 @@ class SettingsDialog(QDialog):
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setSpacing(14)
 
-        title = QLabel("Automation")
-        title.setObjectName("SettingsTitle")
+        title = settings_page_header(
+            "Automation",
+            "Email Editing is chosen for you when the text comes from Mail, "
+            "Outlook or webmail such as Gmail.",
+        )
         layout.addWidget(title)
 
-        subtitle = QLabel(
-            "ByteProof can automatically use Email Editing when your selected "
-            "text comes from Mail, Outlook, or webmail such as Gmail. You can "
-            "add, remove, or change these rules below."
-        )
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
-        layout.addWidget(subtitle)
+        group, group_layout = settings_section("Automatic Context Triggers")
 
-        group = QGroupBox("Automatic Context Triggers")
-        group_layout = QVBoxLayout(group)
-        group_layout.setSpacing(12)
-        group_layout.setContentsMargins(14, 18, 14, 16)
-
-        self.automation_enabled_check = QCheckBox(
-            "Enable automatic context detection"
-        )
+        
+        self.automation_enabled_check = QCheckBox()
         self.automation_enabled_check.setChecked(
             self.settings.get("automation", {}).get("enabled", True)
         )
-        self.automation_enabled_check.setStyleSheet(
-            "font-size: 13px; font-weight: 620; color: #292524;"
+        group_layout.addWidget(
+            settings_row(
+                "Enable automatic context detection",
+                "The triggers below add context to every prompt.",
+                self.automation_enabled_check,
+            )
         )
-        group_layout.addWidget(self.automation_enabled_check)
 
         self.automation_summary_label = QLabel()
-        self.automation_summary_label.setStyleSheet(
-            "font-size: 12px; color: #57534E; background: transparent; border: none;"
-        )
-        group_layout.addWidget(self.automation_summary_label)
+        self.automation_summary_label.setObjectName("SettingsValue")
 
         self.automation_toggle_btn = QPushButton("Show Triggers")
+        self.automation_toggle_btn.setObjectName("SmallBtn")
         self.automation_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.automation_toggle_btn.setStyleSheet(
-            "QPushButton { background-color: #EDF3EF; color: #143024; "
-            "border: 1px solid #A9C7B3; border-radius: 10px; padding: 8px 14px; "
-            "font-weight: 620; }"
-            "QPushButton:hover { background-color: #D6E4DB; }"
-        )
         self.automation_toggle_btn.clicked.connect(self._toggle_automation_rules)
         group_layout.addWidget(
-            self.automation_toggle_btn,
-            alignment=Qt.AlignmentFlag.AlignLeft,
+            settings_row(
+                "Triggers",
+                "A trigger matches an app name, a macOS or Windows app, or a "
+                "website. The matching context is used on your next proofread.",
+                self.automation_toggle_btn,
+                note_widget=self.automation_summary_label,
+            )
         )
 
+        group_layout.addSpacing(10)
         self.automation_list = QListWidget()
         self.automation_list.setSelectionMode(
             QListWidget.SelectionMode.SingleSelection
         )
-        self.automation_list.setSpacing(8)
-        self.automation_list.setStyleSheet(
-            "QListWidget { background: transparent; border: none; }"
-            "QListWidget::item { background: transparent; }"
-            "QListWidget::item:selected { background: transparent; }"
+        self.automation_list.setSpacing(6)
+        self.automation_list.setMinimumHeight(240)
+        self.automation_list.setSizeAdjustPolicy(
+            QListWidget.SizeAdjustPolicy.AdjustToContents
         )
         self.automation_list.itemSelectionChanged.connect(
             self._update_automation_card_selection
@@ -2635,32 +2740,14 @@ class SettingsDialog(QDialog):
         button_row.setSpacing(8)
         self.automation_add_btn = QPushButton("Add Trigger")
         self.automation_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.automation_add_btn.setStyleSheet(
-            "QPushButton { background-color: #1A3A2A; color: #FFFFFF; "
-            "border: 1px solid #143024; border-radius: 10px; padding: 9px 16px; "
-            "font-weight: 620; }"
-            "QPushButton:hover { background-color: #143024; }"
-            "QPushButton:pressed { background-color: #0E2419; }"
-        )
+        self.automation_add_btn.setObjectName("PrimaryBtn")
         self.automation_add_btn.clicked.connect(self._add_automation_rule)
         self.automation_remove_btn = QPushButton("Remove Selected")
         self.automation_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.automation_remove_btn.setStyleSheet(
-            "QPushButton { background-color: #FFFFFF; color: #57534E; "
-            "border: 1px solid #E8E1D9; border-radius: 10px; padding: 9px 16px; "
-            "font-weight: 520; }"
-            "QPushButton:hover { background-color: #FEF2F2; color: #B91C1C; "
-            "border-color: #FECACA; }"
-        )
+        self.automation_remove_btn.setObjectName("DangerBtn")
         self.automation_remove_btn.clicked.connect(self._remove_automation_rule)
         self.automation_reset_btn = QPushButton("Reset Defaults")
         self.automation_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.automation_reset_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #78716C; "
-            "border: 1px solid #E8E1D9; border-radius: 10px; padding: 9px 16px; "
-            "font-weight: 520; }"
-            "QPushButton:hover { background-color: #F5F0EB; color: #292524; }"
-        )
         self.automation_reset_btn.clicked.connect(self._reset_automation_rules)
         button_row.addWidget(self.automation_add_btn)
         button_row.addWidget(self.automation_remove_btn)
@@ -2668,13 +2755,6 @@ class SettingsDialog(QDialog):
         button_row.addStretch()
         group_layout.addWidget(self.automation_actions_widget)
 
-        hint = QLabel(
-            "A trigger matches an app name, macOS app, Windows app, or website. "
-            "The matching context is used automatically on your next proofread."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #A89F9A; font-size: 11px;")
-        group_layout.addWidget(hint)
         layout.addWidget(group)
 
         self._populate_automation_rules(
@@ -2838,40 +2918,15 @@ class SettingsDialog(QDialog):
         dialog.setWindowTitle("Add Automatic Context Trigger")
         dialog.setModal(True)
         dialog.setMinimumWidth(500)
-        dialog.setStyleSheet(
-            "QDialog { background-color: #FAF8F5; }"
-            "QLabel { color: #292524; background: transparent; }"
-            "QLineEdit, QComboBox { background-color: #FFFFFF; border: 1px solid #DDD6CF; "
-            "border-radius: 10px; padding: 8px 10px; }"
-            "QLineEdit:focus, QComboBox:focus { border-color: #1A3A2A; }"
-            "QComboBox::drop-down { border: none; width: 28px; }"
-            "QDialogButtonBox QPushButton { min-width: 86px; padding: 9px 16px; "
-            "border-radius: 10px; font-weight: 600; }"
-            "QDialogButtonBox QPushButton:default { background-color: #1A3A2A; "
-            "color: #FFFFFF; border: 1px solid #143024; }"
-            "QDialogButtonBox QPushButton:default:hover { background-color: #143024; }"
-        )
+        dialog.setStyleSheet(settings_stylesheet(resource_path("assets")))
 
         shell = QVBoxLayout(dialog)
         shell.setContentsMargins(24, 22, 24, 22)
         shell.setSpacing(16)
 
         header = QLabel("Add Automatic Context Trigger")
-        header.setStyleSheet("font-size: 17px; font-weight: 700; color: #1A3A2A;")
+        header.setObjectName("SettingsTitle")
         shell.addWidget(header)
-
-        subtitle = QLabel(
-            "Choose what ByteProof should match, then choose the editing context "
-            "that should be used automatically."
-        )
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
-        shell.addWidget(subtitle)
-
-        form = QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(14)
-        shell.addLayout(form)
 
         type_combo = QComboBox()
         type_combo.addItems(
@@ -2893,9 +2948,10 @@ class SettingsDialog(QDialog):
         choose_app_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         value_row.addWidget(choose_app_btn)
 
-        type_hint = QLabel("Examples: Mail, Microsoft Outlook, com.apple.mail, mail.google.com")
-        type_hint.setWordWrap(True)
-        type_hint.setStyleSheet("color: #A89F9A; font-size: 11px;")
+        value_hint = (
+            "Examples: Mail, Microsoft Outlook, com.apple.mail, "
+            "mail.google.com"
+        )
 
         def update_placeholder() -> None:
             kind = type_combo.currentText()
@@ -2931,10 +2987,25 @@ class SettingsDialog(QDialog):
                 "Academic Journal (Top-Tier)",
             ]
         )
-        form.addRow("Match type:", type_combo)
-        form.addRow("Value:", value_row)
-        form.addRow("Context:", context_combo)
-        form.addRow("", type_hint)
+        value_control = QWidget()
+        value_control.setLayout(value_row)
+
+        shell.addWidget(
+            settings_row(
+                "Match type",
+                "An app name, a website, a macOS bundle id or a Windows app.",
+                type_combo,
+            )
+        )
+        shell.addWidget(settings_row("Value", value_hint, value_control))
+        shell.addWidget(
+            settings_row(
+                "Context",
+                "The editing context applied automatically on your next "
+                "proofread.",
+                context_combo,
+            )
+        )
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -2942,7 +3013,11 @@ class SettingsDialog(QDialog):
         )
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
-        form.addRow(buttons)
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 6, 0, 0)
+        footer.addStretch(1)
+        footer.addWidget(buttons)
+        shell.addLayout(footer)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -3098,23 +3173,14 @@ class SettingsDialog(QDialog):
         dialog.setWindowTitle("Choose App")
         dialog.setModal(True)
         dialog.setMinimumSize(420, 460)
-        dialog.setStyleSheet(
-            "QDialog { background-color: #FAF8F5; }"
-            "QLineEdit { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
-            "border-radius: 10px; padding: 8px 10px; }"
-            "QLineEdit:focus { border-color: #1A3A2A; }"
-            "QListWidget { background-color: #FFFFFF; border: 1px solid #E8E1D9; "
-            "border-radius: 12px; padding: 6px; }"
-            "QListWidget::item { padding: 10px; border-radius: 8px; }"
-            "QListWidget::item:selected { background-color: #D6E4DB; color: #143024; }"
-        )
+        dialog.setStyleSheet(settings_stylesheet(resource_path("assets")))
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
 
         title = QLabel("Select an installed application")
-        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #292524;")
+        title.setObjectName("SettingsRowTitle")
         layout.addWidget(title)
 
         search_edit = QLineEdit()
@@ -3258,21 +3324,18 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
-        title = QLabel("Connect")
-        title.setObjectName("SettingsTitle")
+        title = settings_page_header("Connect")
         layout.addWidget(title)
         
         subtitle = QLabel("Select an AI provider. Free options are marked with a green badge.")
-        subtitle.setStyleSheet("color: #78716C; font-size: 12px; margin-bottom: 4px;")
+        subtitle.setObjectName("SettingsSubtitle")
         layout.addWidget(subtitle)
         
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
         content_layout = QVBoxLayout(content)
         content_layout.setSpacing(8)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -3285,18 +3348,8 @@ class SettingsDialog(QDialog):
         for provider_name, provider_info in PROVIDERS.items():
             frame = QFrame()
             frame.setObjectName("ProviderCard")
-            frame.setStyleSheet("""
-                #ProviderCard {
-                    background-color: rgba(255, 255, 255, 250);
-                    border: 1px solid #E8E4E0;
-                    border-radius: 12px;
-                }
-                #ProviderCard:hover {
-                    border-color: #D6D0CA;
-                }
-            """)
             row = QHBoxLayout(frame)
-            row.setContentsMargins(14, 12, 14, 12)
+            row.setContentsMargins(16, 14, 16, 14)
             
             info_layout = QVBoxLayout()
             info_layout.setSpacing(2)
@@ -3305,32 +3358,18 @@ class SettingsDialog(QDialog):
             name_layout.setSpacing(8)
             
             lbl_name = QLabel(provider_name)
-            lbl_name.setFont(_ui_font(13, QFont.Weight.Medium))
+            lbl_name.setObjectName("SettingsRowTitle")
             name_layout.addWidget(lbl_name)
             
             if provider_info.get("is_local"):
                 badge_text = "LOCAL"
-                badge_style = (
-                    "background-color: #DCFCE7; color: #166534; "
-                    "font-size: 9px; font-weight: 700; padding: 2px 6px; "
-                    "border-radius: 4px;"
-                )
             elif provider_info.get("is_free"):
                 badge_text = "FREE"
-                badge_style = (
-                    "background-color: #DCFCE7; color: #166534; "
-                    "font-size: 9px; font-weight: 700; padding: 2px 6px; "
-                    "border-radius: 4px;"
-                )
             else:
                 badge_text = ""
-                badge_style = ""
             if badge_text:
                 free_badge = QLabel(badge_text)
-                free_badge.setStyleSheet(
-                    badge_style
-                )
-                free_badge.setFixedHeight(18)
+                free_badge.setObjectName("SettingsBadge")
                 name_layout.addWidget(free_badge)
             
             name_layout.addStretch()
@@ -3342,22 +3381,23 @@ class SettingsDialog(QDialog):
             
             if provider_info.get("is_local"):
                 status_text = "Private, offline · no API key needed"
-                status_color = "#059669"
+                status_kind = "success"
             elif is_ollama:
                 status_text = "Runs locally — no API key needed"
-                status_color = "#059669"
+                status_kind = "success"
             elif has_keys:
                 status_text = "API key configured"
-                status_color = "#059669"
+                status_kind = "success"
             else:
                 status_text = "No API key set"
-                status_color = "#A89F9A"
+                status_kind = "faint"
             
             if provider_name == active_provider:
                 status_text += " · Active"
             
             lbl_status = QLabel(status_text)
-            lbl_status.setStyleSheet(f"color: {status_color}; font-size: 11px;")
+            lbl_status.setObjectName("SettingsStatus")
+            tone(lbl_status, status_kind)
             self.provider_status_labels[provider_name] = lbl_status
 
             info_layout.addWidget(lbl_status)
@@ -3367,16 +3407,13 @@ class SettingsDialog(QDialog):
                     "Selected text is sent to this provider — Local AI keeps "
                     "everything on your computer."
                 )
-                privacy_note.setStyleSheet(
-                    "color: #A89F9A; font-size: 10px;"
-                )
+                privacy_note.setObjectName("SettingsHint")
                 privacy_note.setWordWrap(True)
                 info_layout.addWidget(privacy_note)
 
             row.addLayout(info_layout, stretch=1)
             
             btn_activate = QPushButton("Use")
-            btn_activate.setFixedWidth(56)
             btn_activate.setCheckable(True)
             btn_activate.setChecked(provider_name == active_provider)
             btn_activate.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3384,7 +3421,6 @@ class SettingsDialog(QDialog):
             self.provider_buttons[provider_name] = btn_activate
 
             btn_set = QPushButton("Configure")
-            btn_set.setFixedWidth(80)
             btn_set.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_set.clicked.connect(lambda checked, n=provider_name: self.open_provider_settings(n))
             
@@ -3417,10 +3453,11 @@ class SettingsDialog(QDialog):
                 btn.setToolTip("")
             if provider_name == active_provider:
                 btn.setText("Active")
-                btn.setStyleSheet("QPushButton { background-color: #1A3A2A; color: white; border: 1px solid #143024; border-radius: 10px; padding: 6px 12px; font-weight: 620; }")
+                btn.setObjectName("PrimaryBtn")
             else:
                 btn.setText("Use")
-                btn.setStyleSheet("")
+                btn.setObjectName("")
+            restyle(btn)
 
         for provider_name, lbl in self.provider_status_labels.items():
             keys = self.settings.get("providers", {}).get(provider_name, {}).get("api_keys", [])
@@ -3430,16 +3467,16 @@ class SettingsDialog(QDialog):
 
             if provider_info.get("is_local"):
                 status_text = "Private, offline · no API key needed"
-                status_color = "#059669"
+                status_kind = "success"
             elif is_ollama:
                 status_text = "Runs locally — no API key needed"
-                status_color = "#059669"
+                status_kind = "success"
             elif has_keys:
                 status_text = "API key configured"
-                status_color = "#059669"
+                status_kind = "success"
             else:
                 status_text = "No API key set"
-                status_color = "#A89F9A"
+                status_kind = "faint"
 
             if provider_name == active_provider:
                 status_text += " · Active"
@@ -3448,7 +3485,8 @@ class SettingsDialog(QDialog):
             ):
                 status_text += " · License required"
             lbl.setText(status_text)
-            lbl.setStyleSheet(f"color: {status_color}; font-size: 11px;")
+            lbl.setObjectName("SettingsStatus")
+            tone(lbl, status_kind)
 
     def init_local_tab(self) -> None:
         page = QWidget()
@@ -3462,15 +3500,12 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(content)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setSpacing(16)
 
-        title = QLabel("Local AI")
-        title.setObjectName("SettingsTitle")
+        title = settings_page_header("Local AI")
         layout.addWidget(title)
 
         subtitle = QLabel(
@@ -3479,28 +3514,18 @@ class SettingsDialog(QDialog):
             "The $49 license unlocks unlimited use."
         )
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #78716C; font-size: 12px;")
+        subtitle.setObjectName("SettingsRowHelper")
         layout.addWidget(subtitle)
 
         storage_row = QHBoxLayout()
         self.storage_label = QLabel()
-        self.storage_label.setStyleSheet("color: #78716C; font-size: 12px;")
+        self.storage_label.setObjectName("SettingsRowHelper")
         storage_row.addWidget(self.storage_label)
         storage_row.addStretch()
         self.btn_cleanup = QPushButton("Clean Up Unused Files")
+        self.btn_cleanup.setObjectName("LinkBtn")
         self.btn_cleanup.setFlat(True)
         self.btn_cleanup.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cleanup.setStyleSheet("""
-            QPushButton {
-                color: #1A3A2A;
-                text-align: right;
-                border: none;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                text-decoration: underline;
-            }
-        """)
         self.btn_cleanup.clicked.connect(self._clean_up_cache_now)
         storage_row.addWidget(self.btn_cleanup)
         layout.addLayout(storage_row)
@@ -3510,21 +3535,18 @@ class SettingsDialog(QDialog):
         recommended = recommend_model(hw)
         hw_card = QFrame()
         hw_card.setObjectName("ProviderCard")
-        hw_card.setStyleSheet(
-            "#ProviderCard { background-color: rgba(255,255,255,250); "
-            "border: 1px solid #E8E4E0; border-radius: 12px; }"
-        )
         hw_layout = QVBoxLayout(hw_card)
-        hw_layout.setContentsMargins(14, 12, 14, 12)
+        hw_layout.setContentsMargins(16, 14, 16, 14)
         hw_layout.setSpacing(4)
         hw_title = QLabel("Your computer")
-        hw_title.setFont(_ui_font(12, QFont.Weight.Bold))
+        hw_title.setObjectName("SettingsCardTitle")
         hw_layout.addWidget(hw_title)
         hw_line1 = QLabel(f"{hw['display_ram']} RAM · {hw['chip']}")
-        hw_line1.setStyleSheet("color: #57534E; font-size: 12px;")
+        hw_line1.setObjectName("SettingsValue")
         hw_layout.addWidget(hw_line1)
         self.local_recommend_label = QLabel()
-        self.local_recommend_label.setStyleSheet("color: #1F5335; font-size: 12px; font-weight: 600;")
+        self.local_recommend_label.setObjectName("SettingsValue")
+        tone(self.local_recommend_label, "primary")
         self.local_recommend_label.setText(
             f"Recommended: {recommended['name']} ({recommended['params']}) · "
             f"{model_size_label(recommended)}"
@@ -3535,17 +3557,11 @@ class SettingsDialog(QDialog):
         self.local_progress = QProgressBar()
         self.local_progress.setVisible(False)
         self.local_progress.setTextVisible(True)
-        self.local_progress.setStyleSheet(
-            "QProgressBar { border: 1px solid #A9C7B3; border-radius: 8px; "
-            "background-color: #EDF3EF; height: 22px; text-align: center; "
-            "font-size: 11px; color: #143024; }"
-            "QProgressBar::chunk { background-color: #1F5335; border-radius: 7px; }"
-        )
         layout.addWidget(self.local_progress)
 
         self.local_status_label = QLabel("")
         self.local_status_label.setWordWrap(True)
-        self.local_status_label.setStyleSheet("color: #57534E; font-size: 12px;")
+        self.local_status_label.setObjectName("SettingsValue")
         layout.addWidget(self.local_status_label)
 
         models_title = QLabel("Models")
@@ -3556,12 +3572,8 @@ class SettingsDialog(QDialog):
         for model in MODEL_CATALOG:
             card = QFrame()
             card.setObjectName("ProviderCard")
-            card.setStyleSheet(
-                "#ProviderCard { background-color: rgba(255,255,255,250); "
-                "border: 1px solid #E8E4E0; border-radius: 12px; }"
-            )
             row = QHBoxLayout(card)
-            row.setContentsMargins(14, 12, 14, 12)
+            row.setContentsMargins(16, 14, 16, 14)
             row.setSpacing(10)
 
             info_col = QVBoxLayout()
@@ -3569,14 +3581,10 @@ class SettingsDialog(QDialog):
             name_row = QHBoxLayout()
             name_row.setSpacing(8)
             name_lbl = QLabel(model["name"])
-            name_lbl.setFont(_ui_font(13, QFont.Weight.Medium))
+            name_lbl.setObjectName("SettingsRowTitle")
             name_row.addWidget(name_lbl)
             tag_lbl = QLabel(model["tag"])
-            tag_lbl.setStyleSheet(
-                "background-color: #EDF3EF; color: #1F5335; font-size: 9px; "
-                "font-weight: 700; padding: 2px 6px; border-radius: 4px;"
-            )
-            tag_lbl.setFixedHeight(18)
+            tag_lbl.setObjectName("SettingsBadge")
             name_row.addWidget(tag_lbl)
             name_row.addStretch()
             info_col.addLayout(name_row)
@@ -3585,32 +3593,32 @@ class SettingsDialog(QDialog):
                 f"{model_size_label(model)} · needs {model['min_ram_gb']}+ GB RAM · "
                 f"License: {model['license']}"
             )
-            meta_lbl.setStyleSheet("color: #A89F9A; font-size: 11px;")
+            meta_lbl.setObjectName("SettingsHint")
             info_col.addWidget(meta_lbl)
 
             status_lbl = QLabel("")
-            status_lbl.setStyleSheet("color: #059669; font-size: 11px;")
+            status_lbl.setObjectName("SettingsStatus")
+            tone(status_lbl, "success")
             info_col.addWidget(status_lbl)
 
             desc_lbl = QLabel(model.get("description", ""))
             desc_lbl.setWordWrap(True)
-            desc_lbl.setStyleSheet("color: #57534E; font-size: 11px;")
+            desc_lbl.setObjectName("SettingsHint")
             info_col.addWidget(desc_lbl)
 
             row.addLayout(info_col, stretch=1)
 
             btn_use = QPushButton("Use")
-            btn_use.setFixedWidth(56)
             btn_use.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn_use.clicked.connect(lambda checked=False, mid=model["id"]: self._use_local_model(mid))
 
             btn_download = QPushButton("Download")
-            btn_download.setFixedWidth(96)
+            btn_download.setObjectName("PrimaryBtn")
             btn_download.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn_download.clicked.connect(lambda checked=False, mid=model["id"]: self._download_local_model(mid))
 
             btn_remove = QPushButton("Remove")
-            btn_remove.setFixedWidth(72)
+            btn_remove.setObjectName("DangerBtn")
             btn_remove.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn_remove.clicked.connect(lambda checked=False, mid=model["id"]: self._remove_local_model(mid))
 
@@ -3628,19 +3636,15 @@ class SettingsDialog(QDialog):
 
         engine_card = QFrame()
         engine_card.setObjectName("ProviderCard")
-        engine_card.setStyleSheet(
-            "#ProviderCard { background-color: rgba(255,255,255,250); "
-            "border: 1px solid #E8E4E0; border-radius: 12px; }"
-        )
         engine_layout = QVBoxLayout(engine_card)
-        engine_layout.setContentsMargins(14, 12, 14, 12)
+        engine_layout.setContentsMargins(16, 14, 16, 14)
         engine_layout.setSpacing(6)
         engine_title = QLabel("Local engine")
-        engine_title.setFont(_ui_font(12, QFont.Weight.Bold))
+        engine_title.setObjectName("SettingsCardTitle")
         engine_layout.addWidget(engine_title)
         self.local_engine_status = QLabel()
         self.local_engine_status.setWordWrap(True)
-        self.local_engine_status.setStyleSheet("color: #57534E; font-size: 12px;")
+        self.local_engine_status.setObjectName("SettingsValue")
         engine_layout.addWidget(self.local_engine_status)
         engine_buttons = QHBoxLayout()
         self.btn_start_server = QPushButton("Start Server")
@@ -3718,7 +3722,7 @@ class SettingsDialog(QDialog):
             widgets["download"].setEnabled(mid != model_id)
             if mid == model_id:
                 widgets["download"].setText("Downloading…")
-        self.local_status_label.setStyleSheet("color: #57534E; font-size: 12px;")
+        self.local_status_label.setObjectName("SettingsValue")
         self.local_status_label.setText(f"Preparing {get_model(model_id)['name']}…")
 
         worker = LocalModelDownloadWorker(model_id)
@@ -3741,7 +3745,8 @@ class SettingsDialog(QDialog):
                 self.local_progress.setRange(0, total)
                 self.local_progress.setValue(shown_done)
                 self.local_progress.setFormat(size_text)
-                self.local_status_label.setStyleSheet("color: #B45309; font-size: 12px;")
+                self.local_status_label.setObjectName("SettingsValue")
+                tone(self.local_status_label, "warning")
                 self.local_status_label.setText(
                     f"{stage or 'Downloading'} — {size_text}"
                 )
@@ -3763,7 +3768,8 @@ class SettingsDialog(QDialog):
                         )
                 else:
                     card_status.setText(stage or "Downloading…")
-                card_status.setStyleSheet("color: #B45309; font-size: 11px;")
+                card_status.setObjectName("SettingsStatus")
+                tone(card_status, "warning")
         except RuntimeError:
             pass
 
@@ -3772,7 +3778,8 @@ class SettingsDialog(QDialog):
             self._local_downloading = None
             self.local_progress.setVisible(False)
             self._use_local_model(model_id)
-            self.local_status_label.setStyleSheet("color: #059669; font-size: 12px;")
+            self.local_status_label.setObjectName("SettingsValue")
+            tone(self.local_status_label, "success")
             self.local_status_label.setText(
                 f"{get_model(model_id)['name']} is installed and ready. "
                 "It starts automatically when you proofread."
@@ -3784,7 +3791,8 @@ class SettingsDialog(QDialog):
         try:
             self._local_downloading = None
             self.local_progress.setVisible(False)
-            self.local_status_label.setStyleSheet("color: #B91C1C; font-size: 12px;")
+            self.local_status_label.setObjectName("SettingsValue")
+            tone(self.local_status_label, "error")
             self.local_status_label.setText(f"Download failed: {error}")
             self._refresh_local_tab()
         except RuntimeError:
@@ -3794,7 +3802,7 @@ class SettingsDialog(QDialog):
         try:
             self._local_downloading = None
             self.local_progress.setVisible(False)
-            self.local_status_label.setStyleSheet("color: #78716C; font-size: 12px;")
+            self.local_status_label.setObjectName("SettingsRowHelper")
             self.local_status_label.setText(
                 "Download cancelled. You can resume it later from this tab."
             )
@@ -3851,9 +3859,11 @@ class SettingsDialog(QDialog):
         try:
             self.local_progress.setVisible(False)
             if ok:
-                self.local_status_label.setStyleSheet("color: #059669; font-size: 12px;")
+                self.local_status_label.setObjectName("SettingsValue")
+                tone(self.local_status_label, "success")
             else:
-                self.local_status_label.setStyleSheet("color: #B91C1C; font-size: 12px;")
+                self.local_status_label.setObjectName("SettingsValue")
+                tone(self.local_status_label, "error")
             self.local_status_label.setText(message)
             self._refresh_local_tab()
         except RuntimeError:
@@ -3862,7 +3872,7 @@ class SettingsDialog(QDialog):
     def _on_local_server_cancelled(self) -> None:
         try:
             self.local_progress.setVisible(False)
-            self.local_status_label.setStyleSheet("color: #78716C; font-size: 12px;")
+            self.local_status_label.setObjectName("SettingsRowHelper")
             self.local_status_label.setText("Local AI startup cancelled.")
             self._refresh_local_tab()
         except RuntimeError:
@@ -3891,46 +3901,44 @@ class SettingsDialog(QDialog):
             downloading = getattr(self, "_local_downloading", None) == model_id
             if downloading:
                 status_lbl.setText("Downloading…")
-                status_lbl.setStyleSheet("color: #B45309; font-size: 11px;")
+                status_lbl.setObjectName("SettingsStatus")
+                tone(status_lbl, "warning")
                 download_btn.setText("Downloading…")
                 download_btn.setEnabled(False)
             elif installed:
                 status_lbl.setText("Installed")
-                status_lbl.setStyleSheet("color: #059669; font-size: 11px;")
+                status_lbl.setObjectName("SettingsStatus")
+                tone(status_lbl, "success")
                 download_btn.setText("Installed")
                 download_btn.setEnabled(False)
                 remove_btn.setEnabled(True)
             else:
                 status_lbl.setText("Not downloaded")
-                status_lbl.setStyleSheet("color: #A89F9A; font-size: 11px;")
+                status_lbl.setObjectName("SettingsHint")
                 download_btn.setText("Download")
                 download_btn.setEnabled(True)
                 remove_btn.setEnabled(False)
             if is_active:
                 use_btn.setText("Active")
                 use_btn.setEnabled(False)
-                use_btn.setStyleSheet(
-                    "QPushButton { background-color: #1A3A2A; color: white; "
-                    "border: 1px solid #143024; border-radius: 10px; "
-                    "padding: 6px 12px; font-weight: 620; }"
-                    "QPushButton:disabled { background-color: #1A3A2A; color: white; "
-                    "border: 1px solid #143024; }"
-                )
+                use_btn.setObjectName("PrimaryBtn")
             else:
                 use_btn.setText("Use")
                 use_btn.setEnabled(installed)
-                use_btn.setStyleSheet("")
+                use_btn.setObjectName("")
+            restyle(use_btn)
 
         info = local_server_info()
         if info.get("running"):
-            self.local_engine_status.setStyleSheet("color: #059669; font-size: 12px;")
+            self.local_engine_status.setObjectName("SettingsValue")
+            tone(self.local_engine_status, "success")
             self.local_engine_status.setText(
                 f"Running · {info.get('model_id')} · {info.get('base_url')}"
             )
             self.btn_start_server.setEnabled(False)
             self.btn_stop_server.setEnabled(True)
         else:
-            self.local_engine_status.setStyleSheet("color: #A89F9A; font-size: 12px;")
+            self.local_engine_status.setObjectName("SettingsHint")
             self.local_engine_status.setText("Engine stopped. It starts automatically when you proofread.")
             self.btn_start_server.setEnabled(True)
             self.btn_stop_server.setEnabled(False)
@@ -3952,9 +3960,7 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(content)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setSpacing(20)
@@ -3980,19 +3986,18 @@ class SettingsDialog(QDialog):
         company_info_layout.setSpacing(2)
         
         lbl_company = QLabel(COMPANY_NAME)
-        lbl_company.setFont(_ui_font(16, QFont.Weight.Bold))
-        lbl_company.setStyleSheet("color: #292524;")
+        lbl_company.setObjectName("SettingsHero")
         
         lbl_reg = QLabel("A New Zealand registered company")
-        lbl_reg.setFont(_ui_font(12))
-        lbl_reg.setStyleSheet("color: #78716C;")
+        lbl_reg.setObjectName("SettingsValue")
+        lbl_reg.setObjectName("SettingsRowHelper")
         
-        lbl_email = QLabel(f'<a href="mailto:{SUPPORT_EMAIL}" style="color: #1A3A2A; text-decoration: none;">Contact: {SUPPORT_EMAIL}</a>')
-        lbl_email.setFont(_ui_font(12))
+        lbl_email = QLabel(f'<a href="mailto:{SUPPORT_EMAIL}" style=f"color: {SHELL_PRIMARY}; text-decoration: none;">Contact: {SUPPORT_EMAIL}</a>')
+        lbl_email.setObjectName("SettingsValue")
         lbl_email.setOpenExternalLinks(True)
         lbl_email.setCursor(Qt.CursorShape.PointingHandCursor)
-        lbl_website = QLabel(f'<a href="{PRODUCT_URL}" style="color: #1A3A2A; text-decoration: none;">{PRODUCT_URL.replace("https://", "")}</a>')
-        lbl_website.setFont(_ui_font(12))
+        lbl_website = QLabel(f'<a href="{PRODUCT_URL}" style=f"color: {SHELL_PRIMARY}; text-decoration: none;">{PRODUCT_URL.replace("https://", "")}</a>')
+        lbl_website.setObjectName("SettingsValue")
         lbl_website.setOpenExternalLinks(True)
         lbl_website.setCursor(Qt.CursorShape.PointingHandCursor)
         
@@ -4007,28 +4012,23 @@ class SettingsDialog(QDialog):
         
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("background-color: #E8E4E0; max-height: 1px;")
+        line.setObjectName("SettingsRowDivider")
         layout.addWidget(line)
 
-        title = QLabel("License Status")
-        title.setObjectName("SettingsTitle")
+        title = settings_page_header(
+            "License",
+            "What this copy of ByteProof is entitled to. "
+        )
         layout.addWidget(title)
         
         self.status_frame = QFrame()
         self.status_frame.setObjectName("LicenseCard")
-        self.status_frame.setStyleSheet("""
-            #LicenseCard {
-                background-color: rgba(255, 255, 255, 250);
-                border: 1px solid #E8E4E0;
-                border-radius: 12px;
-                padding: 16px;
-            }
-        """)
         vbox = QVBoxLayout(self.status_frame)
+        vbox.setContentsMargins(16, 14, 16, 14)
         vbox.setSpacing(6)
         
         self.lbl_status = QLabel()
-        self.lbl_status.setFont(_ui_font(14, QFont.Weight.Bold))
+        self.lbl_status.setObjectName("SettingsHero")
         
         self.lbl_msg = QLabel()
         
@@ -4039,7 +4039,8 @@ class SettingsDialog(QDialog):
 
         if lic_status == "licensed":
             self.lbl_status.setText("Licensed")
-            self.lbl_status.setStyleSheet("color: #065F46;")
+            self.lbl_status.setObjectName("SettingsStatus")
+            tone(self.lbl_status, "success")
             if lic_info.get("provider") == "polar":
                 self.lbl_msg.setText(
                     f"License key {lic_info.get('key_display', '')} is active "
@@ -4049,85 +4050,62 @@ class SettingsDialog(QDialog):
                 self.lbl_msg.setText(
                     f"Licensed to {lic_info.get('email', 'Unknown')}."
                 )
-            self.lbl_msg.setStyleSheet("color: #065F46; font-size: 12px;")
+            self.lbl_msg.setObjectName("SettingsValue")
+            tone(self.lbl_msg, "success")
         elif lic_status == "expired":
             self.lbl_status.setText("License Expired")
-            self.lbl_status.setStyleSheet("color: #B91C1C;")
+            self.lbl_status.setObjectName("SettingsStatus")
+            tone(self.lbl_status, "error")
             self.lbl_msg.setText(f"License for {lic_info.get('email', 'Unknown')} has expired. Please renew.")
-            self.lbl_msg.setStyleSheet("color: #B91C1C; font-size: 12px;")
+            self.lbl_msg.setObjectName("SettingsValue")
+            tone(self.lbl_msg, "error")
         elif trial["in_trial"]:
             self.lbl_status.setText(f"Free Trial ({trial['days_left']} day{'s' if trial['days_left'] != 1 else ''} left)")
-            self.lbl_status.setStyleSheet("color: #D97706;")
+            self.lbl_status.setObjectName("SettingsStatus")
+            tone(self.lbl_status, "warning")
             self.lbl_msg.setText("Support development by purchasing a license.")
-            self.lbl_msg.setStyleSheet("color: #78716C; font-size: 12px;")
+            self.lbl_msg.setObjectName("SettingsRowHelper")
         else:
             self.lbl_status.setText("Trial Expired")
-            self.lbl_status.setStyleSheet("color: #B91C1C;")
+            self.lbl_status.setObjectName("SettingsStatus")
+            tone(self.lbl_status, "error")
             self.lbl_msg.setText("Your free trial has ended. Purchase a license to continue.")
-            self.lbl_msg.setStyleSheet("color: #B91C1C; font-size: 12px;")
+            self.lbl_msg.setObjectName("SettingsValue")
+            tone(self.lbl_msg, "error")
         
         vbox.addWidget(self.lbl_status)
         vbox.addWidget(self.lbl_msg)
         layout.addWidget(self.status_frame)
         
         self.btn_buy = QPushButton("Purchase License ($49)")
-        self.btn_buy.setMinimumHeight(42)
+        self.btn_buy.setObjectName("PrimaryBtn")
         self.btn_buy.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_buy.setStyleSheet("""
-            QPushButton {
-                background-color: #1A3A2A;
-                color: white;
-                border-radius: 10px;
-                font-weight: 620;
-                border: 1px solid #143024;
-                padding: 10px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #143024;
-            }
-            QPushButton:pressed {
-                background-color: #0E2419;
-            }
-        """)
         self.btn_buy.clicked.connect(lambda: open_purchase_url(self))
-        layout.addWidget(self.btn_buy)
-        
+
         self.btn_auto_activate = QPushButton(already_paid_label())
-        self.btn_auto_activate.setFlat(True)
+        self.btn_auto_activate.setObjectName("LinkBtn")
         self.btn_auto_activate.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_auto_activate.setStyleSheet("""
-            QPushButton {
-                color: #1A3A2A;
-                text-align: left;
-                padding-left: 0;
-                border: none;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                text-decoration: underline;
-            }
-        """)
         self.btn_auto_activate.clicked.connect(self._auto_activate_from_email)
-        layout.addWidget(self.btn_auto_activate)
+
+        # One action row: the purchase button, with the quieter route for a
+        # licence bought on the website beside it.
+        license_actions = QHBoxLayout()
+        license_actions.setContentsMargins(0, 0, 0, 0)
+        license_actions.setSpacing(12)
+        license_actions.addWidget(self.btn_buy)
+        license_actions.addWidget(self.btn_auto_activate)
+        license_actions.addStretch(1)
+        layout.addLayout(license_actions)
 
         self.btn_deactivate = QPushButton("Deactivate This Computer")
-        self.btn_deactivate.setFlat(True)
+        self.btn_deactivate.setObjectName("DangerBtn")
         self.btn_deactivate.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_deactivate.setStyleSheet("""
-            QPushButton {
-                color: #B91C1C;
-                text-align: left;
-                padding-left: 0;
-                border: none;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                text-decoration: underline;
-            }
-        """)
         self.btn_deactivate.clicked.connect(self.deactivate_license_clicked)
-        layout.addWidget(self.btn_deactivate)
+        deactivate_row = QHBoxLayout()
+        deactivate_row.setContentsMargins(0, 0, 0, 0)
+        deactivate_row.addWidget(self.btn_deactivate)
+        deactivate_row.addStretch(1)
+        layout.addLayout(deactivate_row)
         
         if lic_status == "licensed" and lic_info.get("expiry") is None:
             self.btn_buy.setVisible(False)
@@ -4139,8 +4117,7 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         
         lbl_copy = QLabel(f"Version {APP_VERSION} · Copyright 2026 ByteMind Ltd. All rights reserved.")
-        lbl_copy.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_copy.setStyleSheet("color: #A89F9A; font-size: 11px; padding-top: 12px;")
+        lbl_copy.setObjectName("SettingsHint")
         layout.addWidget(lbl_copy)
 
         scroll.setWidget(content)
@@ -4155,60 +4132,41 @@ class SettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(content)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setSpacing(18)
 
-        title = QLabel("Updates")
-        title.setObjectName("SettingsTitle")
+        title = settings_page_header(
+            "Updates",
+            "Which build you are on, and whether a newer one exists. "
+        )
         layout.addWidget(title)
 
-        version_group = QGroupBox("Current Version")
-        version_layout = QVBoxLayout(version_group)
-        version_layout.setSpacing(10)
+        version_group, version_layout = settings_section("This Build")
 
         self.version_label = QLabel(APP_VERSION)
-        self.version_label.setStyleSheet(
-            "font-size: 30px; font-weight: 700; color: #1A3A2A; "
-            "letter-spacing: -0.5px;"
-        )
+        self.version_label.setObjectName("SettingsDisplay")
+        tone(self.version_label, "primary")
         version_layout.addWidget(self.version_label)
 
-        hint = QLabel(
-            "ByteProof checks for new versions automatically when the app "
-            "opens. You can also check for a newer version at any time."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #57534E; font-size: 12px; line-height: 1.5;")
-        version_layout.addWidget(hint)
+        channel = QLabel("Beta build" if "-" in APP_VERSION else "Release build")
+        channel.setObjectName("SettingsHint")
+        version_layout.addWidget(channel)
 
         self.update_check_btn = QPushButton("Check for Updates")
-        self.update_check_btn.setMinimumSize(180, 44)
+        self.update_check_btn.setObjectName("SmallBtn")
         self.update_check_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update_check_btn.setStyleSheet(
-            "QPushButton { background-color: #1A3A2A; color: #FFFFFF; "
-            "border: 1px solid #143024; border-radius: 12px; "
-            "padding: 10px 24px; font-size: 13px; font-weight: 600; }"
-            "QPushButton:hover { background-color: #143024; }"
-            "QPushButton:pressed { background-color: #0E2419; }"
-            "QPushButton:disabled { background-color: #A9C7B3; "
-            "color: rgba(255,255,255,180); border-color: #79A88A; }"
-        )
         self.update_check_btn.clicked.connect(self._start_update_check)
         version_layout.addWidget(
-            self.update_check_btn,
-            alignment=Qt.AlignmentFlag.AlignLeft,
+            settings_row(
+                "Check for updates",
+                "ByteProof checks on its own when the app opens.",
+                self.update_check_btn,
+            )
         )
 
-        self.update_status_label = QLabel("Ready when you are.")
-        self.update_status_label.setWordWrap(True)
-        self.update_status_label.setStyleSheet(
-            "color: #A89F9A; font-size: 11px;"
-        )
-        version_layout.addWidget(self.update_status_label)
+        version_layout.addSpacing(10)
 
         layout.addWidget(version_group)
 
@@ -4241,18 +4199,18 @@ class SettingsDialog(QDialog):
         
         if install_guide:
             guide_frame = QFrame()
-            guide_frame.setStyleSheet(
-                "QFrame { background-color: #EDF3EF; border: 1px solid #A9C7B3; "
-                "border-radius: 8px; padding: 10px; }"
-            )
+            guide_frame.setObjectName("SettingsCallout")
             guide_layout = QVBoxLayout(guide_frame)
+            guide_layout.setContentsMargins(16, 14, 16, 14)
+            guide_layout.setSpacing(3)
             guide_title = QLabel("Getting Started")
-            guide_title.setFont(_ui_font(12, QFont.Weight.Bold))
-            guide_title.setStyleSheet("color: #1F5335;")
+            guide_title.setObjectName("SettingsCardTitle")
+            tone(guide_title, "primary")
             guide_layout.addWidget(guide_title)
             guide_text = QLabel(install_guide)
             guide_text.setWordWrap(True)
-            guide_text.setStyleSheet("color: #143024; font-size: 12px;")
+            guide_text.setObjectName("SettingsValue")
+            tone(guide_text, "primary")
             guide_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             guide_layout.addWidget(guide_text)
             layout.addWidget(guide_frame)
@@ -4279,7 +4237,7 @@ class SettingsDialog(QDialog):
                 "Applications or run 'ollama serve' in Terminal."
             )
             ollama_note.setWordWrap(True)
-            ollama_note.setStyleSheet("color: #78716C; font-size: 11px;")
+            ollama_note.setObjectName("SettingsHint")
             layout.addWidget(ollama_note)
         else:
             layout.addWidget(QLabel("API Keys (Up to 5):"))
@@ -4297,17 +4255,11 @@ class SettingsDialog(QDialog):
 
         test_row = QHBoxLayout()
         test_btn = QPushButton("Test Connection")
+        test_btn.setObjectName("SmallBtn")
         test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        test_btn.setStyleSheet(
-            "QPushButton { background-color: #EDF3EF; color: #143024; "
-            "border: 1px solid #A9C7B3; border-radius: 10px; padding: 8px 14px; "
-            "font-weight: 600; font-size: 12px; }"
-            "QPushButton:hover { background-color: #D6E4DB; }"
-            "QPushButton:disabled { color: #A89F9A; background-color: #F5F0EB; border-color: #E8E4E0; }"
-        )
         test_result_lbl = QLabel("")
         test_result_lbl.setWordWrap(True)
-        test_result_lbl.setStyleSheet("color: #78716C; font-size: 11px;")
+        test_result_lbl.setObjectName("SettingsHint")
         test_row.addWidget(test_btn)
         test_row.addWidget(test_result_lbl, stretch=1)
         layout.addLayout(test_row)
@@ -4333,7 +4285,7 @@ class SettingsDialog(QDialog):
             test_btn.setEnabled(False)
             test_btn.setText("Testing…")
             test_result_lbl.setText("")
-            test_result_lbl.setStyleSheet("color: #78716C; font-size: 11px;")
+            test_result_lbl.setObjectName("SettingsHint")
 
             raw_url = input_url.text().strip()
             while raw_url.endswith("/"):
@@ -4363,9 +4315,11 @@ class SettingsDialog(QDialog):
                 test_btn.setEnabled(True)
                 test_btn.setText("Test Connection")
                 if ok:
-                    test_result_lbl.setStyleSheet("color: #059669; font-size: 11px; font-weight: 600;")
+                    test_result_lbl.setObjectName("SettingsStatus")
+                    tone(test_result_lbl, "success")
                 else:
-                    test_result_lbl.setStyleSheet("color: #B91C1C; font-size: 11px;")
+                    test_result_lbl.setObjectName("SettingsStatus")
+                    tone(test_result_lbl, "error")
                 test_result_lbl.setText(message)
             except RuntimeError:
                 # Dialog was destroyed while the test was running.
@@ -4587,7 +4541,8 @@ class SettingsDialog(QDialog):
 
         if lic_status == "licensed":
             self.lbl_status.setText("Licensed")
-            self.lbl_status.setStyleSheet("color: #065F46;")
+            self.lbl_status.setObjectName("SettingsStatus")
+            tone(self.lbl_status, "success")
             if lic_info.get("provider") == "polar":
                 self.lbl_msg.setText(
                     f"License key {lic_info.get('key_display', '')} is active "
@@ -4598,7 +4553,8 @@ class SettingsDialog(QDialog):
                     f"Licensed to {lic_info.get('email', 'Unknown')}. "
                     "Works on up to 2 computers."
                 )
-            self.lbl_msg.setStyleSheet("color: #065F46; font-size: 12px;")
+            self.lbl_msg.setObjectName("SettingsValue")
+            tone(self.lbl_msg, "success")
             if lic_info.get("expiry") is None:
                 self.btn_buy.setVisible(False)
                 self.btn_auto_activate.setVisible(False)
@@ -4609,15 +4565,18 @@ class SettingsDialog(QDialog):
                 self.btn_deactivate.setVisible(False)
         elif lic_status == "expired":
             self.lbl_status.setText("License Expired")
-            self.lbl_status.setStyleSheet("color: #B91C1C;")
+            self.lbl_status.setObjectName("SettingsStatus")
+            tone(self.lbl_status, "error")
             self.lbl_msg.setText(f"License for {lic_info.get('email', 'Unknown')} has expired. Please renew.")
-            self.lbl_msg.setStyleSheet("color: #B91C1C; font-size: 12px;")
+            self.lbl_msg.setObjectName("SettingsValue")
+            tone(self.lbl_msg, "error")
             self.btn_buy.setVisible(True)
             self.btn_auto_activate.setVisible(True)
             self.btn_deactivate.setVisible(False)
         elif trial["in_trial"]:
             self.lbl_status.setText(f"Free Trial ({trial['days_left']} day{'s' if trial['days_left'] != 1 else ''} left)")
-            self.lbl_status.setStyleSheet("color: #D97706;")
+            self.lbl_status.setObjectName("SettingsStatus")
+            tone(self.lbl_status, "warning")
             if POLAR_ORGANIZATION_ID:
                 self.lbl_msg.setText(
                     "Everything included for 7 days. Buy a license, then paste "
@@ -4628,13 +4587,14 @@ class SettingsDialog(QDialog):
                     "Everything included for 7 days. Buy a license, or activate "
                     "with the email you used at checkout."
                 )
-            self.lbl_msg.setStyleSheet("color: #78716C; font-size: 12px;")
+            self.lbl_msg.setObjectName("SettingsRowHelper")
             self.btn_buy.setVisible(True)
             self.btn_auto_activate.setVisible(True)
             self.btn_deactivate.setVisible(False)
         else:
             self.lbl_status.setText("Trial Expired")
-            self.lbl_status.setStyleSheet("color: #B91C1C;")
+            self.lbl_status.setObjectName("SettingsStatus")
+            tone(self.lbl_status, "error")
             if POLAR_ORGANIZATION_ID:
                 self.lbl_msg.setText(
                     "Your free trial has ended. Buy a license, then paste the "
@@ -4645,7 +4605,8 @@ class SettingsDialog(QDialog):
                     "Your free trial has ended. Buy a license, or activate "
                     "with the email you used at checkout."
                 )
-            self.lbl_msg.setStyleSheet("color: #B91C1C; font-size: 12px;")
+            self.lbl_msg.setObjectName("SettingsValue")
+            tone(self.lbl_msg, "error")
             self.btn_buy.setVisible(True)
             self.btn_auto_activate.setVisible(True)
             self.btn_deactivate.setVisible(False)
@@ -4833,12 +4794,6 @@ class ProofreaderApp(QMainWindow):
         live_layout.addWidget(self.live_status_label, stretch=1)
         self.live_action_btn = QPushButton("Test now")
         self.live_action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.live_action_btn.setStyleSheet(
-            "QPushButton { background-color: #F5F0EB; color: #57534E;"
-            " border: 1px solid #E8E4E0; border-radius: 8px;"
-            " padding: 4px 12px; font-size: 11px; font-weight: 600; }"
-            "QPushButton:hover { background-color: #EDE8E3; }"
-        )
         self.live_action_btn.clicked.connect(self._on_live_action)
         live_layout.addWidget(self.live_action_btn)
         layout.addWidget(live_container)
@@ -4862,26 +4817,12 @@ class ProofreaderApp(QMainWindow):
         self.apply_btn = QPushButton("Apply")
         self.apply_btn.setVisible(False)
         self.apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.apply_btn.setStyleSheet(
-            "QPushButton { background-color: #1A3A2A; color: white; "
-            "border: 1px solid #143024; border-radius: 8px; padding: 4px 14px; "
-            "font-size: 11px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #143024; }"
-            "QPushButton:disabled { background-color: #A9C7B3; color: #F5F0EB; border-color: #79A88A; }"
-        )
         self.apply_btn.clicked.connect(self._apply_pending_generic)
         diff_header.addWidget(self.apply_btn)
 
         self.copy_btn = QPushButton("Copy")
         self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.copy_btn.setEnabled(False)
-        self.copy_btn.setStyleSheet(
-            "QPushButton { background-color: #EDF3EF; color: #143024; "
-            "border: 1px solid #A9C7B3; border-radius: 8px; padding: 4px 12px; "
-            "font-size: 11px; font-weight: 600; }"
-            "QPushButton:hover { background-color: #D6E4DB; }"
-            "QPushButton:disabled { color: #A89F9A; background-color: #F5F0EB; border-color: #E8E4E0; }"
-        )
         self.copy_btn.clicked.connect(self._copy_corrected_text)
         diff_header.addWidget(self.copy_btn)
         
@@ -5484,17 +5425,6 @@ class ProofreaderApp(QMainWindow):
         dlg.setWindowTitle("Accessibility Permission Required")
         dlg.setModal(True)
         dlg.setFixedSize(460, 260)
-        dlg.setStyleSheet("""
-            QDialog { background-color: #FAF8F5; }
-            QLabel#PermTitle { font-size: 15px; font-weight: 700; color: #292524; }
-            QLabel#PermDesc { font-size: 13px; color: #57534E; line-height: 1.5; }
-            QLabel#PermTip { font-size: 11px; color: #78716C; }
-            QPushButton { border-radius: 8px; padding: 10px 22px; font-size: 13px; font-weight: 600; min-width: 130px; }
-            QPushButton#PermOpenBtn { background-color: #1A3A2A; color: white; border: none; }
-            QPushButton#PermOpenBtn:hover { background-color: #143024; }
-            QPushButton#PermCancelBtn { background-color: #E8E4E0; color: #57534E; border: 1px solid #D6D0CA; }
-            QPushButton#PermCancelBtn:hover { background-color: #D6D0CA; }
-        """)
 
         layout = QVBoxLayout(dlg)
         layout.setSpacing(12)
@@ -5614,58 +5544,104 @@ class ProofreaderApp(QMainWindow):
         quit_action.triggered.connect(self.request_quit)
         tray_menu.addAction(quit_action)
 
-        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_menu = tray_menu
+        if platform.system() == "Darwin":
+            # macOS 27 opens a status item's menu through NSSceneStatusItem.
+            # Qt's observer for the "menu began tracking" notification then
+            # asks the current event for its clickCount, and in that path the
+            # current event is a scene action rather than a mouse event: the
+            # ObjC assertion that follows aborts the process before the menu
+            # is even on screen (crash reports 2026-09-18 20:27 and 20:28,
+            # NSMenuTrackingSession -> libqcocoa -> -[NSEvent clickCount]).
+            # Letting the click reach us and opening the menu ourselves keeps
+            # the status-item popup path out of the picture entirely.
+            self.tray_icon.setContextMenu(None)
+        else:
+            self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.setToolTip(APP_NAME)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """A click on the menu bar icon opens the menu, or the window.
+
+        On macOS the menu is ours to open (see _setup_system_tray): a trigger
+        means "show me the menu", a double click means "show me the window".
+        Where the platform owns the context menu, a trigger still means the
+        window, which is how this behaved before.
+        """
+        double = QSystemTrayIcon.ActivationReason.DoubleClick
+        if reason == double:
+            self.show_and_raise()
+            return
         if reason in (
             QSystemTrayIcon.ActivationReason.Trigger,
-            QSystemTrayIcon.ActivationReason.DoubleClick,
+            QSystemTrayIcon.ActivationReason.Context,
         ):
-            self.show_and_raise()
+            if self.tray_icon.contextMenu() is None or (
+                reason == QSystemTrayIcon.ActivationReason.Context
+            ):
+                self._show_tray_menu()
+            else:
+                self.show_and_raise()
+
+    def _show_tray_menu(self) -> None:
+        """Open the menu bar menu at the pointer.
+
+        Qt raises the popup here rather than AppKit raising it from the status
+        item, which is the only way to open it without the macOS 27 assertion
+        described in _setup_system_tray.
+        """
+        tray_menu = getattr(self, "tray_menu", None)
+        if tray_menu is None:
+            return
+        _debug_log("APP: tray menu opened")
+        tray_menu.popup(QCursor.pos())
 
     def eventFilter(self, a0: Any, a1: Any) -> bool:  # pyright: ignore[reportAny]
-        # An ApplicationActivate can come from the Dock, a Cmd-Tab pass, or one
-        # of our own floating helpers. In menu-bar-only mode the app is not in
-        # Cmd-Tab and the window is opened deliberately from the tray icon, so
-        # activation must never pop it over the user's document. If the user
-        # chose regular Dock mode, opening from the Dock still works.
-        if a1.type() == QEvent.Type.ApplicationActivate:
-            if (
-                self.isHidden()
-                and not self._menu_bar_only_enabled()
-                and not self._tray_menu_open
-                and not self._helper_woke_the_app()
-            ):
-                _debug_log("APP: activation — showing the main window")
-                self.show()
-                self.raise_()
-                self.activateWindow()
-        elif a1.type() == QEvent.Type.FileOpen:
-            url = a1.url().toString()
-            if url.startswith("byteproof://"):
-                QTimer.singleShot(0, lambda: self._start_activation("url", url))
-        elif a1.type() == QEvent.Type.KeyPress and a1.key() == Qt.Key.Key_Escape:
-            if self._has_active_task():
-                now = time.monotonic()
-                if now - self._last_escape_ts < 0.7:
-                    self._last_escape_ts = 0.0
-                    self._cancel_active_tasks()
-                    self.status_label.setText("Cancelling task…")
+        try:
+            # An ApplicationActivate can come from the Dock, a Cmd-Tab pass, or one
+            # of our own floating helpers. In menu-bar-only mode the app is not in
+            # Cmd-Tab and the window is opened deliberately from the tray icon, so
+            # activation must never pop it over the user's document. If the user
+            # chose regular Dock mode, opening from the Dock still works.
+            if a1.type() == QEvent.Type.ApplicationActivate:
+                if (
+                    self.isHidden()
+                    and not self._menu_bar_only_enabled()
+                    and not self._tray_menu_open
+                    and not self._helper_woke_the_app()
+                ):
+                    _debug_log("APP: activation — showing the main window")
+                    self.show()
+                    self.raise_()
+                    self.activateWindow()
+            elif a1.type() == QEvent.Type.FileOpen:
+                url = a1.url().toString()
+                if url.startswith("byteproof://"):
+                    QTimer.singleShot(0, lambda: self._start_activation("url", url))
+            elif a1.type() == QEvent.Type.KeyPress and a1.key() == Qt.Key.Key_Escape:
+                if self._has_active_task():
+                    now = time.monotonic()
+                    if now - self._last_escape_ts < 0.7:
+                        self._last_escape_ts = 0.0
+                        self._cancel_active_tasks()
+                        self.status_label.setText("Cancelling task…")
+                        dlg = self._active_settings_dialog
+                        if dlg is not None and hasattr(dlg, "local_status_label"):
+                            dlg.local_status_label.setText("Cancelling download…")
+                        return True
+                    self._last_escape_ts = now
+                    self.status_label.setText("Press Esc again to cancel.")
                     dlg = self._active_settings_dialog
                     if dlg is not None and hasattr(dlg, "local_status_label"):
-                        dlg.local_status_label.setText("Cancelling download…")
+                        dlg.local_status_label.setText("Press Esc again to cancel.")
                     return True
-                self._last_escape_ts = now
-                self.status_label.setText("Press Esc again to cancel.")
-                dlg = self._active_settings_dialog
-                if dlg is not None and hasattr(dlg, "local_status_label"):
-                    dlg.local_status_label.setText("Press Esc again to cancel.")
-                return True
-        return super().eventFilter(a0, a1)
+            return super().eventFilter(a0, a1)
 
+        except Exception as exc:  # see the note above
+            print(f"ByteProof: eventFilter failed: {exc}")
+            return False
     def _has_active_task(self) -> bool:
         for worker in (
             getattr(self, "worker", None),
@@ -6195,9 +6171,8 @@ class ProofreaderApp(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #F9F7F4, stop:1 #F1EDE8);
             }
-            QWidget {
+            #RootPanel QWidget {
                 color: #292524;
-                font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 font-size: 13px;
             }
             #SettingsBtn {
@@ -6257,7 +6232,7 @@ class ProofreaderApp(QMainWindow):
                 border: 1px solid #E6E0D9;
                 border-radius: 16px;
             }
-            QTextEdit {
+            #RootPanel QTextEdit {
                 background-color: #FFFFFF;
                 border: 1px solid #E8E4E0;
                 border-radius: 12px;
@@ -6267,10 +6242,10 @@ class ProofreaderApp(QMainWindow):
                 line-height: 1.55;
                 color: #44403C;
             }
-            QTextEdit:focus {
+            #RootPanel QTextEdit:focus {
                 border-color: #D6D0CA;
             }
-            QLineEdit {
+            #RootPanel QLineEdit {
                 background-color: #FFFFFF;
                 border: 1px solid #E8E4E0;
                 border-radius: 10px;
@@ -6279,10 +6254,10 @@ class ProofreaderApp(QMainWindow):
                 selection-color: #431407;
                 color: #292524;
             }
-            QLineEdit:focus {
+            #RootPanel QLineEdit:focus {
                 border-color: #1A3A2A;
             }
-            QComboBox {
+            #RootPanel QComboBox {
                 background-color: #FFFFFF;
                 border: 1px solid #DDD6CF;
                 border-radius: 12px;
@@ -6292,23 +6267,23 @@ class ProofreaderApp(QMainWindow):
                 font-size: 13px;
                 font-weight: 520;
             }
-            QComboBox:hover {
+            #RootPanel QComboBox:hover {
                 border-color: #B9AFA6;
                 background-color: #FEFDFC;
             }
-            QComboBox:focus {
+            #RootPanel QComboBox:focus {
                 border-color: #1A3A2A;
             }
-            QComboBox:on {
+            #RootPanel QComboBox:on {
                 border-color: #1A3A2A;
                 background-color: #FFFFFF;
             }
-            QComboBox:disabled {
+            #RootPanel QComboBox:disabled {
                 background-color: #F5F0EB;
                 color: #A89F9A;
                 border-color: #E8E4E0;
             }
-            QComboBox::drop-down {
+            #RootPanel QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
                 width: 38px;
@@ -6316,12 +6291,12 @@ class ProofreaderApp(QMainWindow):
                 border-top-right-radius: 12px;
                 border-bottom-right-radius: 12px;
             }
-            QComboBox::down-arrow {
+            #RootPanel QComboBox::down-arrow {
                 image: url("__CHEVRON_URL__");
                 width: 12px;
                 height: 8px;
             }
-            QComboBox QAbstractItemView {
+            #RootPanel QComboBox QAbstractItemView {
                 background-color: #FFFFFF;
                 border: 1px solid #E3DCD4;
                 border-radius: 14px;
@@ -6329,23 +6304,23 @@ class ProofreaderApp(QMainWindow):
                 outline: none;
                 selection-background-color: transparent;
             }
-            QComboBox QAbstractItemView::item {
+            #RootPanel QComboBox QAbstractItemView::item {
                 min-height: 34px;
                 padding: 6px 12px;
                 border-radius: 9px;
                 color: #44403C;
                 font-size: 13px;
             }
-            QComboBox QAbstractItemView::item:hover {
+            #RootPanel QComboBox QAbstractItemView::item:hover {
                 background-color: #F3EFEA;
                 color: #292524;
             }
-            QComboBox QAbstractItemView::item:selected {
+            #RootPanel QComboBox QAbstractItemView::item:selected {
                 background-color: #E7F0EA;
                 color: #143024;
                 font-weight: 600;
             }
-            QPushButton {
+            #RootPanel QPushButton {
                 background-color: #FFFFFF;
                 border: 1px solid #E8E4E0;
                 border-radius: 10px;
@@ -6355,20 +6330,20 @@ class ProofreaderApp(QMainWindow):
                 font-size: 13px;
                 min-width: 80px;
             }
-            QPushButton:hover {
+            #RootPanel QPushButton:hover {
                 background-color: #FAF8F5;
                 border-color: #C4BDB7;
             }
-            QPushButton:pressed {
+            #RootPanel QPushButton:pressed {
                 background-color: #F5F0EB;
                 border-color: #A89F9A;
             }
-            QPushButton:disabled {
+            #RootPanel QPushButton:disabled {
                 background-color: #FAF8F5;
                 color: #C4BDB7;
                 border-color: #F0ECE8;
             }
-            QPushButton#ProofreadBtn {
+            #RootPanel QPushButton#ProofreadBtn {
                 background-color: #1A3A2A;
                 color: #FFFFFF;
                 border: 1px solid #143024;
@@ -6376,39 +6351,39 @@ class ProofreaderApp(QMainWindow):
                 font-size: 14px;
                 letter-spacing: -0.2px;
             }
-            QPushButton#ProofreadBtn:hover {
+            #RootPanel QPushButton#ProofreadBtn:hover {
                 background-color: #143024;
                 border-color: #0E2419;
             }
-            QPushButton#ProofreadBtn:pressed {
+            #RootPanel QPushButton#ProofreadBtn:pressed {
                 background-color: #0E2419;
                 border-color: #0E2419;
             }
-            QPushButton#ProofreadBtn:disabled {
+            #RootPanel QPushButton#ProofreadBtn:disabled {
                 background-color: #A9C7B3;
                 color: rgba(255, 255, 255, 180);
                 border-color: #79A88A;
             }
-            QPushButton#SecondaryBtn {
+            #RootPanel QPushButton#SecondaryBtn {
                 background-color: rgba(255, 255, 255, 200);
                 color: #78716C;
                 border: 1px solid #E8E4E0;
                 font-weight: 420;
             }
-            QPushButton#SecondaryBtn:hover {
+            #RootPanel QPushButton#SecondaryBtn:hover {
                 background-color: #FEF2F2;
                 color: #B91C1C;
                 border-color: #FECACA;
             }
-            QPushButton#SecondaryBtn:pressed {
+            #RootPanel QPushButton#SecondaryBtn:pressed {
                 background-color: #FEE2E2;
                 border-color: #FCA5A5;
             }
-            QListWidget {
+            #RootPanel QListWidget {
                 outline: 0;
                 background-color: transparent;
             }
-            QGroupBox {
+            #RootPanel QGroupBox {
                 font-weight: 620;
                 font-size: 12px;
                 color: #57534E;
@@ -6418,7 +6393,7 @@ class ProofreaderApp(QMainWindow):
                 background-color: rgba(255, 255, 255, 235);
                 padding-top: 30px;
             }
-            QGroupBox::title {
+            #RootPanel QGroupBox::title {
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
                 left: 16px;
@@ -6427,7 +6402,7 @@ class ProofreaderApp(QMainWindow):
                 color: #1F5335;
                 font-weight: 700;
             }
-            QSlider::groove:horizontal {
+            #RootPanel QSlider::groove:horizontal {
                 border: none;
                 height: 6px;
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -6435,7 +6410,7 @@ class ProofreaderApp(QMainWindow):
                 margin: 2px 0;
                 border-radius: 3px;
             }
-            QSlider::handle:horizontal {
+            #RootPanel QSlider::handle:horizontal {
                 background: #FFFFFF;
                 border: 2px solid #D6D0CA;
                 width: 20px;
@@ -6443,64 +6418,64 @@ class ProofreaderApp(QMainWindow):
                 margin: -8px 0;
                 border-radius: 10px;
             }
-            QSlider::handle:horizontal:hover {
+            #RootPanel QSlider::handle:horizontal:hover {
                 border-color: #1A3A2A;
                 background: #F2EFE5;
             }
-            QSlider::sub-page:horizontal {
+            #RootPanel QSlider::sub-page:horizontal {
                 background: transparent;
                 border-radius: 3px;
             }
-            QCheckBox {
+            #RootPanel QCheckBox {
                 spacing: 10px;
                 color: #44403C;
             }
-            QCheckBox::indicator {
+            #RootPanel QCheckBox::indicator {
                 width: 20px;
                 height: 20px;
                 border: 2px solid #D6D0CA;
                 border-radius: 6px;
                 background-color: #FFFFFF;
             }
-            QCheckBox::indicator:checked {
+            #RootPanel QCheckBox::indicator:checked {
                 background-color: #1A3A2A;
                 border-color: #1A3A2A;
             }
-            QCheckBox::indicator:hover {
+            #RootPanel QCheckBox::indicator:hover {
                 border-color: #1A3A2A;
             }
-            QScrollBar:vertical {
+            #RootPanel QScrollBar:vertical {
                 background: transparent;
                 width: 8px;
                 margin: 4px 2px;
             }
-            QScrollBar::handle:vertical {
+            #RootPanel QScrollBar::handle:vertical {
                 background: #D6D0CA;
                 border-radius: 4px;
                 min-height: 32px;
             }
-            QScrollBar::handle:vertical:hover {
+            #RootPanel QScrollBar::handle:vertical:hover {
                 background: #A89F9A;
             }
             QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {
+            #RootPanel QScrollBar::sub-line:vertical {
                 height: 0;
             }
-            QScrollBar:horizontal {
+            #RootPanel QScrollBar:horizontal {
                 background: transparent;
                 height: 8px;
                 margin: 2px 4px;
             }
-            QScrollBar::handle:horizontal {
+            #RootPanel QScrollBar::handle:horizontal {
                 background: #D6D0CA;
                 border-radius: 4px;
                 min-width: 32px;
             }
-            QScrollBar::handle:horizontal:hover {
+            #RootPanel QScrollBar::handle:horizontal:hover {
                 background: #A89F9A;
             }
             QScrollBar::add-line:horizontal,
-            QScrollBar::sub-line:horizontal {
+            #RootPanel QScrollBar::sub-line:horizontal {
                 width: 0;
             }
             QToolTip {
@@ -6529,14 +6504,14 @@ class ProofreaderApp(QMainWindow):
             QMessageBox {
                 background-color: #F9F7F4;
             }
-            QProgressBar {
+            #RootPanel QProgressBar {
                 background-color: #EFE9E3;
                 border: none;
                 border-radius: 6px;
                 text-align: center;
                 color: transparent;
             }
-            QProgressBar::chunk {
+            #RootPanel QProgressBar::chunk {
                 background-color: #1A3A2A;
                 border-radius: 6px;
             }
@@ -7616,28 +7591,6 @@ class ProofreaderApp(QMainWindow):
             dlg.setWindowTitle("Unusual Result — Review Needed")
             dlg.setModal(True)
             dlg.setFixedSize(480, 280)
-            dlg.setStyleSheet("""
-                QDialog { background-color: #FAF8F5; }
-                QLabel#ReviewTitle { font-size: 15px; font-weight: 700; color: #292524; }
-                QLabel#ReviewDesc { font-size: 13px; color: #57534E; line-height: 1.5; }
-                QLabel#ReviewHint { font-size: 11px; color: #78716C; }
-                QPushButton { 
-                    border-radius: 8px; padding: 9px 20px; 
-                    font-size: 13px; font-weight: 600; min-width: 120px;
-                }
-                QPushButton#AcceptBtn {
-                    background-color: #059669; color: white; border: none;
-                }
-                QPushButton#AcceptBtn:hover { background-color: #047857; }
-                QPushButton#ReviewBtn {
-                    background-color: #F59E0B; color: white; border: none;
-                }
-                QPushButton#ReviewBtn:hover { background-color: #D97706; }
-                QPushButton#RejectBtn {
-                    background-color: #E8E4E0; color: #57534E; border: 1px solid #D6D0CA;
-                }
-                QPushButton#RejectBtn:hover { background-color: #D6D0CA; }
-            """)
 
             dlg_layout = QVBoxLayout(dlg)
             dlg_layout.setSpacing(12)

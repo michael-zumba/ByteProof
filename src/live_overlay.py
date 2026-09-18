@@ -297,19 +297,22 @@ class LiveOverlay(QWidget):
         return self._popup.geometry().adjusted(-16, -28, 16, 28).contains(pos)
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        pen = QPen(QColor(UNDERLINE_COLOR_HEX))
-        pen.setWidth(2)
-        pen.setStyle(Qt.PenStyle.DashLine)
-        painter.setPen(pen)
-        origin = self.geometry().topLeft()
-        for span in self._spans:
-            rect = span.rect.translated(-origin)
-            painter.drawLine(
-                rect.left(), rect.bottom() - 2, rect.right(), rect.bottom() - 2
-            )
-        painter.end()
+        try:
+            painter = QPainter(self)
+            pen = QPen(QColor(UNDERLINE_COLOR_HEX))
+            pen.setWidth(2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            origin = self.geometry().topLeft()
+            for span in self._spans:
+                rect = span.rect.translated(-origin)
+                painter.drawLine(
+                    rect.left(), rect.bottom() - 2, rect.right(), rect.bottom() - 2
+                )
+            painter.end()
 
+        except Exception as exc:  # see the note above
+            print(f"ByteProof: paintEvent failed: {exc}")
     def _show_popup(self, index: int) -> None:
         self._hide_popup()
         if not (0 <= index < len(self._spans)):
@@ -421,9 +424,12 @@ class WordSuggestionCard(QWidget):
         self._diff_labels: list[QLabel] = []
 
     def resizeEvent(self, event) -> None:
-        self._refresh_diff_heights()
-        super().resizeEvent(event)
+        try:
+            self._refresh_diff_heights()
+            super().resizeEvent(event)
 
+        except Exception as exc:  # see the note above
+            print(f"ByteProof: resizeEvent failed: {exc}")
     def _refresh_diff_heights(self) -> None:
         """Recompute wrapped-label heights for the current widths.
 

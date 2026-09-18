@@ -2166,8 +2166,18 @@ def test_no_clipboard_read_after_an_apply_in_mail(monkeypatch):
 # --- Live Check page: per-app triggers in their own menu --------------------
 
 
+def _settings_section_titles(page) -> list[str]:
+    """The headings a settings page shows, in the order it shows them."""
+    from PyQt6.QtWidgets import QLabel
+
+    return [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.objectName() == "SettingsSectionLabel"
+    ]
+
+
 def test_live_check_page_owns_the_live_settings() -> None:
-    from PyQt6.QtWidgets import QGroupBox
 
     app, owner, dialog = _make_settings_dialog()
     labels = [
@@ -2176,8 +2186,13 @@ def test_live_check_page_owns_the_live_settings() -> None:
     # A top-level menu, right after General.
     assert labels[1] == "Live Check"
 
-    live_sections = [w.title() for w in dialog.live_page.findChildren(QGroupBox)]
-    assert live_sections == ["Live Check", "Suggestions", "Hotkeys"]
+    # Sections are flat headings now, not nested cards: what a page owns is
+    # the set of headings it shows.
+    assert _settings_section_titles(dialog.live_page) == [
+        "LIVE CHECK",
+        "SUGGESTIONS",
+        "HOTKEYS",
+    ]
 
     # Everything about the feature lives here now...
     assert hasattr(dialog, "chk_live_preview")
@@ -2188,10 +2203,10 @@ def test_live_check_page_owns_the_live_settings() -> None:
     assert hasattr(dialog, "apply_all_hotkey_edit")
 
     # ...and the General page no longer carries a live section.
-    general_sections = [
-        w.title() for w in dialog.general_page.findChildren(QGroupBox)
-    ]
-    assert not any("Live" in title for title in general_sections)
+    assert not any(
+        "LIVE" in title
+        for title in _settings_section_titles(dialog.general_page)
+    )
     _dispose(dialog, owner, app)
 
 
@@ -4263,3 +4278,684 @@ def test_upgrade_persists_the_long_selection_limit(monkeypatch, tmp_path):
     assert saved["app_version"] == settings_mod.APP_VERSION
     assert saved["live_preview"]["max_chars"] == 4000
     assert saved["last_run_version"] == "2.1.1-beta.7"
+
+
+# --- the settings surface draws on the shared shell tokens -------------------
+#
+# The dialog used to carry its palette in about two hundred inline stylesheets
+# holding thirty-six different hex values, next to eleven nested group boxes.
+# These tests hold the replacement in place: one sheet, flat sections, and a
+# single status line.
+
+
+def test_settings_surface_has_no_colour_of_its_own() -> None:
+    import re
+    from pathlib import Path
+
+    from src.ui_theme import SHELL_PRIMARY, settings_stylesheet
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "gui.py"
+    ).read_text(encoding="utf-8")
+    region = source[
+        source.index("class SettingsDialog") : source.index("class ProofreaderApp")
+    ]
+    assert re.findall(r"#[0-9A-Fa-f]{6}", region) == []
+
+    sheet = settings_stylesheet("/tmp/assets")
+    assert SHELL_PRIMARY in sheet
+    assert sheet.count("{") == sheet.count("}")
+
+
+def test_settings_status_line_reports_every_kind() -> None:
+    app, owner, dialog = _make_settings_dialog()
+
+    dialog._set_status("Saved to the Keychain.", "success")
+    assert dialog.status_text.text() == "Saved to the Keychain."
+    assert dialog.status_text.property("kind") == "success"
+    assert dialog.status_glyph.text() != ""
+
+    dialog._set_status("Could not reach the provider.", "error")
+    assert dialog.status_text.property("kind") == "error"
+    assert dialog.status_glyph.text() != ""
+
+    dialog._set_status("Checking for updates…")
+    assert dialog.status_text.property("kind") == "info"
+    assert dialog.status_glyph.text() == ""
+    _dispose(dialog, owner, app)
+
+
+def test_every_settings_sidebar_row_carries_an_icon() -> None:
+    app, owner, dialog = _make_settings_dialog()
+    for row in range(dialog.sidebar.count()):
+        item = dialog.sidebar.item(row)
+        assert not item.icon().isNull(), f"row {row} ({item.text()}) has no icon"
+    _dispose(dialog, owner, app)
+
+
+def test_a_switch_row_keeps_the_words_out_of_the_checkbox() -> None:
+    from PyQt6.QtWidgets import QLabel
+
+    app, owner, dialog = _make_settings_dialog()
+    assert dialog.chk_live_preview.text() == ""
+    row = dialog.chk_live_preview.parent()
+    titles = [
+        label.text()
+        for label in row.findChildren(QLabel)
+        if label.objectName() == "SettingsRowTitle"
+    ]
+    helpers = [
+        label.text()
+        for label in row.findChildren(QLabel)
+        if label.objectName() == "SettingsRowHelper"
+    ]
+    assert titles == ["Suggest changes as I select text"]
+    # The explanation is the tooltip on the row's icon, not a second line.
+    assert helpers == []
+    tooltips = [
+        label.toolTip() for label in row.findChildren(QLabel) if label.toolTip()
+    ]
+    assert tooltips and tooltips[0].startswith("Select text anywhere")
+    _dispose(dialog, owner, app)
+
+
+def test_settings_pages_are_flat_sections_not_nested_cards() -> None:
+    from PyQt6.QtWidgets import QGroupBox
+
+    app, owner, dialog = _make_settings_dialog()
+    for attr in (
+        "general_page",
+        "live_page",
+        "automation_page",
+        "updates_page",
+    ):
+        page = getattr(dialog, attr)
+        assert not page.findChildren(QGroupBox), attr
+    assert _settings_section_titles(dialog.general_page)[:2] == [
+        "APP & WINDOW",
+        "MICROSOFT WORD",
+    ]
+    # Nothing may go missing in a restyle: every control the pages own is
+    # still reachable under the name the rest of the app knows it by.
+    for name in (
+        "chk_launch_login",
+        "chk_keep_top",
+        "chk_keep_running",
+        "chk_menu_bar_only",
+        "chk_sound",
+        "chk_auto_apply",
+        "chk_track_changes",
+        "chk_live_preview",
+        "chk_live_local",
+        "temp_slider",
+        "combo_spelling",
+        "combo_style",
+        "combo_comment",
+        "combo_context",
+        "automation_enabled_check",
+        "automation_list",
+        "live_apps_list",
+        "btn_restore_defaults",
+        "button_box",
+    ):
+        assert hasattr(dialog, name), name
+    _dispose(dialog, owner, app)
+
+
+
+def test_settings_type_scale_is_the_one_the_sheet_declares() -> None:
+    """Sizes come from the sheet, and the section heading carries its tracking.
+
+    Qt has no letter-spacing style property, so an upper-case 11px heading
+    would render as a flat run of capitals without the font's own tracking.
+    """
+    from PyQt6.QtGui import QFont
+    from PyQt6.QtWidgets import QLabel
+
+    app, owner, dialog = _make_settings_dialog()
+    page = dialog.general_page
+
+    def first(object_name: str):
+        for label in page.findChildren(QLabel):
+            if label.objectName() == object_name:
+                return label
+        raise AssertionError(object_name)
+
+    assert first("SettingsTitle").fontInfo().pixelSize() == 17
+    assert first("SettingsSubtitle").fontInfo().pixelSize() == 12
+    assert first("SettingsRowTitle").fontInfo().pixelSize() == 13
+    assert first("SettingsHint").fontInfo().pixelSize() == 11
+
+    heading = first("SettingsSectionLabel")
+    assert heading.fontInfo().pixelSize() == 11
+    assert heading.font().weight() == QFont.Weight.DemiBold
+    assert heading.font().letterSpacing() > 0
+    assert heading.text().isupper()
+    _dispose(dialog, owner, app)
+
+
+def test_settings_rows_share_one_left_edge_and_one_control_column() -> None:
+    from PyQt6.QtWidgets import QCheckBox, QLabel, QWidget
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.show()
+    app.processEvents()
+    page = dialog.general_page
+    rows = [
+        widget
+        for widget in page.findChildren(QWidget)
+        if widget.objectName() == "SettingsRow"
+    ]
+    assert len(rows) >= 8, len(rows)
+    for row in rows:
+        titles = [
+            label
+            for label in row.findChildren(QLabel)
+            if label.objectName() == "SettingsRowTitle"
+        ]
+        assert len(titles) == 1, (row, len(titles))
+    lefts = {row.geometry().x() for row in rows}
+    assert lefts == {0}, lefts
+    widths = {row.geometry().width() for row in rows}
+    assert len(widths) == 1, widths
+    controls = [
+        (row, child) for row in rows for child in row.findChildren(QCheckBox)
+    ]
+    assert controls, "the General page has switches"
+    right_edges = {
+        child.mapTo(row, child.rect().topLeft()).x() + child.width()
+        for row, child in controls
+    }
+    assert len(right_edges) == 1, right_edges
+    _dispose(dialog, owner, app)
+
+
+def test_switches_render_from_the_shared_toggle_art() -> None:
+    """The indicator is an image from assets/, so it must actually paint.
+
+    A missing file or a stale URL would leave an empty 40x23 hole where a
+    switch should be, which no structural assertion would notice.
+    """
+    from src.ui_theme import SHELL_BORDER, SHELL_PRIMARY
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.show()
+    app.processEvents()
+    dialog.chk_launch_login.setChecked(True)
+    dialog.chk_keep_top.setChecked(False)
+    app.processEvents()
+    image = dialog.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+
+    def colours_near(widget) -> set[str]:
+        origin = widget.mapTo(dialog, widget.rect().topLeft())
+        found = set()
+        for x in range(origin.x(), origin.x() + widget.width()):
+            for y in range(origin.y(), origin.y() + widget.height()):
+                found.add(
+                    image.pixelColor(int(x * ratio), int(y * ratio)).name()
+                )
+        return found
+
+    on = colours_near(dialog.chk_launch_login)
+    off = colours_near(dialog.chk_keep_top)
+    assert SHELL_PRIMARY in on, sorted(on)[:8]
+    assert SHELL_BORDER in off, sorted(off)[:8]
+    _dispose(dialog, owner, app)
+
+
+
+def test_no_settings_control_carries_a_private_stylesheet() -> None:
+    """One shape per role, owned by the sheet: a widget-local sheet is drift."""
+    from PyQt6.QtWidgets import QCheckBox, QComboBox, QLineEdit, QPushButton
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.show()
+    app.processEvents()
+    for kind in (QPushButton, QComboBox, QLineEdit, QCheckBox):
+        for widget in dialog.findChildren(kind):
+            assert widget.styleSheet() == "", (
+                kind.__name__,
+                getattr(widget, "text", lambda: "")()[:40],
+                widget.styleSheet()[:70],
+            )
+    _dispose(dialog, owner, app)
+
+
+def test_settings_typography_is_owned_by_the_sheet() -> None:
+    """No inline sheet may set a font size: the roles in the sheet decide."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "gui.py"
+    ).read_text(encoding="utf-8")
+    region = source[
+        source.index("class SettingsDialog") : source.index("class ProofreaderApp")
+    ]
+    offenders = [
+        line.strip()
+        for line in region.splitlines()
+        if "setStyleSheet(" in line and "font-size" in line
+    ]
+    assert offenders == [], offenders
+
+
+def test_settings_controls_share_one_height_per_role() -> None:
+    """Walking every page: one height per role, or the page looks stitched."""
+    from PyQt6.QtWidgets import QComboBox, QPushButton
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.show()
+    app.processEvents()
+    heights: dict[str, dict[str, set[int]]] = {"button": {}, "select": {}}
+    for row in range(dialog.sidebar.count()):
+        dialog.sidebar.setCurrentRow(row)
+        app.processEvents()
+        page = dialog.pages.currentWidget()
+        for button in page.findChildren(QPushButton):
+            if button.isVisible():
+                role = button.objectName() or "default"
+                heights["button"].setdefault(role, set()).add(button.height())
+        for combo in page.findChildren(QComboBox):
+            if combo.isVisible():
+                heights["select"].setdefault("select", set()).add(combo.height())
+    for group, roles in heights.items():
+        for role, sizes in roles.items():
+            assert len(sizes) == 1, (group, role, sizes)
+    _dispose(dialog, owner, app)
+
+
+
+def test_settings_cards_share_one_padding() -> None:
+    """A card is a surface with one padding, whatever page it sits on."""
+    from PyQt6.QtWidgets import QFrame
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.show()
+    app.processEvents()
+    pads = set()
+    for row in range(dialog.sidebar.count()):
+        dialog.sidebar.setCurrentRow(row)
+        app.processEvents()
+        for frame in dialog.pages.currentWidget().findChildren(QFrame):
+            if frame.objectName() not in (
+                "ProviderCard",
+                "LicenseCard",
+                "SettingsCard",
+                "SettingsCallout",
+            ):
+                continue
+            layout = frame.layout()
+            if layout is None:
+                continue
+            margins = layout.contentsMargins()
+            pads.add(
+                (margins.left(), margins.top(), margins.right(), margins.bottom())
+            )
+    assert pads, "no cards found on any page"
+    assert pads == {(16, 14, 16, 14)}, pads
+    _dispose(dialog, owner, app)
+
+
+
+def test_main_window_sheet_stays_inside_the_main_window() -> None:
+    """A rule in the main window's sheet must not reach a child dialog.
+
+    It used to: the sheet's bare selectors (QWidget, QComboBox, QCheckBox,
+    QPushButton...) styled every widget in the window's tree, so the settings
+    dialog inherited a 13px base font, a 20px bordered checkbox indicator and
+    a 12x8 combo arrow on top of its own sheet.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "gui.py"
+    ).read_text(encoding="utf-8")
+    start = source.index("def _configure_theme")
+    end = source.index("setStyleSheet(stylesheet.replace", start)
+    sheet = source[start:end]
+
+    # Selectors that are allowed to be global: the window itself and the
+    # popups that are top-level windows rather than children of it.
+    allowed = ("QMainWindow", "QMenu", "QToolTip", "QMessageBox")
+    offenders = []
+    for line in sheet.splitlines():
+        stripped = line.strip()
+        if not stripped.endswith("{") or stripped.startswith(("*", "/*")):
+            continue
+        selector = stripped[:-1].strip()
+        for part in selector.split(","):
+            part = part.strip()
+            if not part or part.startswith("#"):
+                continue
+            if part.startswith(allowed):
+                continue
+            if part.startswith("#RootPanel"):
+                continue
+            offenders.append(part)
+    assert offenders == [], offenders
+
+
+def test_the_main_window_sheet_cannot_restyle_the_settings_dialog() -> None:
+    """Opening Settings from the running app must look the same as standalone."""
+    from PyQt6.QtWidgets import QComboBox, QLabel
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp, SettingsDialog
+    from src.ui_theme import SHELL_BORDER, SHELL_PRIMARY
+
+    app, owner, standalone = _make_settings_dialog()
+    standalone.resize(1000, 760)
+    standalone.show()
+    app.processEvents()
+    alone_combo = next(
+        combo
+        for combo in standalone.general_page.findChildren(QComboBox)
+        if combo.isVisible()
+    )
+    alone_height = alone_combo.height()
+
+    window = ProofreaderApp(1024, settings_mod.load_runtime_settings())
+    window.show()
+    app.processEvents()
+    dialog = SettingsDialog(settings_mod.load_runtime_settings(), window)
+    dialog.resize(1000, 760)
+    dialog.show()
+    app.processEvents()
+
+    combo = next(
+        item
+        for item in dialog.general_page.findChildren(QComboBox)
+        if item.isVisible()
+    )
+    assert combo.height() == alone_height, (combo.height(), alone_height)
+
+    # The window sheet's QWidget rule set 13px on everything under it.
+    roles = {}
+    for label in dialog.general_page.findChildren(QLabel):
+        roles.setdefault(label.objectName(), label.fontInfo().pixelSize())
+    assert roles.get("SettingsTitle") == 17
+    assert roles.get("SettingsSectionLabel") == 11
+    assert roles.get("SettingsRowTitle") == 13
+    assert roles.get("SettingsHint") == 11
+
+    # ...and its checkbox rule drew a box behind the switch art.
+    dialog.chk_launch_login.setChecked(True)
+    dialog.chk_keep_top.setChecked(False)
+    app.processEvents()
+    image = dialog.grab().toImage()
+
+    ratio = image.devicePixelRatio() or 1.0
+
+    def colours_near(widget) -> set[str]:
+        origin = widget.mapTo(dialog, widget.rect().topLeft())
+        return {
+            image.pixelColor(int(x * ratio), int(y * ratio)).name()
+            for x in range(origin.x(), origin.x() + widget.width())
+            for y in range(origin.y(), origin.y() + widget.height())
+        }
+
+    assert SHELL_PRIMARY in colours_near(dialog.chk_launch_login)
+    assert SHELL_BORDER in colours_near(dialog.chk_keep_top)
+
+    dialog.close()
+    dialog.deleteLater()
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+    _dispose(standalone, owner, app)
+
+
+
+def test_the_sheet_owns_every_control_state() -> None:
+    """If a state is not in the sheet, the platform or an ancestor paints it."""
+    from src.ui_theme import settings_stylesheet
+
+    sheet = settings_stylesheet("/tmp/assets")
+    for needle in (
+        "QDialog, QDialog *",  # a base font for widgets no role covers
+        "QCheckBox::indicator:hover",  # the switch is an image, not a box
+        "QComboBox::down-arrow",
+        "QComboBox QAbstractItemView::item:selected",
+        "QComboBox:disabled",
+        "QScrollBar:vertical",
+        "QPushButton#PrimaryBtn:disabled",
+        "QPushButton:pressed",
+    ):
+        assert needle in sheet, needle
+
+
+
+def test_new_rows_are_plain_labels_with_tooltips() -> None:
+    """Live Check rows are rows: one name, one icon, one control per line."""
+    from PyQt6.QtWidgets import QLabel
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.sidebar.setCurrentRow(1)
+    app.processEvents()
+    page = dialog.live_page
+    titles = [
+        label
+        for label in page.findChildren(QLabel)
+        if label.objectName() == "SettingsRowTitle"
+    ]
+    assert len(titles) >= 10, len(titles)
+    for title in titles:
+        parent = title.parent()
+        while parent is not None and parent.objectName() not in (
+            "SettingsRow",
+            "LiveAppRow",
+        ):
+            parent = parent.parent()
+        assert parent is not None, title.text()
+    helpers = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.objectName() == "SettingsRowHelper"
+    ]
+    assert helpers == [], helpers
+    _dispose(dialog, owner, app)
+
+
+def test_general_page_has_no_second_line_of_grey_text() -> None:
+    from PyQt6.QtWidgets import QLabel
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.show()
+    app.processEvents()
+    helpers = [
+        label.text()
+        for label in dialog.general_page.findChildren(QLabel)
+        if label.objectName() == "SettingsRowHelper"
+    ]
+    assert helpers == [], helpers
+    _dispose(dialog, owner, app)
+
+
+def test_every_button_label_fits_its_button() -> None:
+    """A button sized by a magic number clips its own label."""
+    from PyQt6.QtWidgets import QPushButton
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.show()
+    app.processEvents()
+    padding = {"default": 28, "PrimaryBtn": 28, "DangerBtn": 28, "SmallBtn": 22, "LinkBtn": 0}
+    checked = 0
+    for row in range(dialog.sidebar.count()):
+        dialog.sidebar.setCurrentRow(row)
+        app.processEvents()
+        for button in dialog.pages.currentWidget().findChildren(QPushButton):
+            text = button.text()
+            if not button.isVisible() or not text:
+                continue
+            metrics = button.fontMetrics()
+            advance = metrics.horizontalAdvance(text)
+            role = button.objectName() or "default"
+            room = padding.get(role, 28)
+            assert button.width() >= advance + room - 2, (
+                text,
+                button.width(),
+                advance,
+                role,
+            )
+            assert button.width() <= advance + 90, (text, button.width(), advance)
+            floor = 2 if role == "LinkBtn" else 10
+            assert button.height() >= metrics.height() + floor, (
+                text,
+                button.height(),
+                metrics.height(),
+                role,
+            )
+            checked += 1
+    assert checked >= 12, checked
+    _dispose(dialog, owner, app)
+
+
+def test_updates_page_is_a_build_line_and_one_action() -> None:
+    from PyQt6.QtWidgets import QLabel
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.sidebar.setCurrentRow(6)
+    app.processEvents()
+    assert dialog.update_check_btn.text() == "Check for Updates"
+    assert dialog.update_check_btn.objectName() == "SmallBtn"
+    assert dialog.version_label.text() == __import__("src.settings", fromlist=["x"]).APP_VERSION
+    assert dialog.version_label.objectName() == "SettingsDisplay"
+    assert dialog.version_label.fontInfo().pixelSize() == 22
+    long_lines = [
+        label.text()
+        for label in dialog.updates_page.findChildren(QLabel)
+        if len(label.text()) > 140
+    ]
+    assert long_lines == [], long_lines
+    _dispose(dialog, owner, app)
+
+
+
+def test_number_fields_show_their_number() -> None:
+    """A spin box sizes its arrows itself; a width that guessed clipped it."""
+    from PyQt6.QtWidgets import QDoubleSpinBox, QSpinBox
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.show()
+    app.processEvents()
+    checked = 0
+    for row in range(dialog.sidebar.count()):
+        dialog.sidebar.setCurrentRow(row)
+        app.processEvents()
+        page = dialog.pages.currentWidget()
+        for kind in (QSpinBox, QDoubleSpinBox):
+            for field in page.findChildren(kind):
+                if not field.isVisible():
+                    continue
+                line_edit = field.lineEdit()
+                assert line_edit is not None, field
+                widest = field.fontMetrics().horizontalAdvance(
+                    str(field.maximum())
+                )
+                assert line_edit.width() >= widest + 4, (
+                    field.objectName(),
+                    line_edit.width(),
+                    widest,
+                    field.width(),
+                )
+                checked += 1
+    assert checked >= 2, checked
+    _dispose(dialog, owner, app)
+
+
+def test_automation_page_is_structured_like_the_others() -> None:
+    from PyQt6.QtWidgets import QLabel
+
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.sidebar.setCurrentRow(2)
+    app.processEvents()
+    page = dialog.automation_page
+
+    # No loose prose: the page header carries the blurb, the row tooltips the
+    # rest.
+    helpers = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.objectName() == "SettingsRowHelper"
+    ]
+    assert helpers == [], helpers
+
+    # The trigger count lives inside the row it describes.
+    summary = dialog.automation_summary_label
+    parent = summary.parent()
+    while parent is not None and parent.objectName() != "SettingsRow":
+        parent = parent.parent()
+    assert parent is not None, "the trigger count is outside any row"
+
+    # Showing the triggers gives the list room to be read.
+    assert dialog.automation_list.minimumHeight() >= 200
+    dialog._toggle_automation_rules()
+    app.processEvents()
+    assert dialog.automation_list.isVisibleTo(page)
+    assert dialog.automation_actions_widget.isVisibleTo(page)
+    assert dialog.automation_list.height() >= 200
+    _dispose(dialog, owner, app)
+
+
+
+def test_the_menu_bar_menu_is_opened_by_us_on_macos() -> None:
+    """Regression for the 2026-09-18 crash: clicking the icon aborted the app.
+
+    AppKit popped the status item menu on macOS 27, and Qt's observer for the
+    menu-tracking notification raised an ObjC assertion while doing it. The
+    click has to reach us, and the menu has to open from our own code.
+    """
+    import platform as platform_mod
+
+    from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+
+    app = QApplication.instance() or QApplication([])
+    window = ProofreaderApp(1024, settings_mod.load_runtime_settings())
+    try:
+        tray = window.tray_icon
+        assert window.tray_menu is not None
+        if platform_mod.system() == "Darwin":
+            assert tray.contextMenu() is None, (
+                "AppKit must not own the status item menu on macOS 27"
+            )
+            # The real popup, which is what the click will run: opening it
+            # must not raise (that is the whole crash), and the menu must
+            # actually come up.
+            opened: list[bool] = []
+            window.tray_menu.aboutToShow.connect(lambda: opened.append(True))
+            window._show_tray_menu()
+            app.processEvents()
+            assert opened == [True], "the menu did not open"
+            window.tray_menu.close()
+            app.processEvents()
+
+            # ...and a click on the icon is wired to that same path.
+            reached: list[bool] = []
+            window._show_tray_menu = lambda: reached.append(True)
+            window._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+            assert reached == [True]
+        else:
+            assert tray.contextMenu() is not None
+
+        shown: list[bool] = []
+        window.show_and_raise = lambda: shown.append(True)
+        window._on_tray_activated(QSystemTrayIcon.ActivationReason.DoubleClick)
+        assert shown == [True]
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
