@@ -1,14 +1,9 @@
 {
-  "version": "2.1.0",
-  "release_date": "2026-09-11",
-  "release_notes": "Live Check is faster and finishes the job. Applying suggestions in a chat window like Teams now places every edit it can and keeps the rest for a retry instead of stopping at the first one, and Word with tracked changes is quick again - a five-suggestion review that took 40 seconds now lands in under a second. The in-app updater works again (GitHub moved its release downloads and the app refused the redirect), Word's Live Check poll can no longer freeze the window, and every provider defaults to its current model.",
+  "version": "2.2.0",
+  "release_date": "2026-09-18",
+  "release_notes": "Cleaner Settings: one-line rows with explanations on hover, toggle switches, and tidier cards, lists and buttons. Fixed a crash where clicking the menu bar icon could quit ByteProof on the newest macOS.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
-  "sha256": {
-    "_comment": "Optional but recommended: the app verifies the download against these before installing.",
-    "macos_apple_silicon_url": "PASTE_SHA256_OF_THE_APPLE_SILICON_DMG",
-    "macos_intel_url": "PASTE_SHA256_OF_THE_INTEL_DMG",
-    "windows_url": "PASTE_SHA256_OF_THE_WINDOWS_ZIP"
-  }
+  "sha256": {}
 }
