@@ -993,3 +993,30 @@ Two further crash classes turned up while investigating, both fixed:
 
 The owner verified the fix in the running app before packaging; beta.17 was then
 built, installed and launched.
+
+## 2026-09-18 - Official release 2.2.0 (Apple Silicon + Windows; Intel blocked on Rosetta)
+
+The owner asked for the beta line to be pushed and for the official 2.2.0
+release, so both were done:
+
+* beta/2.1.1 pushed (57f316b), main fast-forwarded to it and released from there.
+* scripts/release.sh 2.2.0: version bumped in the app, the Windows metadata and
+  the website feed; commit c27c0d7 tagged v2.2.0 and pushed; CI started.
+* CI: the macOS gate passed, and the Windows installer job published the release
+  with ByteProof_Windows.zip and ByteProof_Installer_x64.msix.
+* The Apple Silicon DMG built, notarized, stapled, uploaded to the release and
+  installed locally: /Applications/ByteProof.app reports 2.2.0.
+
+The Intel DMG could not be built on this machine: Rosetta 2 is not installed, so
+the x86_64 PyInstaller step cannot run (arch -x86_64 fails for every binary, and
+the venv Python itself is universal2 - the toolchain is fine, the translator is
+missing). Resuming is designed for exactly this: once Rosetta is available,
+./scripts/release.sh 2.2.0 "<notes>" detects the existing tag, skips the bump,
+builds both DMGs, uploads them and publishes the feed.
+
+The website feed is deliberately not published yet. Publishing it announces
+2.2.0 to every installed copy, and its macos_intel_url points at
+releases/latest/download/<Intel DMG>, which this release does not have. The
+options are: install Rosetta and resume (full release, both architectures), or
+publish without the Intel URL so Intel users are never offered a download that
+404s and stay on 2.1.0.

@@ -909,3 +909,20 @@ document after the user moves on.
   accepted, source=Notarized Developer ID; bundle reports 2.1.1-beta.17, signed
   by team 9AMNWJRC93, bundle id nz.co.bytemind.byteproof. DMG sha256
   5b23c7e4b0c8d894caf5491810a35e852039766fb21b0d7a31e73471477c7a8e.
+
+### 2026-09-18 - 2.2.0 release evidence
+
+* CI tag run 35382550774: Tests (macos-14) passed in 1m3s; Windows installer (x64)
+  succeeded; the informational Windows test job was still running when checked.
+* Release assets after the local upload: ByteProof_Installer_AppleSilicon.dmg
+  (34343730 bytes, sha256 1addacc77dbcf8d418d0ed2dd3dd807af827ae1873af30d631a8729955b73d8a),
+  ByteProof_Windows.zip (sha256 10375dbffd9be57e767cd7f41801dfe129a5542616cc699df3c7f09b0ca4c1eb),
+  ByteProof_Installer_x64.msix (sha256 23c81d0b0f31821b1cc8cd55f3567bb4bf301ea8e92fc04499a43d6d6d8f2ef5).
+* Local install: /Applications/ByteProof.app reports 2.2.0 and is running (pid 13640).
+* Blocked step, with the exact error: invoking .venv_x86/bin/python3 under
+  arch -x86_64 prints "Bad CPU type in executable"; arch -x86_64 /usr/bin/true
+  fails the same way, so Rosetta 2 is not present. Both the venv Python and the
+  python.org framework Python are universal2 (x86_64 + arm64 slices verified).
+* Live feed: still advertises 2.1.0 (curl of
+  https://www.bytemind.co.nz/byteproof-version.json returned version 2.1.0), so
+  no installed copy has been told about 2.2.0 yet.
