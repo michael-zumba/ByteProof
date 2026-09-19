@@ -157,6 +157,22 @@ repo as `byteproof-version.json.example`:
 }
 ```
 
+The feed must only advertise installers that exist in the release the URLs point
+at: `releases/latest/download/<name>` 404s for a platform whose installer was
+not built. When one platform's installer is missing (the Intel DMG, for
+example, when Rosetta 2 is not installed), publish the feed *without* that
+platform's URL key. The app still offers the update, and that platform's users
+get its "download it manually from the website" message instead of a dead
+download. Add the key back once the asset is on the release:
+`tools/bump_version.py` rewrites only the version, date, notes and checksums, so
+a URL key that was removed stays removed until someone puts it back.
+
+Checksums are part of publishing, not of bumping: `tools/bump_version.py` clears
+`sha256` on every bump (`release.sh` does not fill it in), so after a release's
+installers are uploaded, hash them as downloaded and write the digests into the
+feed. A feed with an empty `sha256` still works - the app downloads without
+verifying - which is exactly why it is easy to forget.
+
 When a user clicks **Remind Me Later**, ByteProof remembers that version and
 won't ask again until a newer version appears. Users can always choose
 **Check for Updates…** from the tray icon or the Application menu for an

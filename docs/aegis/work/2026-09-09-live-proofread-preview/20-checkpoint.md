@@ -1020,3 +1020,36 @@ releases/latest/download/<Intel DMG>, which this release does not have. The
 options are: install Rosetta and resume (full release, both architectures), or
 publish without the Intel URL so Intel users are never offered a download that
 404s and stay on 2.1.0.
+
+## 2026-09-20 - 2.2.0 announced for Apple Silicon + Windows (Intel still pending)
+
+The owner asked why 2.2.0 was still invisible to installed copies when it was
+already live on GitHub. Root cause: `scripts/release.sh 2.2.0` stopped at the
+Intel DMG step (Rosetta 2 is still not installed, so the x86_64 PyInstaller run
+cannot execute), and step 5 - the only step that publishes the update feed -
+runs after every installer has been uploaded. Nothing was wrong with the
+release itself; the announcement never happened, so the feed kept serving
+2.1.0 and every installed copy correctly believed it was up to date.
+
+What changed:
+
+* The website feed now advertises 2.2.0 with the two installers that exist
+  (macOS Apple Silicon, Windows) and their verified SHA-256 values, and carries
+  no `macos_intel_url`. Intel users get the app's "download it manually from
+  the website" fallback instead of a 404; the live Intel URL was confirmed 404
+  before the change.
+* The website's Intel download card and the README's Intel badge now point at
+  the v2.1.0 Intel DMG - the newest Intel build that exists - and say so.
+* `byteproof-version.json.example` mirrors the published feed, and
+  GITHUB_DISTRIBUTION_GUIDE.md now records both gaps this exposed: the feed must
+  only advertise installers that exist, and checksums have to be written into
+  the feed by hand after upload because nothing in the pipeline does it.
+
+Still open: the Intel DMG for 2.2.0. Installing Rosetta 2
+(`sudo softwareupdate --install-rosetta --agree-to-license`) needs the owner's
+admin password; after that `./scripts/release.sh 2.2.0 "<notes>"` resumes from
+the DMG step (existing tag detected), builds both DMGs, uploads them, and
+republishes the feed - with `macos_intel_url` put back, since bumping never adds
+URL keys. Worth considering separately: make the app skip a version whose feed
+has no installer for the running platform, so a partial release can never
+produce an offered-but-undeliverable update.

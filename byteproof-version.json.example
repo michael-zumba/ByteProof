@@ -3,7 +3,9 @@
   "release_date": "2026-09-18",
   "release_notes": "Cleaner Settings: one-line rows with explanations on hover, toggle switches, and tidier cards, lists and buttons. Fixed a crash where clicking the menu bar icon could quit ByteProof on the newest macOS.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
-  "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
-  "sha256": {}
+  "sha256": {
+    "macos_apple_silicon_url": "1addacc77dbcf8d418d0ed2dd3dd807af827ae1873af30d631a8729955b73d8a",
+    "windows_url": "10375dbffd9be57e767cd7f41801dfe129a5542616cc699df3c7f09b0ca4c1eb"
+  }
 }

@@ -926,3 +926,34 @@ document after the user moves on.
 * Live feed: still advertises 2.1.0 (curl of
   https://www.bytemind.co.nz/byteproof-version.json returned version 2.1.0), so
   no installed copy has been told about 2.2.0 yet.
+
+### 2026-09-20 08:44 NZST - 2.2.0 announcement evidence
+
+* Root cause, read-only: the release page had v2.2.0 published
+  2026-09-18T18:53:38Z (draft=false, prerelease=false) while
+  https://www.bytemind.co.nz/byteproof-version.json still served 2.1.0.
+  `releases/latest/download/ByteProof_Installer_Intel.dmg` returned HTTP 404;
+  the Apple Silicon DMG and the Windows ZIP returned 200.
+* Rosetta 2 still absent: `arch -x86_64 /usr/bin/true` -> "Bad CPU type in
+  executable"; `sudo -n true` -> "sudo: a password is required", so the Intel
+  build cannot be produced unattended.
+* Artifacts verified from the release itself (downloaded over HTTPS, not read
+  from dist/): ByteProof_Installer_AppleSilicon.dmg, 34343730 bytes, sha256
+  1addacc77dbcf8d418d0ed2dd3dd807af827ae1873af30d631a8729955b73d8a - the
+  mounted bundle reports CFBundleShortVersionString 2.2.0, signed by
+  "Developer ID Application: YUQIAN ZHANG (9AMNWJRC93)", and
+  `spctl -a -t install` accepts it (source=Notarized Developer ID).
+  ByteProof_Windows.zip sha256
+  10375dbffd9be57e767cd7f41801dfe129a5542616cc699df3c7f09b0ca4c1eb.
+* Feed behaviour checked with the app's own code (src/app_version.py, venv
+  Python 3.13.7): is_newer("2.2.0", "2.1.0") True and
+  is_newer("2.2.0", "2.2.0") False, so an installed 2.1.0 is offered the
+  update once and 2.2.0 installs are not re-nagged; the arm64 and Windows keys
+  resolve to allowed-host URLs while the Intel key resolves to none; both
+  published digests verify against the downloaded artifacts, and flipping one
+  byte in the ZIP makes verification fail.
+* Website push 9be8298 (michael-zumba/bytemind-website), only
+  byteproof-version.json and byteproof.html staged - the repo's unrelated dirty
+  files were left untouched. GitHub Pages picked it up on the 4th poll
+  (~40 s): the live feed serves 2.2.0, and the live page's three download links
+  (Apple Silicon latest, Intel v2.1.0 pinned, Windows latest) each return 200.

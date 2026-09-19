@@ -95,8 +95,12 @@ xAI, Groq, Perplexity, or your own Ollama server.
 
 <p align="center">
   <a href="https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg"><img src="https://img.shields.io/badge/Download-macOS%20Apple%20Silicon-1a3a2a?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS Apple Silicon"></a>
-  <a href="https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg"><img src="https://img.shields.io/badge/Download-macOS%20Intel-1a3a2a?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS Intel"></a>
+  <a href="https://github.com/michael-zumba/ByteProof/releases/download/v2.1.0/ByteProof_Installer_Intel.dmg"><img src="https://img.shields.io/badge/Download-macOS%20Intel%202.1.0-1a3a2a?style=for-the-badge&logo=apple&logoColor=white" alt="Download ByteProof 2.1.0 for macOS Intel"></a>
   <a href="https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip"><img src="https://img.shields.io/badge/Download-Windows%2010%2F11-1a3a2a?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows"></a>
+</p>
+
+<p align="center">
+  <sub>Intel Macs: 2.1.0 is the newest Intel build — the 2.2.0 Intel installer is still being prepared.</sub>
 </p>
 
 <p align="center">
