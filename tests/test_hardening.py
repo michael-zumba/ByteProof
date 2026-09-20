@@ -4997,3 +4997,67 @@ def test_the_menu_bar_mark_is_a_template_drawn_at_bar_size() -> None:
         window.deleteLater()
         app.processEvents()
 
+
+
+def test_the_rail_marks_share_one_optical_size() -> None:
+    """Hand-drawn glyphs differ in how much of the grid they use: 10px of ink
+    next to 16px in the same box is what reads as uneven, and two of them used
+    to run off the canvas edge."""
+    from src.gui import settings_icon
+
+    icons = [
+        "settings-general.svg",
+        "settings-live.svg",
+        "settings-automation.svg",
+        "settings-connect.svg",
+        "settings-local.svg",
+        "license.svg",
+        "update.svg",
+    ]
+    longest = set()
+    for name in icons:
+        pixmap = settings_icon(name, 16).pixmap(16, 16)
+        assert pixmap.width() == 16 and pixmap.height() == 16
+        image = pixmap.toImage()
+        left, top, right, bottom = 16, 16, -1, -1
+        for y in range(16):
+            for x in range(16):
+                if image.pixelColor(x, y).alpha() > 24:
+                    left = min(left, x)
+                    right = max(right, x)
+                    top = min(top, y)
+                    bottom = max(bottom, y)
+        assert right >= left, name
+        assert left >= 1 and top >= 1, (name, left, top)
+        assert right <= 14 and bottom <= 14, (name, right, bottom)
+        longest.add(max(right - left + 1, bottom - top + 1))
+    assert longest == {14}, longest
+
+
+def test_the_menu_bar_mark_is_square_with_an_inset() -> None:
+    """macOS stretches whatever it is given to the bar height, so a 12x18 mark
+    arrives looking wrong; and ink on the canvas edge is clipped."""
+    from src.gui import menu_bar_icon
+
+    icon = menu_bar_icon(18)
+    assert not icon.isNull()
+    pixmap = icon.pixmap(18, 18)
+    assert pixmap.width() == pixmap.height() == 18
+    image = pixmap.toImage()
+    left, top, right, bottom = 18, 18, -1, -1
+    for y in range(18):
+        for x in range(18):
+            if image.pixelColor(x, y).alpha() > 24:
+                left = min(left, x)
+                right = max(right, x)
+                top = min(top, y)
+                bottom = max(bottom, y)
+    assert right >= left, "the mark paints"
+    assert left >= 1 and top >= 1 and right <= 16 and bottom <= 16, (
+        left,
+        top,
+        right,
+        bottom,
+    )
+    assert max(right - left + 1, bottom - top + 1) >= 14, (left, top, right, bottom)
+

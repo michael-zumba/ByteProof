@@ -1122,7 +1122,7 @@ def settings_icon(name: str, size: int = 16) -> QIcon:
         (QIcon.Mode.Normal, SHELL_TEXT_MUTED),
         (QIcon.Mode.Selected, SHELL_PRIMARY_FG),
     ):
-        pixmap = _tinted_pixmap(name, colour, size)
+        pixmap = fitted_mark(name, colour, size, fill=0.88)
         if pixmap is not None:
             icon.addPixmap(pixmap, mode, QIcon.State.Off)
     return icon
@@ -1176,37 +1176,8 @@ def _tinted_pixmap(
     return pixmap
 
 
-def menu_bar_icon(size: int = 18) -> QIcon:
-    """The menu bar mark: vector, cropped to its ink, tinted by macOS.
-
-    Handing macOS the 1024px app icon to shrink to 18px is what made the menu
-    bar symbol read as a smudge, and a plate of white behind it is wrong up
-    there: menu bar items are template images the system tints itself.
-    """
-    scale = _screen_ratio()
-    pixmap = _tinted_pixmap("menubar.svg", "#000000", size * 4, ratio=1.0)
-    if pixmap is None:
-        return QIcon()
-    cropped = _crop_to_ink(pixmap.toImage())
-    if cropped is None:
-        return QIcon()
-    pixels = max(1, round(size * scale))
-    scaled = QPixmap.fromImage(
-        cropped.scaled(
-            pixels,
-            pixels,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-    )
-    scaled.setDevicePixelRatio(scale)
-    icon = QIcon(scaled)
-    icon.setIsMask(True)
-    return icon
-
-
-def _crop_to_ink(image: QImage) -> QImage | None:
-    """Trim transparent margins so the mark uses the whole menu bar height."""
+def _ink_bounds(image: QImage) -> tuple[int, int, int, int] | None:
+    """The rectangle the mark actually paints in, or None when it is empty."""
     left, top, right, bottom = image.width(), image.height(), -1, -1
     for y in range(image.height()):
         for x in range(image.width()):
@@ -1217,12 +1188,71 @@ def _crop_to_ink(image: QImage) -> QImage | None:
                 bottom = max(bottom, y)
     if right < left or bottom < top:
         return None
-    margin = max(2, (right - left) // 32)
-    left = max(0, left - margin)
-    top = max(0, top - margin)
-    right = min(image.width() - 1, right + margin)
-    bottom = min(image.height() - 1, bottom + margin)
-    return image.copy(left, top, right - left + 1, bottom - top + 1)
+    return left, top, right, bottom
+
+
+def fitted_mark(
+    name: str, colour: str, size: int, fill: float = 0.9, ratio: float | None = None
+) -> QPixmap | None:
+    """A drawn mark on a square canvas: cropped to ink, one optical size.
+
+    Glyphs drawn on a shared grid still differ in how much of it they use - the
+    rail had marks from 10px to 16px of ink in the same 16px box, two of them
+    running off the canvas edge - which reads as uneven sizes down a list. Each
+    mark is cropped to its own ink, scaled so its longest side matches the
+    others, and centred, at the screen's resolution.
+    """
+    scale = ratio if ratio else _screen_ratio()
+    pixels = max(1, round(size * scale))
+    rendered = _tinted_pixmap(name, colour, max(64, pixels * 4), ratio=1.0)
+    if rendered is None:
+        return None
+    image = rendered.toImage()
+    bounds = _ink_bounds(image)
+    if bounds is None:
+        return None
+    left, top, right, bottom = bounds
+    source_width = right - left + 1
+    source_height = bottom - top + 1
+
+    canvas = QPixmap(pixels, pixels)
+    canvas.fill(Qt.GlobalColor.transparent)
+    canvas.setDevicePixelRatio(scale)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    box = pixels * fill
+    factor = box / max(source_width, source_height)
+    target_width = source_width * factor
+    target_height = source_height * factor
+    painter.drawImage(
+        QRectF(
+            (pixels - target_width) / 2.0,
+            (pixels - target_height) / 2.0,
+            target_width,
+            target_height,
+        ),
+        image,
+        QRectF(left, top, source_width, source_height),
+    )
+    painter.end()
+    return canvas
+
+
+def menu_bar_icon(size: int = 18) -> QIcon:
+    """The menu bar mark: square, sharp, and tinted by macOS.
+
+    Handing macOS the 1024px app icon to shrink to 18px is what made the menu
+    bar symbol read as a smudge; a 12x18 rectangle is what makes it look
+    stretched. Menu bar items are template images the system tints itself, so
+    the mark is drawn square at screen resolution and marked as a mask.
+    """
+    pixmap = fitted_mark("menubar.svg", "#000000", size, fill=0.82)
+    if pixmap is None:
+        return QIcon()
+    icon = QIcon(pixmap)
+    icon.setIsMask(True)
+    return icon
 
 
 def settings_page_header(title: str, blurb: str = "") -> QWidget:
@@ -1557,7 +1587,7 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
         mark = QLabel()
         mark.setFixedSize(22, 22)
-        mark_pixmap = _tinted_pixmap("menubar.svg", SHELL_PRIMARY, 22)
+        mark_pixmap = fitted_mark("menubar.svg", SHELL_PRIMARY, 22, fill=0.86)
         if mark_pixmap is not None:
             mark.setPixmap(mark_pixmap)
         layout.addWidget(mark)

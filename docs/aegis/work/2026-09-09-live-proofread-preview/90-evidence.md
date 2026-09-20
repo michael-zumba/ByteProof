@@ -1005,3 +1005,33 @@ document after the user moves on.
 * Install check: the running process was stopped first and the new binary
   started fresh (verified by process start time), because an accessory app can
   ignore a quit request and keep the old build alive.
+
+### 2026-09-20 - Mark geometry evidence (2.2.1-beta.3)
+
+* Rail icon ink boxes at 16px, before -> after:
+
+    settings-general        16x16 (clipped)  ->  14x14 at (1,1)
+    license                 16x16 (clipped)  ->  14x14 at (1,1)
+    settings-local          14x14            ->  14x14 at (1,1)
+    update                  14x14            ->  14x14 at (1,1)
+    settings-live           14x10            ->  14x10 at (1,3)
+    settings-automation     12x14            ->  12x14 at (2,1)
+    settings-connect        10x14            ->  10x14 at (3,1)
+
+  Longest side is now 14 for all seven, with at least 1px of inset on every
+  side; before, the range was 10 to 16 and two marks were clipped.
+* Menu bar icon: 12x18, dpr 1, QSize(12,18) in the icon -> square 18x18,
+  dpr = screen ratio, QSize(18,18), ink (4,1,10,16), marked as a template.
+* Rail identity mark: 14x20 uncentred -> 14x20 centred in a 22x22 canvas
+  (4px either side), fitted by the same function.
+* Tests: 395 green - test_hardening.py 154 (new: the rail marks share one
+  optical size and never touch the canvas edge; the menu bar mark is square
+  with an inset), test_live_preview.py 137, test_smoke.py 104. Ruff clean.
+  Version markers agree: 2.2.1-beta.3.
+* Build: Apple Silicon DMG built, notarized, stapled, installed; spctl:
+  accepted, source=Notarized Developer ID. DMG sha256
+  31d969821719711a6db82b0faa9245c4e47927f88ac89ed2a5e2136c0f986043.
+* Audit of the remaining icon paths: the automation card (32px) and the app
+  rows (22px) use icons the OS provides for installed apps, so they carry
+  their own resolutions; the About and licence pages draw the full app icon at
+  60/84px through QSvgWidget, which renders vector at the device ratio.

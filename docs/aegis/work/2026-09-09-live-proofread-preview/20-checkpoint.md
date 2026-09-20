@@ -1110,3 +1110,36 @@ unclear thing. Boldening it to 400 user units merges the strokes into blobs
 a 4px median stem at 36px, so its strokes land at about 2px at 18px. The bolded
 brand glyph is kept at assets/menubar-brand.svg: if the owner prefers the logo
 up there, it is a one-line change to the asset name.
+
+### 2026-09-20 - The marks were rendered wrong, and now there is one owner for them (2.2.1-beta.3)
+
+The owner: the symbol and logo are terrible, not properly scaled, not evenly
+displayed, there must be conflicts in the scripts. Measured, the marks were
+wrong in three separate ways, and the third one was a real conflict between two
+code paths:
+
+* **The rail icon set had no common optical size.** Rendered at 16px, the ink
+  boxes measured gear 16x16, licence 16x16, update 14x14, local 14x14, live
+  14x10, automation 12x14, connect 10x14. Six pixels of difference down one
+  list, and the two 16x16 marks were running off the canvas edge (clipped
+  antialiased strokes).
+* **The rail identity mark was neither square nor centred**: 14x20 of ink in a
+  22x22 box, because it was rendered straight from a 24-unit canvas whose glyph
+  only occupies part of it.
+* **The menu bar icon was stretched by macOS.** It came out 12x18 for an 18x18
+  request with the device pixel ratio lost, so the status item had a
+  non-square image to fit into the bar and no Retina data to draw it with. Two
+  paths were building it: menu_bar_icon() cropped to ink and kept the aspect,
+  _tinted_pixmap() rendered at a fixed size - the conflict the owner suspected.
+
+Fixed by giving mark geometry a single owner, fitted_mark():
+
+* render at max(64px, target x 4) so nothing is clipped at the source
+* crop to the ink bounds (alpha > 8)
+* scale so the longest side is one shared optical size (88% of the box for the
+  rail, 82% for the menu bar) and centre it on a square canvas
+* build at the screen's device pixel ratio and declare it
+
+The measured result: every rail mark now has a 14px longest side with a 1px
+inset, the rail identity mark is centred, and the menu bar mark is a square
+18x18 template whose ink sits at (4,1)-(13,16) - an inset on every side.
