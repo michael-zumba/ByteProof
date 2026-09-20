@@ -145,7 +145,6 @@ from .ui_theme import (
     SHELL_BORDER_LIGHT,
     SHELL_PRIMARY,
     SHELL_PRIMARY_FG,
-    SHELL_TEXT_FAINT,
     SHELL_TEXT_MUTED,
     settings_stylesheet,
 )
@@ -1110,24 +1109,6 @@ def tone(widget: QWidget, kind: str) -> None:
     restyle(widget)
 
 
-def info_icon(text: str) -> QLabel:
-    """A small ⓘ whose explanation appears on hover.
-
-    Settings pages stay clean: the rationale for a control lives here instead
-    of as a paragraph of grey text under every option.
-    """
-    label = QLabel("\u24d8")
-    label.setFixedSize(16, 16)
-    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    label.setCursor(Qt.CursorShape.WhatsThisCursor)
-    label.setToolTip(text)
-    label.setStyleSheet(
-        f"color: {SHELL_TEXT_FAINT}; font-size: 12px; font-weight: 700;"
-        "background: transparent;"
-    )
-    return label
-
-
 def settings_icon(name: str, size: int = 16) -> QIcon:
     """A sidebar glyph rendered twice, so it reads on the selected green pill.
 
@@ -1198,20 +1179,13 @@ def settings_section(title: str, first: bool = False) -> tuple[QWidget, QVBoxLay
     """
     block = QWidget()
     layout = QVBoxLayout(block)
-    layout.setContentsMargins(0, 0 if first else 12, 0, 0)
+    layout.setContentsMargins(0, 0 if first else 22, 0, 0)
     layout.setSpacing(0)
-    heading = QLabel(title.upper())
+    heading = QLabel(title)
     heading.setObjectName("SettingsSectionLabel")
-    font = heading.font()
-    font.setPixelSize(11)
-    font.setWeight(QFont.Weight.DemiBold)
-    # QSS has no letter-spacing property: tracking comes from the font or
-    # from nowhere, and an 11px upper-case heading needs it to stay readable.
-    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
-    heading.setFont(font)
     layout.addWidget(heading)
     rows = QVBoxLayout()
-    rows.setContentsMargins(0, 5, 0, 0)
+    rows.setContentsMargins(0, 6, 0, 0)
     rows.setSpacing(0)
     layout.addLayout(rows)
     return block, rows
@@ -1221,7 +1195,7 @@ def settings_row(
     title: str,
     detail: str = "",
     control: QWidget | None = None,
-    divider: bool = True,
+    divider: bool = False,
     note: str = "",
     note_widget: QWidget | None = None,
 ) -> QWidget:
@@ -1239,22 +1213,17 @@ def settings_row(
     layout.setSpacing(0)
     line = QWidget()
     line_layout = QHBoxLayout(line)
-    line_layout.setContentsMargins(0, 9, 0, 9)
+    line_layout.setContentsMargins(0, 10, 0, 10)
     line_layout.setSpacing(16)
     text = QVBoxLayout()
     text.setContentsMargins(0, 0, 0, 0)
     text.setSpacing(2)
-    heading_line = QHBoxLayout()
-    heading_line.setContentsMargins(0, 0, 0, 0)
-    heading_line.setSpacing(6)
     heading = QLabel(title)
     heading.setObjectName("SettingsRowTitle")
     heading.setWordWrap(True)
-    heading_line.addWidget(heading)
+    text.addWidget(heading)
     if detail:
-        heading_line.addWidget(info_icon(detail), 0, Qt.AlignmentFlag.AlignVCenter)
-    heading_line.addStretch(1)
-    text.addLayout(heading_line)
+        row.setToolTip(detail)
     if note_widget is not None:
         text.addWidget(note_widget)
     elif note:
@@ -1404,7 +1373,7 @@ class SettingsDialog(QDialog):
         main_layout.setSpacing(0)
 
         side_container = QWidget()
-        side_container.setFixedWidth(190)
+        side_container.setFixedWidth(186)
         side_container.setObjectName("SettingsSidebarContainer")
         side_layout = QVBoxLayout(side_container)
         side_layout.setContentsMargins(0, 0, 0, 0)

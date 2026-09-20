@@ -193,3 +193,31 @@ the process before the menu is on screen (crash reports 2026-09-18 20:27 and
 20:28). The app therefore keeps its own QMenu and opens it from the activated
 signal at the pointer; AppKit is never asked to raise a status item menu. Do not
 put setContextMenu back on macOS without testing a real click.
+
+#### P3.1f Calmer composition: the chrome budget (2.2.1-beta.1)
+
+The owner looked at the panel again and said it still does not read as sharply
+as ByteMail's. Measured against ByteMail's settings window, the gap was not
+colour or size but *chrome*: ByteMail's content has no boxes, no rules and
+almost no icons, while the dialog had grown
+
+  page          rules  icons  cards  caps headings
+  General          14     14      0  6
+  Live Check       12     12      0  3
+  Automation        2      2      0  1
+  Connect           0      0      9  0
+  Local AI          0      0     10  0
+
+The rules now, and worth keeping:
+
+* **No rules between rows.** Whitespace separates settings; a hairline is
+  opt-in (divider=True) for the rare boundary that genuinely needs one.
+* **No icon beside every name.** The explanation is the row's own tooltip, so
+  it is still there for anyone who hovers and invisible to everyone else. An
+  icon on every row was 28 circles of noise on four pages.
+* **Sentence-case section headings**, 13px semibold, 22px of air above; the
+  tracked upper-case micro-label is gone (ByteMail has none anywhere).
+* **Panels are lifted surfaces, not boxes**: white fill on cream, no border,
+  no shadow. Borderless white separates cleanly without drawing a rectangle
+  around every group.
+* **The rail is ByteMail's size**: 186px wide, 34px rows, 7px pills.

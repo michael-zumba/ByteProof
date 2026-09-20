@@ -1053,3 +1053,28 @@ republishes the feed - with `macos_intel_url` put back, since bumping never adds
 URL keys. Worth considering separately: make the app skip a version whose feed
 has no installer for the running platform, so a partial release can never
 produce an offered-but-undeliverable update.
+
+### 2026-09-20 - Settings looks like ByteMail now, not like a form (2.2.1-beta.1)
+
+The owner's second look at the panel: still not as sharp as ByteMail's. Instead
+of guessing, the dialog was measured against ByteMail's settings window. The
+difference was chrome, not colour: 28 rules between rows, 28 little i-icons (one
+beside every name), 19 bordered cards and 11 tracked upper-case headings, where
+ByteMail's content has none of those things.
+
+What changed:
+
+* settings_row no longer draws a divider by default, so rows separate by
+  whitespace (the parameter stays for the rare boundary that needs it).
+* The per-row i-icon is gone; the explanation moved to the row's own tooltip.
+  info_icon had no callers left and was retired with it.
+* Section headings are sentence case at 13px semibold with 22px of air above -
+  "App & Window", not "APP & WINDOW" - and the font tracking hack that made the
+  capitals legible went with them.
+* Cards lost their borders: white fill on cream, 12px radius. Connection, Local
+  AI and the licence card read as lifted panels instead of outlined boxes.
+* The rail matches ByteMail: 186px wide, 34px rows, 7px pills.
+
+Measured after the pass: General and Live Check went from 14/12 rules and
+14/12 icons to zero of each, headings are sentence case on every page, and one
+deliberate separator remains on the licence page. 391 tests green.

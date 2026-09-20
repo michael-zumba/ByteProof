@@ -2189,9 +2189,9 @@ def test_live_check_page_owns_the_live_settings() -> None:
     # Sections are flat headings now, not nested cards: what a page owns is
     # the set of headings it shows.
     assert _settings_section_titles(dialog.live_page) == [
-        "LIVE CHECK",
-        "SUGGESTIONS",
-        "HOTKEYS",
+        "Live Check",
+        "Suggestions",
+        "Hotkeys",
     ]
 
     # Everything about the feature lives here now...
@@ -4339,6 +4339,9 @@ def test_a_switch_row_keeps_the_words_out_of_the_checkbox() -> None:
     app, owner, dialog = _make_settings_dialog()
     assert dialog.chk_live_preview.text() == ""
     row = dialog.chk_live_preview.parent()
+    while row is not None and row.objectName() != "SettingsRow":
+        row = row.parent()
+    assert row is not None, "the switch sits in a settings row"
     titles = [
         label.text()
         for label in row.findChildren(QLabel)
@@ -4350,12 +4353,10 @@ def test_a_switch_row_keeps_the_words_out_of_the_checkbox() -> None:
         if label.objectName() == "SettingsRowHelper"
     ]
     assert titles == ["Suggest changes as I select text"]
-    # The explanation is the tooltip on the row's icon, not a second line.
+    # The explanation is the row's own tooltip, not a second line and not an
+    # icon beside every name.
     assert helpers == []
-    tooltips = [
-        label.toolTip() for label in row.findChildren(QLabel) if label.toolTip()
-    ]
-    assert tooltips and tooltips[0].startswith("Select text anywhere")
+    assert row.toolTip().startswith("Select text anywhere")
     _dispose(dialog, owner, app)
 
 
@@ -4372,8 +4373,8 @@ def test_settings_pages_are_flat_sections_not_nested_cards() -> None:
         page = getattr(dialog, attr)
         assert not page.findChildren(QGroupBox), attr
     assert _settings_section_titles(dialog.general_page)[:2] == [
-        "APP & WINDOW",
-        "MICROSOFT WORD",
+        "App & Window",
+        "Microsoft Word",
     ]
     # Nothing may go missing in a restyle: every control the pages own is
     # still reachable under the name the rest of the app knows it by.
@@ -4409,7 +4410,6 @@ def test_settings_type_scale_is_the_one_the_sheet_declares() -> None:
     Qt has no letter-spacing style property, so an upper-case 11px heading
     would render as a flat run of capitals without the font's own tracking.
     """
-    from PyQt6.QtGui import QFont
     from PyQt6.QtWidgets import QLabel
 
     app, owner, dialog = _make_settings_dialog()
@@ -4427,10 +4427,10 @@ def test_settings_type_scale_is_the_one_the_sheet_declares() -> None:
     assert first("SettingsHint").fontInfo().pixelSize() == 11
 
     heading = first("SettingsSectionLabel")
-    assert heading.fontInfo().pixelSize() == 11
-    assert heading.font().weight() == QFont.Weight.DemiBold
-    assert heading.font().letterSpacing() > 0
-    assert heading.text().isupper()
+    # A heading is a sentence, not a tracked run of capitals: ByteMail has no
+    # upper-case micro-labels anywhere in its content.
+    assert heading.fontInfo().pixelSize() == 13
+    assert heading.text() == "App & Window"
     _dispose(dialog, owner, app)
 
 
@@ -4678,7 +4678,7 @@ def test_the_main_window_sheet_cannot_restyle_the_settings_dialog() -> None:
     for label in dialog.general_page.findChildren(QLabel):
         roles.setdefault(label.objectName(), label.fontInfo().pixelSize())
     assert roles.get("SettingsTitle") == 17
-    assert roles.get("SettingsSectionLabel") == 11
+    assert roles.get("SettingsSectionLabel") == 13
     assert roles.get("SettingsRowTitle") == 13
     assert roles.get("SettingsHint") == 11
 

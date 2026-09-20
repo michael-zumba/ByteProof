@@ -957,3 +957,29 @@ document after the user moves on.
   files were left untouched. GitHub Pages picked it up on the 4th poll
   (~40 s): the live feed serves 2.2.0, and the live page's three download links
   (Apple Silicon latest, Intel v2.1.0 pinned, Windows latest) each return 200.
+
+### 2026-09-20 - Calmer composition evidence (2.2.1-beta.1)
+
+* Density, measured off the built dialog before and after:
+
+    page          rules        icons        cards
+    General       14 -> 0      14 -> 0      0 -> 0
+    Live Check    12 -> 0      12 -> 0      0 -> 0
+    Automation     2 -> 0       2 -> 0      0 -> 0
+    Connect        0 -> 0       0 -> 0      9 -> 9 (now borderless white)
+    Local AI       0 -> 0       0 -> 0     10 -> 10 (now borderless white)
+    License        1 -> 1       0 -> 0      1 -> 1
+    Updates        0 -> 0       1 -> 0      0 -> 0
+
+* Headings: every SettingsSectionLabel is now sentence case
+  ("App & Window", "Live Check", "This Build"), font 13px semibold.
+* Tests: 391 green - test_hardening.py 150, test_live_preview.py 137,
+  test_smoke.py 104. Ruff clean. Version markers agree: 2.2.1-beta.1
+  (the beta line that follows the public 2.2.0).
+* Build: Apple Silicon DMG built, notarized, stapled, installed;
+  spctl reports accepted, source=Notarized Developer ID. DMG sha256
+  f2ea3dfaa381132f252349982d970aada77be0e9800b025d6222d9eacb5717ba.
+* Install check: the previous build was still running after the first launch
+  attempt (a quit request did not reach the accessory app), so the process was
+  restarted explicitly; the running binary is now the new one (fresh pid in
+  capture.log).

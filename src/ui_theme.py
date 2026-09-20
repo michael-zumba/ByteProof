@@ -186,8 +186,7 @@ QLabel {{ color: {SHELL_TEXT}; background: transparent; }}
 QLabel#SettingsTitle {{ font-size: 17px; font-weight: 600; }}
 QLabel#SettingsSubtitle {{ font-size: 12px; color: {SHELL_TEXT_MUTED}; }}
 QLabel#SettingsSectionLabel {{
-    font-size: 11px; font-weight: 600; color: {SHELL_TEXT_MUTED};
-    padding-top: 6px;
+    font-size: 13px; font-weight: 600; color: {SHELL_TEXT_SECONDARY};
 }}
 QLabel#SettingsRowTitle {{ font-size: 13px; color: {SHELL_TEXT}; }}
 QLabel#SettingsRowHelper {{ font-size: 12px; color: {SHELL_TEXT_MUTED}; }}
@@ -215,6 +214,7 @@ QCheckBox::indicator:hover, QCheckBox::indicator:focus {{
 }}
 
 QFrame#SettingsRowDivider {{ background: {SHELL_BORDER_LIGHT}; border: none; max-height: 1px; }}
+QLabel#SettingsRowTitle {{ padding: 1px 0; }}
 QFrame#SettingsStatusBar {{
     background: {SHELL_CARD}; border: none;
     border-top: 1px solid {SHELL_BORDER_LIGHT};
@@ -249,13 +249,13 @@ QLabel#SettingsBadge {{
     font-weight: 700; padding: 2px 6px; border-radius: 4px;
 }}
 QFrame#ProviderCard, QFrame#LicenseCard, QFrame#SettingsCard {{
-    background: {SHELL_CARD};
-    border: 1px solid {SHELL_BORDER_LIGHT};
+    background: #ffffff;
+    border: none;
     border-radius: {SHELL_RADIUS_CARD}px;
 }}
 QFrame#SettingsCallout {{
     background: {SHELL_PRIMARY_50};
-    border: 1px solid {SHELL_PRIMARY_200};
+    border: none;
     border-radius: {SHELL_RADIUS_CARD}px;
 }}
 #AutomationRuleCard {{
@@ -370,8 +370,8 @@ QListWidget::item {{ color: {SHELL_TEXT_SECONDARY}; }}
 QListWidget::item:selected {{ background: {SHELL_PRIMARY_50}; color: {SHELL_TEXT}; }}
 QListWidget#SettingsSidebar {{ padding: 2px 0 10px 0; font-size: 13px; }}
 QListWidget#SettingsSidebar::item {{
-    height: {SHELL_ROW_HEIGHT}px; margin: 1px 10px; padding-left: 10px; padding-right: 10px;
-    border-radius: {SHELL_RADIUS_ROW}px; color: {SHELL_TEXT}; font-weight: 500;
+    height: 34px; margin: 1px 9px; padding-left: 10px; padding-right: 10px;
+    border-radius: 7px; color: {SHELL_TEXT}; font-weight: 500;
 }}
 QListWidget#SettingsSidebar::item:hover:!selected {{ background: {SHELL_MUTED}; }}
 QListWidget#SettingsSidebar::item:selected {{
