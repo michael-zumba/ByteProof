@@ -1078,3 +1078,35 @@ What changed:
 Measured after the pass: General and Live Check went from 14/12 rules and
 14/12 icons to zero of each, headings are sentence case on every page, and one
 deliberate separator remains on the licence page. 391 tests green.
+
+### 2026-09-20 - The menu bar mark and the sidebar symbols are sharp now (2.2.1-beta.2)
+
+The owner: the menu logo/symbol is not sharply clear. Two separate causes, both
+mechanical:
+
+* The menu bar icon was QIcon(logo.png) - the 1024px app icon handed to macOS
+  to shrink into an 18px status item, white plate and all. A 56x reduction of a
+  calligraphic glyph is a smudge, and it was not a template image, so macOS
+  could not tint it for the menu bar either.
+* The settings rail symbols came from _tinted_pixmap, which rendered exactly
+  'size' device pixels with no devicePixelRatio. On a Retina screen a 16px
+  pixmap is 16 pixels stretched over 32: soft by construction.
+
+Fixed:
+
+* _tinted_pixmap renders at size x screen ratio, sets the pixmap's
+  devicePixelRatio, and enables antialiasing - one place that knows the scale.
+* The menu bar mark is its own asset: a 24-unit, two-stroke silhouette drawn
+  for 18px, rendered as vector, cropped to its own ink so it fills the height,
+  built at screen resolution and marked as a template (setIsMask) so macOS
+  tints it for light and dark menu bars.
+* The rail's identity mark uses the same drawn mark in brand green, so the
+  cream rail no longer shows a white app-icon plate at 22px.
+
+Why not the logo itself: measured, the brand glyph has 63 strokes with a median
+stem of 2px in a 36px box - about 1px at menu bar size, which is exactly the
+unclear thing. Boldening it to 400 user units merges the strokes into blobs
+(21 runs, median 19px). The simple mark measures 1.7 strokes per scanline with
+a 4px median stem at 36px, so its strokes land at about 2px at 18px. The bolded
+brand glyph is kept at assets/menubar-brand.svg: if the owner prefers the logo
+up there, it is a one-line change to the asset name.

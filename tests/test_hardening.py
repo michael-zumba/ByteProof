@@ -4959,3 +4959,41 @@ def test_the_menu_bar_menu_is_opened_by_us_on_macos() -> None:
         app.processEvents()
 
 
+
+
+def test_small_marks_are_drawn_for_the_screen_they_are_on() -> None:
+    """A 16px pixmap on a 2x screen is 16 pixels stretched over 32: soft."""
+    from src.gui import _tinted_pixmap
+
+    plain = _tinted_pixmap("settings-general.svg", "#1f1e1a", 16, ratio=1.0)
+    retina = _tinted_pixmap("settings-general.svg", "#1f1e1a", 16, ratio=2.0)
+    assert plain is not None and retina is not None
+    assert plain.width() == 16 and plain.devicePixelRatio() == 1.0
+    assert retina.width() == 32 and retina.devicePixelRatio() == 2.0
+
+
+def test_the_menu_bar_mark_is_a_template_drawn_at_bar_size() -> None:
+    """Not the 1024px app icon shrunk 56x, and not a white plate up there."""
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp, menu_bar_icon
+
+    icon = menu_bar_icon(18)
+    assert not icon.isNull(), "the menu bar mark renders"
+    assert icon.isMask(), "macOS tints a template, it cannot tint a picture"
+    size = icon.pixmap(18, 18).size()
+    assert size.width() <= 64, size
+
+    app = QApplication.instance() or QApplication([])
+    window = ProofreaderApp(1024, settings_mod.load_runtime_settings())
+    try:
+        tray_icon = window.tray_icon.icon()
+        assert not tray_icon.isNull()
+        assert tray_icon.isMask()
+        assert tray_icon.pixmap(18, 18).width() <= 64
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+

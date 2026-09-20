@@ -31,6 +31,7 @@ from PyQt6.QtGui import (
     QFont,
     QFontDatabase,
     QIcon,
+    QImage,
     QKeySequence,
     QPainter,
     QPixmap,
@@ -1127,7 +1128,21 @@ def settings_icon(name: str, size: int = 16) -> QIcon:
     return icon
 
 
-def _tinted_pixmap(name: str, colour: str, size: int) -> QPixmap | None:
+def _screen_ratio() -> float:
+    """The screen's device pixel ratio, so small marks stay sharp."""
+    app = QApplication.instance()
+    screen = app.primaryScreen() if app is not None else None
+    if screen is None:
+        return 1.0
+    try:
+        return float(screen.devicePixelRatio())
+    except Exception:
+        return 1.0
+
+
+def _tinted_pixmap(
+    name: str, colour: str, size: int, ratio: float | None = None
+) -> QPixmap | None:
     """Render one monochrome asset in a colour, or None when it is missing.
 
     Each glyph carries a single dark-green stroke, so recolouring the source
@@ -1145,12 +1160,69 @@ def _tinted_pixmap(name: str, colour: str, size: int) -> QPixmap | None:
     renderer = QSvgRenderer(QByteArray(source.encode("utf-8")))
     if not renderer.isValid():
         return None
-    pixmap = QPixmap(size, size)
+    # Render at device resolution and declare the ratio: a 16px pixmap on a
+    # Retina screen is a 16px pixmap stretched over 32 pixels, which is the
+    # softness this used to have.
+    scale = ratio if ratio else _screen_ratio()
+    pixels = max(1, round(size * scale))
+    pixmap = QPixmap(pixels, pixels)
     pixmap.fill(Qt.GlobalColor.transparent)
+    pixmap.setDevicePixelRatio(scale)
     painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
     renderer.render(painter)
     painter.end()
     return pixmap
+
+
+def menu_bar_icon(size: int = 18) -> QIcon:
+    """The menu bar mark: vector, cropped to its ink, tinted by macOS.
+
+    Handing macOS the 1024px app icon to shrink to 18px is what made the menu
+    bar symbol read as a smudge, and a plate of white behind it is wrong up
+    there: menu bar items are template images the system tints itself.
+    """
+    scale = _screen_ratio()
+    pixmap = _tinted_pixmap("menubar.svg", "#000000", size * 4, ratio=1.0)
+    if pixmap is None:
+        return QIcon()
+    cropped = _crop_to_ink(pixmap.toImage())
+    if cropped is None:
+        return QIcon()
+    pixels = max(1, round(size * scale))
+    scaled = QPixmap.fromImage(
+        cropped.scaled(
+            pixels,
+            pixels,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    )
+    scaled.setDevicePixelRatio(scale)
+    icon = QIcon(scaled)
+    icon.setIsMask(True)
+    return icon
+
+
+def _crop_to_ink(image: QImage) -> QImage | None:
+    """Trim transparent margins so the mark uses the whole menu bar height."""
+    left, top, right, bottom = image.width(), image.height(), -1, -1
+    for y in range(image.height()):
+        for x in range(image.width()):
+            if image.pixelColor(x, y).alpha() > 8:
+                left = min(left, x)
+                right = max(right, x)
+                top = min(top, y)
+                bottom = max(bottom, y)
+    if right < left or bottom < top:
+        return None
+    margin = max(2, (right - left) // 32)
+    left = max(0, left - margin)
+    top = max(0, top - margin)
+    right = min(image.width() - 1, right + margin)
+    bottom = min(image.height() - 1, bottom + margin)
+    return image.copy(left, top, right - left + 1, bottom - top + 1)
 
 
 def settings_page_header(title: str, blurb: str = "") -> QWidget:
@@ -1483,11 +1555,12 @@ class SettingsDialog(QDialog):
         layout = QHBoxLayout(block)
         layout.setContentsMargins(18, 18, 14, 14)
         layout.setSpacing(10)
-        logo_path = resource_path(os.path.join("logo", "logo.svg"))
-        if os.path.exists(logo_path):
-            mark = QSvgWidget(logo_path)
-            mark.setFixedSize(24, 24)
-            layout.addWidget(mark)
+        mark = QLabel()
+        mark.setFixedSize(22, 22)
+        mark_pixmap = _tinted_pixmap("menubar.svg", SHELL_PRIMARY, 22)
+        if mark_pixmap is not None:
+            mark.setPixmap(mark_pixmap)
+        layout.addWidget(mark)
         text = QVBoxLayout()
         text.setContentsMargins(0, 0, 0, 0)
         text.setSpacing(0)
@@ -5447,34 +5520,12 @@ class ProofreaderApp(QMainWindow):
 
     def _setup_system_tray(self) -> None:
         self.tray_icon = QSystemTrayIcon(self)
-        icon_path = resource_path(os.path.join("logo", "logo.png"))
-        
-        self.normal_icon = QIcon()
-        self.active_icon = QIcon()
-        
-        if os.path.exists(icon_path):
-            from PyQt6.QtCore import Qt
-            from PyQt6.QtGui import QColor, QPainter, QPixmap
-            
-            self.normal_icon = QIcon(icon_path)
-            
-            # Create active icon with a green dot
-            pixmap = QPixmap(icon_path)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setBrush(QColor("#306D49"))
-            painter.setPen(Qt.PenStyle.NoPen)
-            size = pixmap.size()
-            radius = max(6, size.width() // 16)
-            painter.drawEllipse(
-                size.width() * 7 // 10 - radius,
-                size.height() * 7 // 10 - radius,
-                radius * 2,
-                radius * 2,
-            )
-            painter.end()
-            self.active_icon = QIcon(pixmap)
-            
+        # Both states are the same template mark: macOS tints a menu bar item
+        # itself, and a colour dot painted onto a 1024px icon was invisible at
+        # 18px anyway. State is carried by the menu and the tooltip.
+        self.normal_icon = menu_bar_icon(18)
+        self.active_icon = menu_bar_icon(18)
+        if not self.normal_icon.isNull():
             self.tray_icon.setIcon(self.normal_icon)
 
         tray_menu = QMenu()

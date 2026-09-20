@@ -983,3 +983,25 @@ document after the user moves on.
   attempt (a quit request did not reach the accessory app), so the process was
   restarted explicitly; the running binary is now the new one (fresh pid in
   capture.log).
+
+### 2026-09-20 - sharpness evidence (2.2.1-beta.2)
+
+* Measurements behind the choice of mark, taken by rendering each candidate at
+  36px and counting ink runs per scanline:
+
+    candidate                     ink    strokes/scanline   median stroke
+    brand glyph, fill only        16.9%  1.75               2px  (1px at 18px)
+    brand glyph, +200 stroke      23.1%  1.25               3px
+    brand glyph, +400 stroke      27.1%  0.58              19px  (merged blobs)
+    simple mark (shipped)         45.2%  1.69               4px  (2px at 18px)
+
+* Tests: 393 green - test_hardening.py 152 (new: small marks are drawn for the
+  screen they are on, checked at ratio 1.0 and 2.0; the menu bar mark is a
+  template drawn at bar size, not the 1024px icon), test_live_preview.py 137,
+  test_smoke.py 104. Ruff clean. Version markers agree: 2.2.1-beta.2.
+* Build: Apple Silicon DMG built, notarized, stapled, installed; spctl reports
+  accepted, source=Notarized Developer ID. DMG sha256
+  be0ec0de96a52d2bb152894769fb1155ca895db32a483cd936664d3a14be49db.
+* Install check: the running process was stopped first and the new binary
+  started fresh (verified by process start time), because an accessory app can
+  ignore a quit request and keep the old build alive.
