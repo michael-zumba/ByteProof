@@ -1,4 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8">
-  <path d="M1 7l5-5 5 5" fill="none" stroke="#8A8178" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+<!--
+  chevron-up.svg - Lucide 1.47.0 (chevron-up), ISC licensed.
+  Source: https://lucide.dev/icons/chevron-up - see assets/LUCIDE-LICENSE.txt.
+  Cropped to its ink for the same reason as chevron-down.svg, which the
+  stylesheet sizes itself.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="4.8 7.8 14.4 8.4">
+  <g stroke="#8A8178" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m18 15-6-6-6 6"/>
+  </g>
 </svg>
-

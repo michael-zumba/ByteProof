@@ -2393,6 +2393,89 @@ def test_strict_editing_rules() -> None:
     assert "STRICT LANGUAGE-EDITING MODE" in load_proofreading_prompt("Creative (Rewrite)")
 
 
+def test_the_editing_contract_is_stated_once() -> None:
+    """The proofreading prompts carried their own copy of the OUTPUT CONTRACT,
+    which the loader then appended again - the same rules twice, written two
+    different ways, in one system prompt."""
+    from src import logic
+
+    raw = logic.load_proofreading_prompt("Precise (Minimal Changes)")
+    assembled = logic.with_strict_editing_rules(raw)
+    assert "refuse to edit" not in raw.lower(), (
+        "the prompt repeats the contract instead of pointing at it"
+    )
+    assert "binding" in raw.lower(), "the prompt points at the contract"
+    assert assembled.count("OUTPUT CONTRACT (MUST FOLLOW)") == 1
+    assert assembled.count(logic.STRICT_EDITING_MARKER) == 1
+    assert "refuse to edit" in assembled.lower()
+
+
+def test_the_context_overlay_never_widens_the_scope() -> None:
+    """The journal context sat inside the Correction Scope list, so its
+    "remove filler" and "without overclaiming" advice competed with the
+    minimal-change rules it was nested in."""
+    from src import logic
+
+    prompt = logic.load_proofreading_prompt(
+        "Precise (Minimal Changes)", "Academic Journal (Top-Tier)"
+    )
+    assert "ADDITIONAL CONTEXT" in prompt
+    assert prompt.index("ADDITIONAL CONTEXT") < prompt.index("Correction Scope"), (
+        "the context belongs before the scope rules, not inside them"
+    )
+    lowered = prompt.lower()
+    assert "never widens the scope" in lowered
+    assert "leave structure alone" in lowered
+
+
+def test_every_prompt_path_carries_the_document_context() -> None:
+    """The polish and live-preview prompts ignored the Document Context
+    setting entirely, so the same setting meant different things depending on
+    which app the text came from."""
+    from src import logic
+
+    journal_polish = logic.load_polish_prompt(
+        "Precise (Minimal Changes)", "Academic Journal (Top-Tier)"
+    )
+    general_polish = logic.load_polish_prompt(
+        "Precise (Minimal Changes)", "General Editing"
+    )
+    assert journal_polish != general_polish, "polish mode ignored the context"
+    assert "top-tier" in journal_polish.lower()
+
+    journal_preview = logic.load_preview_prompt(
+        "strict", "Academic Journal (Top-Tier)"
+    )
+    general_preview = logic.load_preview_prompt("strict", "General Editing")
+    assert journal_preview != general_preview, "live preview ignored the context"
+    assert "top-tier" in journal_preview.lower()
+
+    email_polish = logic.load_polish_prompt(
+        "Precise (Minimal Changes)", "Email Editing"
+    )
+    assert "email" in email_polish.lower()
+
+
+def test_every_prompt_protects_claims_and_measurements() -> None:
+    """Softening a causal claim, or touching a number, is a change of meaning
+    rather than a correction: the strict live preview did exactly that."""
+    from src import logic
+
+    names = [
+        "phd_proofreader.txt",
+        "phd_proofreader_creative.txt",
+        "polish_general.txt",
+        "polish_general_creative.txt",
+        "polish_email.txt",
+        "polish_email_creative.txt",
+        "preview_edits.txt",
+        "preview_edits_polish.txt",
+    ]
+    for name in names:
+        text = (logic._load_prompt_text(name) or "").lower()
+        assert "soften or strengthen" in text, name
+
+
 def test_local_model_output_cleaning() -> None:
     from src.logic import _clean_local_model_output
 

@@ -1,5 +1,5 @@
 <!--
-  The ByteMind mark, used as ByteProof's app logo. This is the owner's own
+  The ByteMind mark, used as ByteProof's app icon. This is the owner's own
   artwork - the same drawing as the ByteMind company logo, without the
   wordmark - and it is the single source for the app icon, the window and
   About logos and the settings identity mark. Do not redraw or restyle it:
@@ -7,12 +7,16 @@
 
   Ink colour must stay #1A3A2A: the app tints a mark by replacing that string.
 
-  The raster marks (logo.png, app_icon.png, logo.icns, logo.ico and the Store
-  tiles) are built from logo/app-icon.svg by scripts/build_app_icons.py.
+  Rasterise with scripts/build_app_icons.py; it draws the 16 and 32 pixel
+  entries from the mark filled solid, because the outline above turns to a
+  grey smudge at that size.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" width="588" height="548"
-     viewBox="220 239 588 548" role="img" aria-label="ByteMind">
-  <g fill="#1A3A2A" stroke="none">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"
+     viewBox="0 0 1024 1024" role="img" aria-label="ByteProof">
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="#ffffff"
+        stroke="#E6E1D6" stroke-width="1.5"/>
+  <g transform="translate(16.73 17.69) scale(0.9645)">
+    <g fill="#1A3A2A" stroke="none">
 <g transform="translate(0.000000,1143.000000) scale(0.100000,-0.100000)" fill="#1A3A2A" stroke="none">
 <path d="M4321 8905 c-223 -49 -487 -186 -648 -339 -80 -75 -161 -187 -203
 -279 l-28 -62 -74 -24 c-156 -49 -299 -141 -424 -274 -155 -162 -224 -342
@@ -100,5 +104,6 @@ m-1948 -683 c74 -63 -12 -187 -88 -127 -22 17 -27 30 -27 64 0 81 58 113 115
 -88 62 -70 35 -152 41 -225 15z m147 -189 c59 -31 69 -107 21 -156 -88 -88
 -224 41 -142 135 32 37 76 44 121 21z m-409 -1134 c36 -36 37 -73 4 -106 -49
 -50 -135 -15 -135 55 0 39 39 80 75 80 16 0 38 -12 56 -29z"/></g>
+    </g>
   </g>
 </svg>

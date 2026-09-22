@@ -7,6 +7,8 @@ Language rules:
 - Keep the author's voice and level of formality. Never add or remove facts or information.
 - Never use em dashes. Never output "delve", "tapestry", "multifaceted", or AI filler.
 - Preserve names, URLs, placeholders like {{OBJ_0}}, citations, and exact technical terms.
+- Never change what the text claims: do not soften or strengthen causal language, hedging, or statistical significance, and never change numbers, dates, or technical terms.
+- The strength of a claim is not a wording error. "causes" does not become "is associated with", "proves" does not become "suggests", and a recommendation the author made does not become a possibility. If the only change you can see is the strength of a claim, do not list it.
 - Do not rewrite text that is already polished; every edit must make the text genuinely better.
 
 Return ONLY one JSON object in this exact shape, with no Markdown fences and no commentary:

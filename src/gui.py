@@ -1141,14 +1141,18 @@ def _screen_ratio() -> float:
 
 
 def _tinted_pixmap(
-    name: str, colour: str, size: int, ratio: float | None = None
+    name: str,
+    colour: str,
+    size: int,
+    ratio: float | None = None,
+    folder: str = "assets",
 ) -> QPixmap | None:
     """Render one monochrome asset in a colour, or None when it is missing.
 
     Each glyph carries a single dark-green stroke, so recolouring the source
     string keeps one file per icon instead of one per icon per state.
     """
-    path = resource_path(os.path.join("assets", name))
+    path = resource_path(os.path.join(folder, name))
     if not os.path.exists(path):
         return None
     try:
@@ -1160,6 +1164,10 @@ def _tinted_pixmap(
     renderer = QSvgRenderer(QByteArray(source.encode("utf-8")))
     if not renderer.isValid():
         return None
+    # Every glyph is drawn into a square box, so the box itself must not
+    # reshape a mark that is not square: the renderer stretches its viewBox
+    # to the painter by default, which turns the 40x24 toggles into blobs.
+    renderer.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
     # Render at device resolution and declare the ratio: a 16px pixmap on a
     # Retina screen is a 16px pixmap stretched over 32 pixels, which is the
     # softness this used to have.
@@ -1192,7 +1200,12 @@ def _ink_bounds(image: QImage) -> tuple[int, int, int, int] | None:
 
 
 def fitted_mark(
-    name: str, colour: str, size: int, fill: float = 0.9, ratio: float | None = None
+    name: str,
+    colour: str,
+    size: int,
+    fill: float = 0.9,
+    ratio: float | None = None,
+    folder: str = "assets",
 ) -> QPixmap | None:
     """A drawn mark on a square canvas: cropped to ink, one optical size.
 
@@ -1204,7 +1217,9 @@ def fitted_mark(
     """
     scale = ratio if ratio else _screen_ratio()
     pixels = max(1, round(size * scale))
-    rendered = _tinted_pixmap(name, colour, max(64, pixels * 4), ratio=1.0)
+    rendered = _tinted_pixmap(
+        name, colour, max(64, pixels * 4), ratio=1.0, folder=folder
+    )
     if rendered is None:
         return None
     image = rendered.toImage()
@@ -1221,14 +1236,19 @@ def fitted_mark(
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    box = pixels * fill
+    # The painter works in points once the canvas carries a device pixel
+    # ratio, so every number below is the logical size. Laying the mark out
+    # in device pixels drew it at twice its box on a Retina screen, and the
+    # canvas kept the top-left quarter of it: the rail, the identity mark and
+    # the menu bar symbol all showed up as fragments.
+    box = size * fill
     factor = box / max(source_width, source_height)
     target_width = source_width * factor
     target_height = source_height * factor
     painter.drawImage(
         QRectF(
-            (pixels - target_width) / 2.0,
-            (pixels - target_height) / 2.0,
+            (size - target_width) / 2.0,
+            (size - target_height) / 2.0,
             target_width,
             target_height,
         ),
@@ -1586,8 +1606,13 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(18, 18, 14, 14)
         layout.setSpacing(10)
         mark = QLabel()
-        mark.setFixedSize(22, 22)
-        mark_pixmap = fitted_mark("menubar.svg", SHELL_PRIMARY, 22, fill=0.86)
+        mark.setFixedSize(24, 24)
+        # The brand mark, not the menu bar's document glyph: the header says
+        # whose window this is, and it is the same brain the window, the About
+        # panel and the Dock icon carry.
+        mark_pixmap = fitted_mark(
+            "logo.svg", SHELL_PRIMARY, 24, fill=0.92, folder="logo"
+        )
         if mark_pixmap is not None:
             mark.setPixmap(mark_pixmap)
         layout.addWidget(mark)
@@ -1919,17 +1944,17 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(hotkey_group)
         
-        temp_group, temp_layout = settings_section("Proofreading Style (Temperature)")
+        temp_group, temp_layout = settings_section("Editing freedom (temperature)")
         
         slider_grid = QGridLayout()
         slider_grid.setContentsMargins(0, 5, 0, 0)
         slider_grid.setVerticalSpacing(2)
         
-        lbl_precise = QLabel("Precise")
+        lbl_precise = QLabel("More conservative")
         lbl_precise.setObjectName("SettingsHint")
         lbl_precise.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
-        lbl_creative = QLabel("Creative")
+        lbl_creative = QLabel("More rewriting")
         lbl_creative.setObjectName("SettingsHint")
         lbl_creative.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         
@@ -1959,7 +1984,9 @@ class SettingsDialog(QDialog):
         temp_layout.addLayout(slider_grid)
         self.temp_slider.setToolTip(
             "Lower values keep the edits minimal and conservative; higher "
-            "values let ByteProof rewrite more freely."
+            "values let ByteProof rewrite more freely. The Editing Style "
+            "setting decides the prompt as well: Creative (Rewrite) always "
+            "uses at least 0.5, however far left this slider is set."
         )
         
         self.temp_slider.valueChanged.connect(self.update_temp_label)
@@ -2004,7 +2031,8 @@ class SettingsDialog(QDialog):
         spelling_layout.addWidget(
             make_setting_row(
                 "Editing Style",
-                "Precise keeps your wording intact; Creative rewrites more freely.",
+                "Precise keeps your wording intact; Creative rewrites more "
+                "freely and always uses at least 0.5.",
                 self.combo_style,
             )
         )
@@ -2197,7 +2225,6 @@ class SettingsDialog(QDialog):
         title = settings_page_header(
             "Live Check",
             "Suggestions appear next to your text while you write. "
-            f"color: {SHELL_TEXT_MUTED}; font-size: 12px; "
         )
         layout.addWidget(title)
 
@@ -6141,7 +6168,7 @@ class ProofreaderApp(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle(f"About {APP_NAME}")
         dlg.setModal(True)
-        dlg.setFixedSize(380, 300)
+        dlg.setFixedSize(380, 330)
         dlg.setStyleSheet(
             "QDialog { background-color: #FAF8F5; }"
             "QLabel#AboutTitle { font-size: 17px; font-weight: 700; color: #292524; }"
@@ -6169,7 +6196,9 @@ class ProofreaderApp(QMainWindow):
         meta = QLabel(
             f"Version {APP_VERSION}<br>{COMPANY_NAME}<br>"
             f'A <a href="{PRODUCT_URL}" style="color: #1A3A2A;">'
-            f"{PRODUCT_URL.replace('https://', '')}</a>"
+            f"{PRODUCT_URL.replace('https://', '')}</a><br>"
+            'Icons by <a href="https://lucide.dev" style="color: #1A3A2A;">'
+            "Lucide</a> (ISC)"
         )
         meta.setObjectName("AboutMeta")
         meta.setOpenExternalLinks(True)

@@ -2,6 +2,8 @@ ADDITIONAL CONTEXT: The text is from a PhD thesis chapter in Accounting, Finance
 
 PhD theses at this level typically include: a clear research question or hypothesis near the start of each chapter, a detailed methodology section, a thorough literature review positioning the work within existing debates, empirical results with robustness checks, and a discussion linking findings back to the research question. Some redundancy or over-explaining is expected as the candidate develops their ideas: do not try to compress or summarise heavily.
 
+Use this description to judge register and word choice only. It is not permission to restructure the text, remove content, or change what the text claims.
+
 When editing:
 - Preserve the candidate's voice. Do not standardise every sentence to a single tone.
 - Methodology descriptions should be precise but do not need to be elegant.

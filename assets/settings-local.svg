@@ -1,7 +1,24 @@
+<!--
+  settings-local.svg - Lucide 1.47.0 (cpu), ISC licensed.
+  Source: https://lucide.dev/icons/cpu - see assets/LUCIDE-LICENSE.txt.
+  ByteProof draws Lucide's path data with its own single ink colour so the
+  rail can tint one file per glyph instead of one file per state.
+-->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
-  <g stroke="#1A3A2A" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="6.1" y="6.1" width="11.8" height="11.8" rx="2.6" />
-    <rect x="10" y="10" width="4" height="4" rx="1.1" />
-    <path d="M9.2 2.9v3.2M14.8 2.9v3.2M9.2 17.9v3.2M14.8 17.9v3.2M2.9 9.2h3.2M2.9 14.8h3.2M17.9 9.2h3.2M17.9 14.8h3.2" />
+  <g stroke="#1A3A2A" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 20v2" />
+    <path d="M12 2v2" />
+    <path d="M17 20v2" />
+    <path d="M17 2v2" />
+    <path d="M2 12h2" />
+    <path d="M2 17h2" />
+    <path d="M2 7h2" />
+    <path d="M20 12h2" />
+    <path d="M20 17h2" />
+    <path d="M20 7h2" />
+    <path d="M7 20v2" />
+    <path d="M7 2v2" />
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <rect x="8" y="8" width="8" height="8" rx="1" />
   </g>
 </svg>

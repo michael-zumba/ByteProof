@@ -1,5 +1,11 @@
+<!--
+  settings-automation.svg - Lucide 1.47.0 (zap), ISC licensed.
+  Source: https://lucide.dev/icons/zap - see assets/LUCIDE-LICENSE.txt.
+  ByteProof draws Lucide's path data with its own single ink colour so the
+  rail can tint one file per glyph instead of one file per state.
+-->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
-  <g stroke="#1A3A2A" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M13.2 2.5 4.8 13.4h6.2L10.6 21.5l8.6-11.1h-6.4l.4-7.9Z" />
+  <g stroke="#1A3A2A" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z" />
   </g>
 </svg>

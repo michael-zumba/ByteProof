@@ -1,3 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8">
-  <path d="M1 1l5 5 5-5" fill="none" stroke="#8A8178" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+<!--
+  chevron-down.svg - Lucide 1.47.0 (chevron-down), ISC licensed.
+  Source: https://lucide.dev/icons/chevron-down - see assets/LUCIDE-LICENSE.txt.
+
+  Lucide draws this on a 24-unit grid, but the stylesheet sizes the image
+  itself (10x6 in a combo box, 9x5 in a spin box), so the viewBox is cropped
+  to the ink: uncropped, the glyph would sit at half strength in the middle of
+  the box the stylesheet asked for. The ink stays the muted grey the form
+  controls were designed around.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="4.8 7.8 14.4 8.4">
+  <g stroke="#8A8178" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m6 9 6 6 6-6"/>
+  </g>
 </svg>

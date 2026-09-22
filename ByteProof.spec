@@ -23,6 +23,9 @@ datas = [
 ]
 datas += [(asset, 'assets') for asset in glob.glob('assets/*.svg')]
 datas += [(asset, 'assets') for asset in glob.glob('assets/*.png')]
+# The rail glyphs come from Lucide, so the notice that licenses them ships
+# inside the app rather than only living in the repository.
+datas += [('assets/LUCIDE-LICENSE.txt', 'assets')]
 datas += collect_data_files('certifi')
 
 binaries = []

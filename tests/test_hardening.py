@@ -2103,6 +2103,29 @@ def test_restore_defaults_button_resets_controls(monkeypatch):
     dialog.deleteLater()
 
 
+def test_the_temperature_control_says_what_it_does():
+    """The slider sits between "Precise" and "Creative" while a separate Style
+    combo picks the prompt, and Creative mode forces the temperature to at
+    least 0.5 whichever way the slider is set. The control has to say so."""
+    from PyQt6.QtWidgets import QApplication, QLabel
+
+    from src import settings as settings_mod
+    from src.gui import SettingsDialog
+
+    QApplication.instance() or QApplication([])
+    dialog = SettingsDialog(settings_mod.load_runtime_settings())
+    try:
+        assert "at least 0.5" in dialog.temp_slider.toolTip().lower()
+        titles = [
+            label.text()
+            for label in dialog.findChildren(QLabel)
+            if label.objectName() == "SettingsSectionLabel"
+        ]
+        assert any("editing freedom" in title.lower() for title in titles), titles
+    finally:
+        dialog.deleteLater()
+
+
 # --- no beeping: no copy keystrokes after an apply --------------------------
 
 
@@ -4972,6 +4995,197 @@ def test_small_marks_are_drawn_for_the_screen_they_are_on() -> None:
     assert retina.width() == 32 and retina.devicePixelRatio() == 2.0
 
 
+def _ink_bounds(image, floor: int = 24) -> tuple[int, int, int, int]:
+    """The rectangle a rendered mark paints in, for the mark tests below."""
+    left, top, right, bottom = image.width(), image.height(), -1, -1
+    for y in range(image.height()):
+        for x in range(image.width()):
+            if image.pixelColor(x, y).alpha() > floor:
+                left = min(left, x)
+                right = max(right, x)
+                top = min(top, y)
+                bottom = max(bottom, y)
+    return left, top, right, bottom
+
+
+def test_marks_are_laid_out_in_points_on_a_retina_screen() -> None:
+    """A DPR-2 canvas takes logical coordinates, so the layout must too.
+
+    Laying the mark out in device pixels on a canvas that already carries the
+    screen ratio drew every glyph at twice its box, and the canvas kept only
+    the top-left quarter of it: the settings rail, the identity mark and the
+    menu bar symbol all shipped as fragments. The offscreen test screen
+    reports ratio 1, which is why the older tests never saw it.
+    """
+    from src.gui import fitted_mark
+
+    pixmap = fitted_mark("menubar.svg", "#1f1e1a", 16, fill=0.88, ratio=2.0)
+    assert pixmap is not None
+    assert pixmap.width() == 32 and pixmap.devicePixelRatio() == 2.0
+    left, top, right, bottom = _ink_bounds(pixmap.toImage())
+    assert right >= left and bottom >= top, "the mark paints"
+    assert left >= 1 and top >= 1 and right <= 30 and bottom <= 30, (
+        left,
+        top,
+        right,
+        bottom,
+    )
+    # One optical size: the longest side fills the box, and the mark sits in
+    # the middle of it instead of hugging a corner.
+    assert max(right - left, bottom - top) + 1 >= 25, (left, top, right, bottom)
+    assert abs(left - (31 - right)) <= 3, (left, right)
+    assert abs(top - (31 - bottom)) <= 3, (top, bottom)
+
+
+def test_the_rail_and_menu_bar_marks_survive_a_retina_screen() -> None:
+    """The two callers that draw at the screen's resolution, not at 1x."""
+    from src import gui as gui_mod
+
+    original = gui_mod._screen_ratio
+    gui_mod._screen_ratio = lambda: 2.0
+    try:
+        icon = gui_mod.settings_icon("settings-live.svg", 16)
+        pixmap = icon.pixmap(16, 16)
+        image = pixmap.toImage()
+        left, top, right, bottom = _ink_bounds(image)
+        scale = pixmap.devicePixelRatio()
+        pixels = image.width()
+        assert right >= left, "the rail glyph paints"
+        # Margins on both sides, in the canvas's own pixels: a fragment
+        # clipped out of a 2x box touches an edge and leaves the opposite
+        # one empty.
+        assert left >= 1 and top >= 1, (left, top, pixels, scale)
+        assert right <= pixels - 2 and bottom <= pixels - 2, (
+            right,
+            bottom,
+            pixels,
+            scale,
+        )
+
+        tray = gui_mod.menu_bar_icon(18)
+        tray_image = tray.pixmap(18, 18).toImage()
+        left, top, right, bottom = _ink_bounds(tray_image)
+        side = tray_image.width()
+        assert side == tray_image.height(), (side, tray_image.height())
+        assert left >= 1 and top >= 1, (left, top, side)
+        assert right <= side - 2 and bottom <= side - 2, (right, bottom, side)
+    finally:
+        gui_mod._screen_ratio = original
+
+
+def test_a_mark_keeps_its_shape_when_it_is_not_square() -> None:
+    """A 40x24 toggle stretched into a square box is not a toggle."""
+    from src.gui import _tinted_pixmap
+
+    pixmap = _tinted_pixmap("toggle-on.svg", "#1f1e1a", 64, ratio=1.0)
+    assert pixmap is not None
+    left, top, right, bottom = _ink_bounds(pixmap.toImage())
+    width = right - left + 1
+    height = bottom - top + 1
+    assert width > height, (width, height)
+    assert abs(width / height - 40 / 24) < 0.15, (width, height)
+
+
+def test_the_brand_mark_is_drawn_where_the_app_draws_it() -> None:
+    """The header, the About panel and the settings identity all render
+    logo/logo.svg through the same crop-and-centre path as the rail glyphs."""
+    from src.gui import fitted_mark
+
+    for size in (24, 68):
+        pixmap = fitted_mark(
+            "logo.svg", "#1a2a3a", size, fill=0.92, ratio=2.0, folder="logo"
+        )
+        assert pixmap is not None, size
+        assert pixmap.width() == size * 2, (size, pixmap.width())
+        left, top, right, bottom = _ink_bounds(pixmap.toImage())
+        assert right >= left and bottom >= top, (size, left, top, right, bottom)
+        assert left >= 1 and top >= 1, (size, left, top)
+        assert right <= size * 2 - 2 and bottom <= size * 2 - 2, (
+            size,
+            right,
+            bottom,
+        )
+        # One optical size: the mark fills the box the caller asked for.
+        assert max(right - left, bottom - top) + 1 >= size * 2 * 0.85, (
+            size,
+            left,
+            top,
+            right,
+            bottom,
+        )
+
+
+def _load_icon_tool():
+    """The icon builder, loaded by path: scripts/ is not an importable
+    package."""
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "scripts"
+        / "build_app_icons.py"
+    )
+    spec = importlib.util.spec_from_file_location("build_app_icons", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_app_icon_carries_a_small_size_drawing() -> None:
+    """Cutting the 16px icon from the line art is what turned it into a grey
+    smudge, so the small entries use the mark filled solid. Regenerate the
+    platform files with ``scripts/build_app_icons.py``."""
+    from PyQt6.QtWidgets import QApplication
+
+    from src.settings import resource_path
+
+    QApplication.instance() or QApplication([])
+    tool = _load_icon_tool()
+
+    def dark_pixels(image) -> int:
+        count = 0
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = image.pixelColor(x, y)
+                if pixel.alpha() > 128 and pixel.red() < 160:
+                    count += 1
+        return count
+
+    detail = dark_pixels(tool.render_image(tool.DETAIL, 16))
+    small = dark_pixels(tool.small_icon(16))
+    assert detail > 0, "the line-art icon renders at all"
+    assert small > detail * 1.3, (small, detail)
+
+    for name in ("logo.png", "logo.icns", "logo.ico"):
+        assert os.path.exists(resource_path(os.path.join("logo", name))), name
+
+
+def test_settings_blurbs_are_prose_not_stylesheets() -> None:
+    """The Live Check page shipped its inline CSS in the sentence under the
+    title - "…while you write. #6a6760; font-size: 12px;" - because a
+    stylesheet string was appended to the blurb instead of the stylesheet."""
+    from PyQt6.QtWidgets import QApplication, QLabel
+
+    from src import gui as gui_mod
+    from src import settings as settings_mod
+
+    QApplication.instance() or QApplication([])
+    dialog = gui_mod.SettingsDialog(settings_mod.load_runtime_settings())
+    try:
+        offenders = []
+        for label in dialog.findChildren(QLabel):
+            if label.objectName() not in ("SettingsSubtitle", "SettingsTitle",
+                                          "SettingsHint", "SettingsRowHelper"):
+                continue
+            text = label.text()
+            if "font-size" in text or "color: #" in text or "px;" in text:
+                offenders.append((label.objectName(), text))
+    finally:
+        dialog.deleteLater()
+    assert offenders == [], offenders
+
+
 def test_the_menu_bar_mark_is_a_template_drawn_at_bar_size() -> None:
     """Not the 1024px app icon shrunk 56x, and not a white plate up there."""
     from PyQt6.QtWidgets import QApplication
@@ -5060,4 +5274,3 @@ def test_the_menu_bar_mark_is_square_with_an_inset() -> None:
         bottom,
     )
     assert max(right - left + 1, bottom - top + 1) >= 14, (left, top, right, bottom)
-

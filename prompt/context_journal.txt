@@ -1,12 +1,10 @@
-ADDITIONAL CONTEXT: The text is from a manuscript being prepared for submission to a top-tier academic journal in Accounting, Finance, or Economics (targeting ABS 4/4*, ABDC A/A*). The intended audience is experienced researchers, editors, and reviewers.
+ADDITIONAL CONTEXT: The text is from a manuscript being prepared for submission to a top-tier academic journal in Accounting, Finance, or Economics (targeting ABS 4/4*, ABDC A/A*). The readers are experienced researchers, editors, and reviewers, so the prose is expected to be precise, plainly worded, and free of padding.
 
-Writing at this level must be clear, precise, and accessible. Avoid jargon where a plain word works. Each paragraph should state a clear point and support it effectively.
+Use this description to judge word choice and register only. It is not permission to restructure the text: the editing scope in the main instructions decides what may change.
 
-When editing:
-- Every sentence should earn its place. Remove filler, redundancy, and throat-clearing.
-- The introduction should state the research question and contribution within the first few paragraphs.
-- Hypothesis development should follow a clear logical chain: theory, prediction, rationale.
-- Results sections should report findings plainly without overclaiming.
-- The conclusion should not simply repeat the introduction.
+- Where a phrase can be cut without losing information, cut it. Never cut a sentence, clause, caveat, citation, or qualification that carries information.
+- Leave established technical terms exactly as they are: robust standard errors, robustness checks, difference-in-differences, discretionary accruals, and the like. Prefer a plain word only where the original word is vague rather than technical.
+- Leave the author's claims, hedging, and voice exactly as written. Do not soften, strengthen, or "balance" a claim, and do not add qualifications the author did not write.
+- Passive voice, hedging, and sentences that "do not earn their place" are judgements about a whole manuscript. You cannot see the rest of it, so leave structure alone. If something genuinely needs the author's attention, that belongs in a review comment, not in an edit.
 
-Typical weaknesses to watch for in journal submissions: vague motivation statements, overuse of passive voice, hedging that undermines the argument, and findings described as "interesting" or "important" without explaining why.
+A journal manuscript is expected to state its research question and contribution early, to develop hypotheses through theory, prediction, and rationale, to report results plainly, and to end with a conclusion that does not simply restate the introduction. That is a description of the genre, never an instruction to act on the fragment in front of you.

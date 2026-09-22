@@ -906,6 +906,36 @@ def load_context_overlay(context: str) -> str:
     return _load_prompt_text(filename) or ""
 
 
+# One line per context, for the paths whose prompts are deliberately compact:
+# the polish prompt and the live preview. The full overlay would swamp a JSON
+# edit contract, but dropping the setting entirely made it mean different
+# things depending on which application the text came from.
+CONTEXT_SUMMARIES = {
+    "Academic Journal (Top-Tier)": (
+        "Context: the text is from a manuscript for a top-tier Accounting, "
+        "Finance or Economics journal. Keep technical terms, claims, hedging "
+        "and structure as written; do not add or remove content."
+    ),
+    "PhD Thesis Chapter": (
+        "Context: the text is from a PhD thesis chapter. Keep the candidate's "
+        "voice; some redundancy is expected, so do not compress heavily."
+    ),
+    "Email Editing": (
+        "Context: the text is from an email draft. Keep the register "
+        "professional and preserve greetings, sign-offs and any request, "
+        "commitment or deadline exactly as written."
+    ),
+    "General Editing": (
+        "Context: general writing. Keep the register the text already uses."
+    ),
+}
+
+
+def load_context_summary(context: str) -> str:
+    """The one-line description of the document's context."""
+    return CONTEXT_SUMMARIES.get(context, CONTEXT_SUMMARIES["General Editing"])
+
+
 def _load_prompt_text(filename: str) -> str | None:
     """Return a prompt file's text.
 
@@ -951,13 +981,14 @@ def load_polish_prompt(
     context: str = "General Editing",
 ) -> str:
     """Load the prompt used for polishing text in non-Word apps."""
+    summary = load_context_summary(context)
     if context == "Email Editing":
         prompt_filename = "polish_email.txt"
         if style == "Creative (Rewrite)":
             prompt_filename = "polish_email_creative.txt"
         content = _load_prompt_text(prompt_filename)
         if content is not None:
-            return content
+            return content + "\n\n" + summary
 
     prompt_filename = "polish_general.txt"
     if style == "Creative (Rewrite)":
@@ -965,18 +996,20 @@ def load_polish_prompt(
 
     content = _load_prompt_text(prompt_filename)
     if content is not None:
-        return content
+        return content + "\n\n" + summary
     if style == "Creative (Rewrite)":
         return (
             "You are a professional writing editor. Rewrite the text for "
             "clarity, flow, and impact while preserving the author's voice and "
             "meaning. Do not add new information. Return only the polished "
             "text with no markdown or explanations."
+            "\n\n" + summary
         )
     return (
         "You are a professional writing editor. Polish the text for clarity, "
         "grammar, spelling, and flow while preserving the author's voice and "
         "meaning. Return only the polished text with no markdown or explanations."
+        "\n\n" + summary
     )
 
 
@@ -998,10 +1031,16 @@ STRICT_EDITING_RULES = (
     "content, or conversational replies."
 )
 
+# The first line of the contract itself, used to tell "this prompt already
+# carries the contract" from "this prompt merely points at it". Matching on
+# the words "OUTPUT CONTRACT" was not enough: a prompt that references the
+# contract by name would then never receive it.
+STRICT_EDITING_MARKER = "You are an editing tool, not a conversational assistant"
+
 
 def with_strict_editing_rules(prompt: str) -> str:
-    """Append the strict editing-only rules unless already present."""
-    if "OUTPUT CONTRACT" in prompt:
+    """Append the strict editing-only rules unless they are already there."""
+    if STRICT_EDITING_MARKER in prompt:
         return prompt
     return prompt + STRICT_EDITING_RULES
 
@@ -2148,19 +2187,25 @@ def polish_selection_once(
         return f"Error: {e!s}", None, None, None, 0
 
 
-def load_preview_prompt(style: str = "strict") -> str:
+def load_preview_prompt(
+    style: str = "strict", context: str = "General Editing"
+) -> str:
     """Return the live-preview system prompt for the requested style.
 
     "strict" only corrects real errors; "polish" also improves flow, word
-    choice, and conciseness while retaining meaning and tone.
+    choice, and conciseness while retaining meaning and tone. The document
+    context rides along as a single line: the preview contract is compact, and
+    ignoring the setting made the same choice behave differently in Word and
+    in every other application.
     """
     key = "preview_edits_polish.txt" if style == "polish" else "preview_edits.txt"
     content = _load_prompt_text(key)
     if content:
-        return content
+        return content + "\n\n" + load_context_summary(context)
     return (
         'Return only JSON: {"edits":[{"before":"...","after":"...",'
         '"reason":"..."}]}. Correct only real errors in the text between markers.'
+        "\n\n" + load_context_summary(context)
     )
 
 
@@ -2193,10 +2238,13 @@ def preview_edits_once(
             return "no_api_key", [], {"provider": provider_name}
 
     spelling = settings.get("general", {}).get("spelling", "UK/AU/NZ")
+    context = str(
+        settings.get("general", {}).get("context", "General Editing")
+    )
     style = str(live.get("style", "strict"))
     if style != "polish":
         style = "strict"
-    system_prompt = load_preview_prompt(style)
+    system_prompt = load_preview_prompt(style, context)
     if spelling == "UK/AU/NZ":
         system_prompt += "\n\nUse British/Australian/New Zealand spelling."
     elif spelling == "US English":
