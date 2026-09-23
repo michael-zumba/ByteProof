@@ -47,6 +47,10 @@ rendered text inside struck or inserted spans):
 | change two words | 26.3% | 3.3% |
 | reword one clause | 1.2% | 1.2% |
 
+The same paragraph and the same edit, rendered by the app's own review view
+(`diff-before.png` is the shipped renderer, `diff-after.png` is the fix):
+the old rendering is the "entire replacement" in the owner's screenshot.
+
 ## Automated tests
 
 - New in `tests/test_hardening.py`: two review-diff tests (both fail with the
