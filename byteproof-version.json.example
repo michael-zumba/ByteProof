@@ -1,11 +1,8 @@
 {
-  "version": "2.2.0",
-  "release_date": "2026-09-18",
-  "release_notes": "Cleaner Settings: one-line rows with explanations on hover, toggle switches, and tidier cards, lists and buttons. Fixed a crash where clicking the menu bar icon could quit ByteProof on the newest macOS.",
+  "version": "2.2.1",
+  "release_date": "2026-09-23",
+  "release_notes": "Word comments now post properly: reviewer notes land as real comments in the document, and a note Word refuses stays on your clipboard with a message. The Proposed Changes pane shows pinpoint edits again instead of marking whole paragraphs as replaced.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
-  "sha256": {
-    "macos_apple_silicon_url": "1addacc77dbcf8d418d0ed2dd3dd807af827ae1873af30d631a8729955b73d8a",
-    "windows_url": "10375dbffd9be57e767cd7f41801dfe129a5542616cc699df3c7f09b0ca4c1eb"
-  }
+  "sha256": {}
 }
