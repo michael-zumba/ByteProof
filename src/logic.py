@@ -2004,7 +2004,15 @@ def proofread_selection_once(
                     print("Correction inserted as comment (auto-apply disabled).")
                 except Exception as e:
                     print(f"Failed to insert correction comment: {e}")
-                result_status = "Changes added as comment (auto-apply disabled)." + warning_suffix
+                    result_status = (
+                        "Changes applied, but Word would not take the suggestion "
+                        "comment (it is on your clipboard)."
+                    )
+                else:
+                    result_status = (
+                        "Changes added as comment (auto-apply disabled)."
+                    )
+                result_status += warning_suffix
 
         if comment_result["text"] is not None and comment_result["text"].strip():
             try:
@@ -2012,6 +2020,12 @@ def proofread_selection_once(
                 print("Comment inserted via keyboard shortcut.")
             except Exception as e:
                 print(f"Comment insertion failed: {e}")
+                # The apply itself worked, so this is a warning rather than a
+                # failure: say so in the status line the window shows.
+                result_status = (
+                    "Applied, but Word would not take the reviewer comment "
+                    "(it is on your clipboard)."
+                )
 
         return result_status, current_text, corrected, comment_result["text"], 0
         
