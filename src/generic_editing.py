@@ -1423,6 +1423,65 @@ class GenericTextEditor:
                 continue
         return rects
 
+    def ax_select_range(
+        self, target: dict[str, Any], start: int, length: int
+    ) -> bool:
+        """Select ``[start, start + length)`` in the focused text field.
+
+        Used after a verified sub-range write to put the user's selection back
+        over the text they were working on, now carrying the edit. Without it
+        the app's own post-paste selection (the pasted words, or a collapsed
+        caret) replaced the captured selection, and the remaining suggestions
+        on the panel - whose offsets are relative to that selection - no longer
+        pointed anywhere ("post-apply selection drifted; closing").
+
+        Offsets are code points, converted to the UTF-16 range the app wants.
+        Returns True only when the attribute write was accepted; a refusal is
+        logged by the caller's own read-back, never assumed.
+        """
+        if SYSTEM != "Darwin" or length < 0 or start < 0:
+            return False
+        pid = target.get("pid") or 0
+        if not pid:
+            return False
+        try:
+            import ApplicationServices as AS
+
+            _as, element = GenericTextEditor._mac_ax_text_element(pid)
+            if element is None:
+                return False
+            cu_start = start
+            cu_end = start + length
+            try:
+                err, value = AS.AXUIElementCopyAttributeValue(
+                    element, AS.kAXValueAttribute, None
+                )
+                if err == 0 and isinstance(value, str):
+                    from .live_preview import codepoint_to_utf16_index
+
+                    cu_start = codepoint_to_utf16_index(value, start)
+                    cu_end = codepoint_to_utf16_index(value, start + length)
+            except Exception:
+                pass
+            param = AS.AXValueCreate(
+                AS.kAXValueTypeCFRange, (cu_start, cu_end - cu_start)
+            )
+            err = int(
+                AS.AXUIElementSetAttributeValue(
+                    element, AS.kAXSelectedTextRangeAttribute, param
+                )
+            )
+            if err == 0:
+                _debug_log(
+                    f"ax_select_range: selected {cu_start}..{cu_end} "
+                    f"pid={pid}"
+                )
+                return True
+            return False
+        except Exception as exc:
+            _debug_log(f"ax_select_range failed: {exc}")
+            return False
+
     def ax_replace_range(
         self,
         target: dict[str, Any],
@@ -1435,7 +1494,14 @@ class GenericTextEditor:
         """Replace an absolute range in the focused field without keystrokes.
 
         Attempts, in order:
-        1. The AXReplaceRangeWithText parameterized action (newer PyObjC).
+        1. The AXReplaceRangeWithText parameterized action, if PyObjC ever
+           exposes it. It cannot today: macOS's public AX API ships
+           AXUIElementCopyParameterizedAttributeValue but no setter, and the
+           attribute constant is absent from the SDK (checked against the
+           MacOSX SDK headers and the bundled PyObjC). The guard below stays so
+           the write path uses it if Apple adds one, but nothing may rely on
+           it: every apply in practice goes through paths 2 and 3, which move
+           the app's selection.
         2. Selecting the sub-range and writing the selected-text attribute,
            only once the range is confirmed to hold ``before_text``.
         3. A clipboard-preserving paste over the sub-range; when the sub-range
@@ -1515,6 +1581,37 @@ class GenericTextEditor:
                 return None, None
             return cu_start, cu_end - cu_start
 
+        # The app's own selection is the user's place in the document, and the
+        # write path below moves it: setting the range selects the span, and a
+        # failed write used to leave it there. The user's cursor then sat on a
+        # word they never picked, and every later preview died with "selection
+        # changed" (capture.log: after a refused ChatGPT apply, previews of 29,
+        # 73, 36 and 39 characters each reported a *different* selection).
+        # Snapshot the range first and put it back whenever nothing was written.
+        selection_snapshot: list[tuple[Any, Any]] = []
+        for el in elements:
+            try:
+                err, range_value = AS.AXUIElementCopyAttributeValue(
+                    el, AS.kAXSelectedTextRangeAttribute, None
+                )
+                if err == 0 and range_value is not None:
+                    selection_snapshot.append((el, range_value))
+            except Exception:
+                continue
+
+        def _restore_selection() -> None:
+            """Give the app its selection back after a write that did not land."""
+            if not selection_snapshot:
+                return
+            for el, range_value in selection_snapshot:
+                try:
+                    AS.AXUIElementSetAttributeValue(
+                        el, AS.kAXSelectedTextRangeAttribute, range_value
+                    )
+                except Exception:
+                    continue
+            _debug_log("ax_replace_range: put the previous selection back")
+
         def _set_text(el: Any) -> int:
             return int(
                 AS.AXUIElementSetAttributeValue(
@@ -1580,6 +1677,26 @@ class GenericTextEditor:
                     continue
             return None
 
+        def _find_written_text() -> int | None:
+            """Offset of the text we asked the app to write, if it is readable.
+
+            Only used to explain a failed paste: when the app's own caret was
+            not over the range (it can move on its own between the range write
+            and the keystroke), the text lands somewhere else in the field.
+            """
+            for el in elements:
+                try:
+                    err, value = AS.AXUIElementCopyAttributeValue(
+                        el, AS.kAXValueAttribute, None
+                    )
+                except Exception:
+                    continue
+                if err == 0 and isinstance(value, str):
+                    index = value.find(new_text)
+                    if index >= 0:
+                        return index
+            return None
+
         def _range_confirmed(el: Any, cu_start: int, cu_len: int) -> bool:
             try:
                 err, rv = AS.AXUIElementCopyAttributeValue(
@@ -1599,29 +1716,62 @@ class GenericTextEditor:
                 )
                 if err != 0 or not isinstance(got, str):
                     return False
-                return _same_text(got, text) or got.strip() == text.strip()
+                return _same_text(got, text)
             except Exception:
                 return False
+
+        def _span_text_is_unique(text: str) -> bool:
+            """Whether ``text`` has exactly one home in the field.
+
+            Reading the field is what makes a selected-text match usable as
+            proof of position: with two homes, a selection sitting on the other
+            one looks identical, and the paste then lands over *those* words.
+            Unreadable text is not provable, so it counts as ambiguous.
+            """
+            readable = False
+            for el in elements:
+                try:
+                    err, value = AS.AXUIElementCopyAttributeValue(
+                        el, AS.kAXValueAttribute, None
+                    )
+                except Exception:
+                    continue
+                if err == 0 and isinstance(value, str):
+                    readable = True
+                    if value.count(text) != 1:
+                        return False
+            return readable
 
         def _confirm_range(el: Any, cu_start: int, cu_len: int) -> bool:
             # Some apps (e.g. ChatGPT) apply the range-selection write
             # asynchronously: the immediate readback still shows the old
             # range. Re-read over a short window, and also accept a
             # selected-text match on the original span as the range having
-            # landed, before deciding it was ignored.
+            # landed, before deciding it was ignored - but only when that
+            # match proves the position. The span's text must be exactly what
+            # the app has selected *and* have a single home in the field, or
+            # the app could be sitting on a different occurrence of the same
+            # words and the write would land there instead.
             if _range_confirmed(el, cu_start, cu_len):
                 return True
             for _attempt in range(RANGE_CONFIRM_RETRIES):
                 time.sleep(RANGE_CONFIRM_DELAY_S)
                 if _range_confirmed(el, cu_start, cu_len):
                     return True
-                if before_text is not None and _selection_holds(
-                    el, before_text
-                ):
+                if not before_text or not _selection_holds(el, before_text):
+                    continue
+                if not _span_text_is_unique(before_text):
                     _debug_log(
-                        "ax_replace_range: range confirmed via selected text"
+                        "ax_replace_range: the selection holds the span's "
+                        "text but that text is not unique in the field; "
+                        "refusing to treat the range as confirmed"
                     )
-                    return True
+                    return False
+                _debug_log(
+                    "ax_replace_range: range confirmed via a unique "
+                    "selected text"
+                )
+                return True
             _debug_log(
                 "ax_replace_range: range confirmation failed after "
                 f"{RANGE_CONFIRM_RETRIES} retries"
@@ -1704,6 +1854,7 @@ class GenericTextEditor:
                 "ax_replace_range: cannot confirm the sub-range selection "
                 "and the span does not cover the whole selection; giving up"
             )
+            _restore_selection()
             return False, "Could not apply the edit in this app."
 
         current = _range_slice()
@@ -1724,6 +1875,7 @@ class GenericTextEditor:
                 "ax_replace_range: range no longer holds the original text "
                 f"({_redact(current)}); refusing to paste"
             )
+            _restore_selection()
             return False, "Could not apply the edit in this app."
 
         def _paste() -> None:
@@ -1773,6 +1925,17 @@ class GenericTextEditor:
                 return True, "Applied."
             if verdict == "unreadable":
                 return True, "Applied — please check the document."
+            # Nothing proves the keystroke landed over the span. Say where the
+            # text ended up (a paste that missed lands wherever the app's own
+            # caret was, and that is what the owner saw as "the edit lost its
+            # position") and give the app its selection back either way.
+            landed_at = _find_written_text()
+            if landed_at is not None and landed_at != start:
+                _debug_log(
+                    "ax_replace_range: the app put the text at "
+                    f"{landed_at} instead of {start}"
+                )
+            _restore_selection()
             return False, "Could not apply the edit in this app."
         finally:
             _mac_restore_clipboard(saved)

@@ -2575,6 +2575,36 @@ class LivePreviewService(QObject):
             for span in self._pending
         )
 
+    def _write_evidence(
+        self, span: EditSpan, before_text: str, expected_abs: int
+    ) -> str:
+        """What the field says about a write whose report was a failure.
+
+        "kept"    - the span still holds its text, or the app exposes no text
+                    to compare: nothing was written, so the spans to its left
+                    are exactly where the preview put them.
+        "applied" - the field holds the replacement at the span, so the app
+                    did the write and only its confirmation was unreadable.
+        "unknown" - the field is readable and holds neither: the app changed
+                    that text without confirming the edit. Nothing else in the
+                    selection can be trusted after that.
+
+        A failure with an unreadable field is "kept" on purpose. Every refusal
+        on that path happens *before* a keystroke: the AX path will not paste
+        unless the sub-range is confirmed, and the Word path re-reads the range
+        and stops when it holds something else. An unreadable read-back also
+        means "unverifiable", which `ax_replace_range` reports as applied
+        rather than failed.
+        """
+        live = self._live_edit_text()
+        if not live:
+            return "kept"
+        if self._locate_span(live, before_text, expected_abs) is not None:
+            return "kept"
+        if self._locate_span(live, span.after, expected_abs) is not None:
+            return "applied"
+        return "unknown"
+
     def _live_edit_text(self, target: dict[str, Any] | None = None) -> str:
         """The target field's current text, or "" when it cannot be read.
 
@@ -2985,6 +3015,11 @@ class LivePreviewService(QObject):
             + span.after
             + self._selection_text[rel_start + len(before_text) :]
         )
+        # A paste consumes the selection: the app is left holding the pasted
+        # words or a collapsed caret. Select the user's text again, now
+        # carrying the edit, so the rest of the review still points at the
+        # region they chose and their place in the document is kept.
+        self._select_corrected_selection(expected)
         if not self._sync_after_apply(expected, tolerant=True):
             _debug_log("LIVE APPLY ONE: post-apply selection drifted; closing")
             self._hide_panel()
@@ -2993,6 +3028,36 @@ class LivePreviewService(QObject):
         if panel is not None:
             panel.set_spans(remaining)
             panel.show()
+
+    def _select_corrected_selection(self, corrected: str) -> bool:
+        """Put the captured selection back over the same text after an edit.
+
+        Only the Accessibility apps need this: Word's AppleScript write works
+        on a document range and never touches the selection. Failure is fine -
+        the caller's read-back then decides whether the panel can stay.
+        """
+        if self._selection_is_word or not self._selection_has_range:
+            return False
+        selector = getattr(self._editor, "ax_select_range", None)
+        if not callable(selector):
+            return False
+        try:
+            selected = bool(
+                selector(
+                    self._selection_target,
+                    int(self._selection_start),
+                    len(corrected),
+                )
+            )
+        except Exception as exc:
+            _debug_log(f"LIVE APPLY: could not restore the selection: {exc}")
+            return False
+        if selected:
+            _debug_log(
+                "LIVE APPLY: the captured selection carries the edit "
+                f"({len(corrected)} chars)"
+            )
+        return selected
 
     def panel_showing_suggestions(self) -> bool:
         """Whether the suggestion panel is on screen with something to apply."""
@@ -3198,6 +3263,7 @@ class LivePreviewService(QObject):
         failure_message = ""
         skipped: list[EditSpan] = []
         undo_steps: list[UndoStep] = []
+        stopped = False
         # Apply from the end of the selection backwards. Every edit then changes
         # text only *after* the spans still waiting, so their offsets stay the
         # offsets the preview computed. The old left-to-right order had to
@@ -3205,7 +3271,8 @@ class LivePreviewService(QObject):
         # value lagged a paste (Outlook does), the next span was placed from a
         # stale offset and the document around it was rewritten in the wrong
         # place. Right-to-left removes that whole class of drift.
-        for span in sorted(batch, key=lambda s: s.start, reverse=True):
+        ordered = sorted(batch, key=lambda s: s.start, reverse=True)
+        for index, span in enumerate(ordered):
             before_text = span.before or self._selection_text[span.start : span.end]
             rel_start, rel_end = span.start, span.end
             located = self._relocate_rel_start(before_text, rel_start)
@@ -3236,15 +3303,54 @@ class LivePreviewService(QObject):
                 visible_start=span.start,
             )
             if not ok:
-                # Keep going: every remaining span lies before this one, so a
-                # failed or unverified write cannot have moved it. (The old
-                # left-to-right order could not make that promise.)
                 failure_message = message or "Could not apply the edit in this app."
-                _debug_log(
-                    "LIVE APPLY ALL: skipping a span after failure "
-                    f"({failure_message!r}) at rel=({rel_start},{rel_end})"
+                evidence = self._write_evidence(
+                    span, before_text, self._selection_start + rel_start
                 )
-                skipped.append(span)
+                if evidence == "applied":
+                    # The app did the write but never confirmed it readably.
+                    _debug_log(
+                        "LIVE APPLY ALL: the write is present despite the "
+                        f"failure report at rel=({rel_start},{rel_end})"
+                    )
+                elif evidence == "kept":
+                    # The span still holds its own text, so nothing was
+                    # written: every span to its left is exactly where the
+                    # preview put it and the batch can carry on.
+                    _debug_log(
+                        "LIVE APPLY ALL: skipping a span after failure "
+                        f"({failure_message!r}) at rel=({rel_start},{rel_end}); "
+                        "the text is untouched"
+                    )
+                    skipped.append(span)
+                    continue
+                else:
+                    # The app changed that text without confirming the edit.
+                    # Nothing else in the selection can be trusted now: stop,
+                    # keep the rest of the review, and say so. Writing on was
+                    # how a refused apply in ChatGPT turned into a minute of
+                    # "selection changed" churn while the app's own caret was
+                    # dragged through one span after another.
+                    _debug_log(
+                        "LIVE APPLY ALL: stopping at rel="
+                        f"({rel_start},{rel_end}); the app did not confirm the "
+                        "edit and the text there is no longer the original"
+                    )
+                    # The panel lists suggestions left to right, the batch
+                    # works right to left: keep the panel's order.
+                    self._pending = sorted(
+                        ordered[index:], key=lambda s: s.start
+                    )
+                    failure_message = (
+                        "Could not confirm the edit in the app — check that "
+                        "text before applying more."
+                    )
+                    stopped = True
+                    break
+                applied += 1
+                undo_steps.append(
+                    self._undo_step(abs_start, span.after, span.before)
+                )
                 continue
             applied += 1
             undo_steps.append(
@@ -3262,7 +3368,34 @@ class LivePreviewService(QObject):
                     "steps": list(reversed(undo_steps)),
                 }
             )
-        if not skipped:
+        if stopped:
+            # Keep every span the batch never reached so the review is not
+            # lost, but offer no "press Apply All" retry: the open question is
+            # what the app did with the text, not which offset to use.
+            landed = [
+                span
+                for span in batch
+                if span not in self._pending and span not in skipped
+            ]
+            if landed:
+                self._selection_text = apply_edits_to_text(
+                    self._selection_text, landed
+                )
+                self._seen_text = self._selection_text
+            panel = self._panel
+            if self._pending and panel is not None:
+                panel.set_spans(list(self._pending))
+                panel.show()
+            else:
+                self._hide_panel()
+            message = failure_message
+        elif not skipped:
+            # Every write landed and was verified, so the app is holding the
+            # captured text with the edits in it: put the selection back over
+            # it rather than leaving the user's place on the last paste.
+            self._select_corrected_selection(
+                apply_edits_to_text(self._selection_text, batch)
+            )
             message = (
                 "Applied 1 suggestion."
                 if applied == 1

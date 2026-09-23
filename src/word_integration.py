@@ -1117,6 +1117,15 @@ class MacOSWordIntegration(WordIntegration):
         expected_doc = _applescript_quote(expected_document or "")
         expected_text = _applescript_quote(before_text or "")
         script = f"""
+        on canon(theText)
+            set saved to AppleScript's text item delimiters
+            set AppleScript's text item delimiters to {{return & linefeed, return, linefeed}}
+            set parts to text items of theText
+            set AppleScript's text item delimiters to linefeed
+            set canonical to parts as text
+            set AppleScript's text item delimiters to saved
+            return canonical
+        end canon
         tell application "Microsoft Word"
             if not running then return "NOT_RUNNING"
             if not (exists active document) then return "NO_DOCUMENT"
@@ -1125,7 +1134,7 @@ class MacOSWordIntegration(WordIntegration):
             end if
             set r to create range active document start {start} end {end}
             if "{expected_text}" is not "" then
-                if (content of r) is not "{expected_text}" then return "TEXT_CHANGED"
+                if my canon(content of r as string) is not my canon("{expected_text}") then return "TEXT_CHANGED"
             end if
             set oldTrack to missing value
             try
@@ -1147,7 +1156,16 @@ class MacOSWordIntegration(WordIntegration):
                     set track revisions of active document to oldTrack
                 end if
             end try
-            if (content of r) is (the clipboard as text) then return "OK"
+            -- Read the text back from the extent we asked to write. Word keeps
+            -- a range object's old extent after `set content`, so reading `r`
+            -- compares the first N characters of the new text with all of it
+            -- and reported a mismatch for every edit that changed the length
+            -- (every live edit ended in "please check the document"). A fresh
+            -- range over the written extent is what the Windows path reads too.
+            set written to (the clipboard as text)
+            set newEnd to {start} + (length of written)
+            set fresh to create range active document start {start} end newEnd
+            if my canon(content of fresh as string) is my canon(written) then return "OK"
             return "VERIFY_MISMATCH"
         end tell
         """

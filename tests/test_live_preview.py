@@ -4222,3 +4222,536 @@ def test_write_verification_accepts_newline_normalisation():
     assert _value_holds("a\nb tail", 0, "a\r\nb")  # collapsed CRLF
     # No line breaks: no length guessing.
     assert _range_write_candidates("abc") == [3]
+
+
+# --- "the edit lost its position": AX write-path hardening ---
+
+
+class _FakeAXField:
+    """A minimal Accessibility text field that can lag, ignore and move.
+
+    Models what capture.log showed for the apps where a live edit ended up
+    somewhere other than the span: the range write is accepted (or lags), the
+    selected-text write is silently ignored, and the app's own selection can
+    sit on a different occurrence of the same words.
+    """
+
+    kAXValueTypeCFRange = "cfrange"
+    kAXSelectedTextRangeAttribute = "range"
+    kAXSelectedTextAttribute = "seltext"
+    kAXValueAttribute = "value"
+    kAXRoleAttribute = "role"
+    kAXDescriptionAttribute = "desc"
+
+    def __init__(
+        self,
+        value,
+        selected,
+        range_value,
+        range_write_works=True,
+        range_readback_lags=False,
+    ):
+        self.value = value
+        self.selected = selected
+        self.range_value = range_value
+        self.range_write_works = range_write_works
+        # An app that applies the range write but keeps reporting the old
+        # range for a while (ChatGPT does this): the selection is then the only
+        # evidence that the range landed.
+        self.range_readback_lags = range_readback_lags
+        self.new_text = ""
+        self.set_calls: list[tuple[str, object]] = []
+        self.posted: list[int] = []
+
+    def AXIsProcessTrusted(self):
+        return True
+
+    def AXValueCreate(self, kind, value):
+        return value  # (location, length)
+
+    def AXUIElementSetAttributeValue(self, el, attr, value):
+        self.set_calls.append((attr, value))
+        if attr == self.kAXSelectedTextRangeAttribute:
+            if not self.range_write_works:
+                return 1
+            if not self.range_readback_lags:
+                self.range_value = value
+            return 0
+        if attr == self.kAXSelectedTextAttribute:
+            # Accepted, never committed - exactly what web editors do.
+            return 0
+        return 1
+
+    def AXUIElementCopyAttributeValue(self, el, attr, out):
+        if attr == self.kAXValueAttribute:
+            return 0, self.value
+        if attr == self.kAXSelectedTextRangeAttribute:
+            return 0, self.range_value
+        if attr == self.kAXSelectedTextAttribute:
+            return 0, self.selected
+        return 1, None
+
+    def last_range_set(self):
+        for attr, value in reversed(self.set_calls):
+            if attr == self.kAXSelectedTextRangeAttribute:
+                return value
+        return None
+
+
+def _wire_fake_ax_field(monkeypatch, field):
+    from src.generic_editing import GenericTextEditor
+
+    monkeypatch.setitem(sys.modules, "ApplicationServices", field)
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_text_element", lambda pid: (field, "el")
+    )
+    monkeypatch.setattr(
+        GenericTextEditor, "_mac_ax_focused", lambda pid: (field, "el")
+    )
+    monkeypatch.setattr(GenericTextEditor, "_mac_activate", lambda target: True)
+    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_restore_clipboard", lambda t: None
+    )
+    monkeypatch.setattr(
+        "src.generic_editing._mac_clipboard_string", lambda: "saved"
+    )
+    monkeypatch.setattr("src.generic_editing.time.sleep", lambda s: None)
+
+    def fake_post(code, pid):
+        field.posted.append(code)
+        # A real paste replaces the app's selected range with the new text.
+        start, length = field.range_value
+        field.value = (
+            field.value[:start] + field.new_text + field.value[start + length :]
+        )
+        field.selected = field.new_text
+
+    monkeypatch.setattr("src.generic_editing._post_mac_key", fake_post)
+    return field
+
+
+def _fake_ax_editor(monkeypatch, field):
+    from src.generic_editing import GenericTextEditor
+
+    _wire_fake_ax_field(monkeypatch, field)
+    return GenericTextEditor()
+
+
+def test_ax_replace_range_puts_the_selection_back_when_nothing_was_written(
+    monkeypatch,
+):
+    """A refused write must not leave the app's caret on our span.
+
+    capture.log: after a refused ChatGPT apply the app's selection walked from
+    span to span (previews of 29, 73, 36 and 39 characters each reported a
+    different selection), so the user's place was gone and every following
+    preview died with "selection changed".
+    """
+    field = _FakeAXField(
+        "teh cat sat",
+        selected="cat sat",
+        range_value=(4, 7),
+        range_write_works=False,
+    )
+    field.new_text = "the"
+    editor = _fake_ax_editor(monkeypatch, field)
+
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "App"}, 0, 3, "the", before_text="teh"
+    )
+
+    assert ok is False
+    assert message == "Could not apply the edit in this app."
+    assert field.posted == []  # nothing was typed
+    # The last range write is the user's own selection, put back.
+    assert field.last_range_set() == (4, 7)
+    assert field.value == "teh cat sat"
+
+
+def test_ax_replace_range_refuses_when_the_span_text_has_two_homes(monkeypatch):
+    """Proof of position, not a lookalike: two occurrences means no write.
+
+    The range readback can lag (ChatGPT), and then the app's *selection* is the
+    only evidence that the range write landed. When the span's words also exist
+    elsewhere, a selection sitting on that other occurrence reads identically -
+    and the paste would replace words the user never chose.
+    """
+    field = _FakeAXField(
+        "teh cat sat on teh mat",
+        selected="teh",
+        range_value=(0, 3),  # the readback never shows the new range
+        range_readback_lags=True,
+    )
+    field.new_text = "the"
+    editor = _fake_ax_editor(monkeypatch, field)
+
+    ok, _message = editor.ax_replace_range(
+        {"pid": 9, "name": "App"}, 15, 3, "the", before_text="teh"
+    )
+
+    assert ok is False
+    assert field.posted == []  # no keystroke into an unproven position
+    assert field.value == "teh cat sat on teh mat"
+    assert ("seltext", "the") not in field.set_calls
+
+
+def test_ax_replace_range_accepts_a_lagging_range_when_the_span_is_unique(
+    monkeypatch,
+):
+    """The async-app case still works when the position is provable."""
+    field = _FakeAXField(
+        "teh cat sat",
+        selected="teh",
+        range_value=(0, 3),
+        range_readback_lags=True,
+    )
+    field.new_text = "the"
+    editor = _fake_ax_editor(monkeypatch, field)
+
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "App"}, 0, 3, "the", before_text="teh"
+    )
+
+    assert ok is True and message == "Applied."
+    assert field.posted == [9]  # the paste carried the edit
+    assert field.value == "the cat sat"
+
+
+def test_ax_select_range_converts_code_points_to_utf16(monkeypatch):
+    """Re-selecting the edited text is emoji-safe for the same reason."""
+    field = _FakeAXField(
+        "\N{SLIGHTLY SMILING FACE} teh cat", selected="", range_value=(0, 0)
+    )
+    editor = _fake_ax_editor(monkeypatch, field)
+
+    assert editor.ax_select_range({"pid": 9}, 2, 3) is True
+    # Code points 2..5 sit at UTF-16 units 3..6 (the emoji is one unit pair).
+    assert field.range_value == (3, 3)
+
+
+def test_apply_all_stops_when_the_app_changed_the_text_unconfirmed(monkeypatch):
+    """A write that neither landed nor left the text alone ends the batch.
+
+    The old loop kept writing into an app whose state it could no longer
+    explain: six spans were attempted in the ChatGPT session of capture.log,
+    each one dragging the app's selection further from the user's own.
+    """
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    original = "teh cat sat"
+    state = {"text": original}
+    attempts: list[tuple[int, int, str]] = []
+
+    class RewritingEditor:
+        def selection_details(self, target):
+            return {
+                "text": original,
+                "range": (0, len(original)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return state["text"]
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            attempts.append((start, length, new))
+            # The app refuses the edit and rewrites the text on its own.
+            state["text"] = "something else entirely"
+            return False, "Could not apply the edit in this app."
+
+    service._editor = RewritingEditor()
+    service._selection_target = {
+        "bundle_id": "com.openai.chat",
+        "pid": 9,
+        "name": "ChatGPT",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = original
+    service._seen_text = original
+    service._show_result(
+        [
+            EditSpan("teh", "the", "Spelling", 0, 3),
+            EditSpan("sat", "was sitting", "Word choice", 8, 11),
+        ]
+    )
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert len(attempts) == 1  # the batch stopped after the unconfirmed write
+    assert messages == [
+        (
+            "Could not confirm the edit in the app — check that text "
+            "before applying more."
+        )
+    ]
+    assert [span.before for span in service._pending] == ["teh", "sat"]
+    service.stop()
+
+
+def test_apply_all_keeps_going_when_the_failed_span_is_untouched(monkeypatch):
+    """A provably untouched span does not strand the spans before it."""
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    text = "teh cat sat"
+    attempts: list[tuple[int, int, str]] = []
+
+    class Editor:
+        def selection_details(self, target):
+            return {
+                "text": text,
+                "range": (0, len(text)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return text  # nothing the app did changed the field
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            attempts.append((start, length, new))
+            if len(attempts) == 1:
+                return False, "Could not apply the edit in this app."
+            return True, "Applied."
+
+    service._editor = Editor()
+    service._pending = [
+        EditSpan("teh", "the", "Spelling", 0, 3),
+        EditSpan("sat", "was sitting", "Word choice", 8, 11),
+    ]
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = text
+    service._seen_text = text
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert attempts == [(8, 3, "was sitting"), (0, 3, "the")]
+    assert messages == [
+        (
+            "Applied 1 of 2 suggestions — 1 could not be placed. "
+            "Press Apply All to retry."
+        )
+    ]
+    assert [span.before for span in service._pending] == ["sat"]
+    service.stop()
+
+
+def test_apply_one_reselects_the_edited_text_and_keeps_the_panel(monkeypatch):
+    """The user's place carries the edit instead of being consumed by it."""
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class Editor:
+        def __init__(self):
+            self.text = "teh cat sat"
+            self.selection = "teh cat sat"
+            self.start = 0
+            self.writes: list[tuple[int, int, str]] = []
+            self.selections: list[tuple[int, int]] = []
+
+        def selection_details(self, target):
+            return {
+                "text": self.selection,
+                "range": (self.start, len(self.selection)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return self.text
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            self.writes.append((start, length, new))
+            self.text = self.text[:start] + new + self.text[start + length :]
+            # A paste leaves the app holding the pasted words.
+            self.selection = self.text
+            return True, "Applied."
+
+        def ax_select_range(self, target, start, length):
+            self.selections.append((start, length))
+            self.start = start
+            self.selection = self.text[start : start + length]
+            return True
+
+    editor = Editor()
+    service._editor = editor
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = "teh cat sat"
+    service._seen_text = "teh cat sat"
+    service._show_result(
+        [
+            EditSpan("teh", "the", "Spelling", 0, 3),
+            EditSpan("cat", "dog", "Word choice", 4, 7),
+        ]
+    )
+
+    service._apply_one(1)
+
+    assert editor.writes == [(4, 3, "dog")]
+    assert editor.selections == [(0, len("teh dog sat"))]
+    assert [span.before for span in service._pending] == ["teh"]
+    assert service._panel is not None and service._panel.isVisible()
+    service.stop()
+
+
+def test_apply_all_leaves_the_selection_over_the_edited_passage(monkeypatch):
+    """Apply All must not eat the user's place any more than Apply does."""
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class Editor:
+        def __init__(self):
+            self.text = "teh cat sat"
+            self.selection = "teh cat sat"
+            self.start = 0
+            self.selections: list[tuple[int, int]] = []
+
+        def selection_details(self, target):
+            return {
+                "text": self.selection,
+                "range": (self.start, len(self.selection)),
+                "context_before": "",
+                "context_after": "",
+            }
+
+        def field_value(self, target):
+            return self.text
+
+        def ax_replace_range(
+            self,
+            target,
+            start,
+            length,
+            new,
+            allow_direct_paste=False,
+            before_text=None,
+        ):
+            self.text = self.text[:start] + new + self.text[start + length :]
+            self.selection = new  # a paste leaves the pasted words selected
+            return True, "Applied."
+
+        def ax_select_range(self, target, start, length):
+            self.selections.append((start, length))
+            self.start = start
+            self.selection = self.text[start : start + length]
+            return True
+
+    editor = Editor()
+    service._editor = editor
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_start = 0
+    service._selection_is_word = False
+    service._selection_has_range = True
+    service._selection_text = "teh cat sat"
+    service._seen_text = "teh cat sat"
+    service._show_result(
+        [
+            EditSpan("teh", "the", "Spelling", 0, 3),
+            EditSpan("cat", "dog", "Word choice", 4, 7),
+        ]
+    )
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert editor.text == "the dog sat"
+    assert messages == ["Applied 2 suggestions."]
+    assert editor.selections == [(0, len("the dog sat"))]
+    service.stop()
+
+
+def test_word_live_edit_verifies_the_extent_it_wrote(monkeypatch):
+    """Word's range object keeps its old extent: verify a fresh range.
+
+    `set content of r` leaves `r` covering the original characters, so the old
+    read-back compared the first N characters of the new text with all of it
+    and every live edit ended in "Applied - please check the document" (57
+    times in capture.log). The Windows path already reads a fresh range; this
+    keeps macOS honest the same way, including Word's CR spelling of breaks.
+    """
+    import subprocess
+
+    from src import word_integration as wi
+
+    captured = []
+
+    def fake_run(args, **kwargs):
+        captured.append(kwargs.get("input"))
+        return _fake_subprocess_run()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "src.generic_editing._mac_set_clipboard", lambda text: None
+    )
+    integration = wi.MacOSWordIntegration()
+    ok, message = integration.apply_live_edit(
+        500, 10, 13, "the", before_text="teh"
+    )
+
+    assert ok is True and message == "Applied."
+    script = captured[-1].decode("utf-8")
+    assert "set newEnd to 510 + (length of written)" in script
+    assert "create range active document start 510 end newEnd" in script
+    assert 'my canon(content of r as string) is not my canon("teh")' in script
+    assert (
+        "text item delimiters to {return & linefeed, return, linefeed}"
+        in script
+    )
