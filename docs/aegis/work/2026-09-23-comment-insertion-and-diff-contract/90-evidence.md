@@ -65,3 +65,10 @@ the old rendering is the "entire replacement" in the owner's screenshot.
 
 - `tools/bump_version.py 2.2.1-beta.8` (pre-release: the public feed keeps
   advertising the last release).
+- `./build_macos.sh arm64` → signed with the Developer ID, installed to
+  `/Applications` (2.2.1-beta.7 moved to the Trash). The stable-signing step
+  warned "keychain locked" and skipped, but the installed app still reports
+  `LIVE PERMISSION: trusted=True`.
+- Apple's notary service was still processing the app submission at hand-off;
+  the DMG is produced when that finishes, and no release is published for a
+  beta.
