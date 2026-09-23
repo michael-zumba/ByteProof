@@ -23,6 +23,23 @@ input inside").
 - After Insert ▸ Comment, the box is a *draft*: `count of comments` remains 0
   while the Accessibility tree shows `Post comment (Cmd + Enter)`,
   `Cancel new comment draft`, and the composer text area.
+- **Modern comments are invisible to AppleScript.** Posted comments were
+  found in the pane with their text and timestamps while
+  `count of comments` still answered 0 for that document. The pane's card,
+  `Comment from <author>. <note>. On <date>`, is the only proof a comment
+  landed; nothing in the AppleScript dictionary reports it.
+- **Insert ▸ Comment toggles the draft.** Pressing it while a box is open
+  cancels that box, which is what defeated the owner's retry on beta.8: the
+  trigger closed the box ByteProof had left open, so the run found nothing to
+  type into.
+- The composer refuses an Accessibility value write (web view), takes text
+  only when it holds keyboard focus, and its Post button stays *disabled*
+  until the box has text. `Cmd+Return` empties the box without posting.
+- The working sequence, verified in a scratch document: focus the composer
+  (`AXPress`/`AXFocused`), paste, read the note back out of the box, press
+  Post, confirm the pane card. `add_comment` reported success in 4.0 s, the
+  card read back with the note, the document text was unchanged, and the
+  owner's manuscript gained no comments.
 - The Insert ▸ Comment menu item has no keyboard equivalent
   (`AXMenuItemCmdChar` missing, `AXMenuItemCmdModifiers` = 8), so the removed
   `⌥⌘A`/`⇧⌘A` fallbacks could never have worked; `⌥⌘A` was tested and did
@@ -34,6 +51,8 @@ input inside").
   Accessibility first and the paste is gated on the composer holding focus.
 - The detector itself was measured against a real draft box: 97-161 ms per
   check, found at depth 14 of the window tree.
+- The box appears 0.3-2.6 s after the trigger on a quiet Word, and later when
+  Word is busy applying tracked changes, so the wait is 8 s with 0.4 s polls.
 
 ## The diff rendering, measured
 

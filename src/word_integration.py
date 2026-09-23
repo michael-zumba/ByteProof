@@ -55,13 +55,15 @@ FIELD_RESULT_SCAN_LIMIT = 4000
 # Current builds open a *draft* box: it sits on screen ready for text while
 # ``count of comments`` stays flat until the draft is posted with Cmd+Return.
 # These bounds cover the box appearing, and the posted comment becoming visible.
-COMMENT_BOX_TIMEOUT_S = 3.0
-COMMENT_BOX_POLL_S = 0.25
+COMMENT_BOX_TIMEOUT_S = 8.0
+COMMENT_BOX_POLL_S = 0.4
 COMMENT_POST_TIMEOUT_S = 3.0
 COMMENT_POST_POLL_S = 0.3
 # Time Word's composer gets to settle after its value is written through
 # Accessibility and before the box is posted.
 AX_COMMENT_SETTLE_S = 0.4
+# Time Word gets to give the comment box keyboard focus after it is pressed.
+AX_COMMENT_FOCUS_TIMEOUT_S = 2.0
 
 # Accessibility walk bounds for finding the comment box and the ribbon button.
 # A Word window carries a few hundred to a few thousand elements; both targets
@@ -144,6 +146,9 @@ def _comment_box_open(pid: int) -> bool:
     elements are therefore the only reliable "the box is open" signal — and
     that signal has to be right, because pasting without it would type the
     comment into the manuscript instead.
+
+    Only the window of the *active document* is searched: a draft left open
+    in another document must never receive this document's note.
     """
     try:
         import ApplicationServices as AS
@@ -161,18 +166,57 @@ def _comment_box_open(pid: int) -> bool:
         role = str(_ax_attribute(AS, node, "AXRole") or "")
         return role == "AXTextArea" and "comment" in description.lower()
 
+    window = _comment_box_window(AS, int(pid))
+    if window is None:
+        return False
+    return _ax_find(AS, window, is_box) is not None
+
+
+def _active_document_name() -> str:
+    """Word's active document name, or "" when it cannot be read."""
+    try:
+        out = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                (
+                    'tell application "Microsoft Word" to return '
+                    "name of active document"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=APPLESCRIPT_READ_TIMEOUT_S,
+            check=False,
+        )
+        return out.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _comment_box_window(AS: Any, pid: int) -> Any | None:
+    """The window of Word's active document, where the comment box lives."""
     app = AS.AXUIElementCreateApplication(int(pid))
+    document = _active_document_name()
     windows = _ax_attribute(AS, app, "AXWindows")
     if not windows:
-        return False
+        return None
     try:
-        candidates = list(windows)[:2]
+        candidates = list(windows)
     except TypeError:
-        return False
-    for window in candidates:
-        if _ax_find(AS, window, is_box) is not None:
-            return True
-    return False
+        return None
+    if not candidates:
+        return None
+    if document:
+        for window in candidates:
+            title = str(_ax_attribute(AS, window, "AXTitle") or "")
+            if title == document or document in title:
+                return window
+        # The active document has no window of its own on screen: reading or
+        # writing its comment box would land somewhere else.
+        return None
+    # Without a name to match, stay with the window Word put in front.
+    return candidates[0]
 
 
 def _press_new_comment_button(pid: int) -> bool:
@@ -238,68 +282,71 @@ def _comment_draft_box(pid: int) -> tuple[Any, Any] | None:
     except Exception:
         return None
 
-    app = AS.AXUIElementCreateApplication(int(pid))
-    windows = _ax_attribute(AS, app, "AXWindows")
-    if not windows:
-        return None
-    try:
-        candidates = list(windows)[:2]
-    except TypeError:
+    window = _comment_box_window(AS, int(pid))
+    if window is None:
         return None
 
     def role_of(node: Any) -> str:
         return str(_ax_attribute(AS, node, "AXRole") or "")
 
-    for window in candidates:
-        post = _ax_find(
-            AS,
-            window,
-            lambda node: str(_ax_attribute(AS, node, "AXTitle") or "")
-            == "Post comment"
-            or str(_ax_attribute(AS, node, "AXHelp") or "").startswith(
-                "Post comment"
-            ),
-        )
-        if post is None:
-            continue
-        group = _ax_attribute(AS, post, "AXParent")
-        if group is None:
-            continue
-        area = _ax_find(AS, group, lambda node: role_of(node) == "AXTextArea")
-        if area is None:
-            continue
-        return area, post
-    return None
+    post = _ax_find(
+        AS,
+        window,
+        lambda node: str(_ax_attribute(AS, node, "AXTitle") or "")
+        == "Post comment"
+        or str(_ax_attribute(AS, node, "AXHelp") or "").startswith(
+            "Post comment"
+        ),
+    )
+    if post is None:
+        return None
+    group = _ax_attribute(AS, post, "AXParent")
+    if group is None:
+        return None
+    area = _ax_find(AS, group, lambda node: role_of(node) == "AXTextArea")
+    if area is None:
+        return None
+    return area, post
 
 
 def _fill_comment_box(pid: int, comment_text: str) -> bool:
-    """Write the comment into the open box and post it, without keystrokes.
+    """Type the comment into the open box and post it.
 
-    The composer is a web view: when the box is opened by automation it does
-    not take keyboard focus, so a pasted keystroke can land in the document
-    instead. Setting the box's value does not need focus at all. The value is
-    read back before the box is posted, so a composer that refuses the write
-    is reported instead of silently losing the comment.
+    Word's composer refuses an Accessibility value write (it is a web view),
+    so the note is pasted after the box is given keyboard focus — and only
+    after, because a paste with the focus elsewhere lands in the document.
+    The text is read back from the box before Post is pressed, and Word's own
+    Post button stays disabled until the box has text.
     """
     box = _comment_draft_box(pid)
     if box is None:
         return False
     area, post = box
-    probe = comment_text.strip()[:24]
     try:
         import ApplicationServices as AS
-
-        if int(AS.AXUIElementSetAttributeValue(area, "AXValue", comment_text)) != 0:
-            return False
-        time.sleep(AX_COMMENT_SETTLE_S)
-        value = str(_ax_attribute(AS, area, "AXValue") or "")
-        if probe and probe not in value:
-            _log_word("  Comment box refused the text; not posting an empty box")
-            return False
-        if int(AS.AXUIElementPerformAction(post, "AXPress")) != 0:
-            return False
     except Exception as exc:
-        _log_word(f"  Comment box write failed: {exc}")
+        _log_word(f"  Comment box unavailable: {exc}")
+        return False
+
+    if not _focus_comment_box(area):
+        _log_word("  Comment box would not take keyboard focus")
+        return False
+
+    _paste_comment_text()
+    time.sleep(AX_COMMENT_SETTLE_S)
+
+    probe = comment_text.strip()[:24]
+    value = str(_ax_attribute(AS, area, "AXValue") or "")
+    if probe and probe not in value:
+        _log_word("  Comment box did not take the pasted note; not posting")
+        return False
+
+    # The box holds the note: post it the way a reader would, with Word's own
+    # button (Cmd+Return leaves the box empty on this build).
+    try:
+        AS.AXUIElementPerformAction(post, "AXPress")
+    except Exception as exc:
+        _log_word(f"  Posting the comment failed: {exc}")
         return False
     return True
 
@@ -321,6 +368,91 @@ def _comment_box_has_focus(pid: int) -> bool:
         return str(_ax_attribute(AS, area, "AXFocused") or "") == "True"
     except Exception:
         return False
+
+
+def _focus_comment_box(area: Any) -> bool:
+    """Put the keyboard focus into Word's open comment box.
+
+    The composer is a web view: it only accepts typed text while it holds
+    focus, and its Post button stays disabled until the box has text. Pressing
+    the box and setting its focus attribute are both attempted; Word honours
+    one of them even when it reports the other as unsupported.
+    """
+    try:
+        import ApplicationServices as AS
+
+        if str(_ax_attribute(AS, area, "AXFocused") or "") == "True":
+            return True
+        try:
+            AS.AXUIElementPerformAction(area, "AXPress")
+        except Exception:
+            pass
+        try:
+            AS.AXUIElementSetAttributeValue(area, "AXFocused", True)
+        except Exception:
+            pass
+        deadline = time.monotonic() + AX_COMMENT_FOCUS_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if str(_ax_attribute(AS, area, "AXFocused") or "") == "True":
+                return True
+            time.sleep(0.1)
+    except Exception:
+        return False
+    return False
+
+
+def _paste_comment_text() -> None:
+    """Paste the clipboard into the focused comment box."""
+    script = '''
+        tell application "System Events"
+            tell process "Microsoft Word"
+                set frontmost to true
+                delay 0.2
+                keystroke "v" using {command down}
+                delay 0.4
+            end tell
+        end tell
+        return "OK"
+    '''
+    try:
+        subprocess.run(
+            ["osascript", "-"],
+            input=script.encode("utf-8"),
+            capture_output=True,
+            timeout=APPLESCRIPT_READ_TIMEOUT_S,
+            check=False,
+        )
+    except Exception as exc:
+        _log_word(f"  Comment paste failed: {exc}")
+
+
+def _comment_posted_in_pane(pid: int, comment_text: str) -> bool:
+    """Whether Word's comments pane shows the note as a posted comment.
+
+    Modern Word comments are invisible to AppleScript: ``count of comments``
+    stays at zero for a comment that is plainly posted in the pane, with the
+    card reading "Comment from <author>. <text>. On <date>". That card is the
+    evidence a comment landed, and it is deliberately specific — a note that
+    was accidentally typed into the document does not produce one.
+    """
+    probe = comment_text.strip()[:24]
+    if not probe:
+        return False
+    try:
+        import ApplicationServices as AS
+    except Exception:
+        return False
+    window = _comment_box_window(AS, int(pid))
+    if window is None:
+        return False
+
+    def is_posted_card(node: Any) -> bool:
+        if str(_ax_attribute(AS, node, "AXRole") or "") != "AXGroup":
+            return False
+        description = str(_ax_attribute(AS, node, "AXDescription") or "")
+        return description.startswith("Comment from ") and probe in description
+
+    return _ax_find(AS, window, is_posted_card) is not None
 
 
 class WordBusyError(RuntimeError):
@@ -2102,8 +2234,14 @@ class MacOSWordIntegration(WordIntegration):
             ),
         ]
 
-        opened = False
-        for method_name, trigger in methods:
+        # A box that is already open is used as it is. Word's Insert ▸ Comment
+        # toggles the draft: pressing it while a box is open cancels that box,
+        # so triggering blindly threw away a box that was ready for the text.
+        opened = bool(pid is not None and _comment_box_open(pid))
+        if opened:
+            _log_word("  Comment box was already open; using it")
+
+        for method_name, trigger in ([] if opened else methods):
             try:
                 sent = trigger()
             except Exception as ex:
@@ -2131,13 +2269,12 @@ class MacOSWordIntegration(WordIntegration):
                 f"Last error: {last_error}"
             )
 
-        # Write the box first, without keystrokes: Word's composer is a web
-        # view that a programmatically opened box does not give keyboard focus
-        # to, so a paste can land in the document instead of the comment.
+        # Fill the box: it is given focus first, the note is pasted into it,
+        # and the text is read back before Word posts it.
         if pid is not None and _fill_comment_box(pid, comment_text):
-            if self._wait_for_comment_posted(before_comments):
+            if self._wait_for_comment_posted(before_comments, comment_text, pid):
                 return
-            _log_word("  Comment box was filled but no comment appeared")
+            _log_word("  Comment box was filled but the comment did not post")
 
         # Fallback: paste and post with Cmd+Return (Word's own "Post comment"),
         # but only while the box itself holds the keyboard focus. That is the
@@ -2155,7 +2292,7 @@ class MacOSWordIntegration(WordIntegration):
                 return "OK"
             '''
             self._run_applescript(paste_script)
-            if self._wait_for_comment_posted(before_comments):
+            if self._wait_for_comment_posted(before_comments, comment_text, pid):
                 return
 
         raise RuntimeError(
@@ -2204,16 +2341,29 @@ class MacOSWordIntegration(WordIntegration):
                 return False
             time.sleep(COMMENT_BOX_POLL_S)
 
-    def _wait_for_comment_posted(self, before_comments: int | None) -> bool:
-        """Wait for the posted comment to show up in the document."""
-        if before_comments is None:
-            # No baseline to compare against: accept a document that has
-            # comments at all rather than claim a failure that cannot be seen.
-            return bool(self._comment_count())
+    def _wait_for_comment_posted(
+        self,
+        before_comments: int | None,
+        comment_text: str,
+        pid: int | None,
+    ) -> bool:
+        """Wait until the note is visibly a posted comment.
+
+        Word's modern comments never appear in ``count of comments`` (that is
+        what the old guard tripped over), so the pane's own card for the note
+        is the primary evidence; the count is accepted as well for Word
+        builds whose comments AppleScript can still see.
+        """
         deadline = time.monotonic() + COMMENT_POST_TIMEOUT_S
         while True:
             now = self._comment_count()
-            if now is not None and now > before_comments:
+            if (
+                before_comments is not None
+                and now is not None
+                and now > before_comments
+            ):
+                return True
+            if pid is not None and _comment_posted_in_pane(pid, comment_text):
                 return True
             if time.monotonic() >= deadline:
                 return False

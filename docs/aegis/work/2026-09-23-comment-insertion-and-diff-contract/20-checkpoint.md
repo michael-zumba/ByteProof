@@ -33,15 +33,26 @@
 ## What changed
 
 - **Comment trigger**: the menu click is verified by the box itself (count
-  rise or composer present, polled for up to 3 s), with the Review ribbon's
+  rise or composer present, polled for up to 8 s), with the Review ribbon's
   New Comment button as a second door for builds that ignore the menu item.
   The guessed keystroke fallbacks are gone.
-- **Comment text**: written into the composer through Accessibility
-  (`AXValue` + read-back, then press Post comment), because a box opened by
-  automation does not take keyboard focus. The clipboard paste remains as the
-  second route and only runs while the composer holds keyboard focus, so the
-  note can never be typed into the manuscript. The posted comment is verified
-  through `count of comments`.
+- **An open box is used, never toggled**: Word's Insert ▸ Comment *cancels* an
+  open draft, so a box that is already on screen is filled as it is. This is
+  what defeated the owner's retry: the box ByteProof had left open was closed
+  again by the next trigger.
+- **Comment text**: the composer is given keyboard focus, the note is pasted
+  into it, the text is read back out of the box, and Word's own Post comment
+  button is pressed. (Accessibility cannot write the box's value — it is a web
+  view — and `Cmd+Return` empties the box on this build instead of posting.)
+  A paste only ever happens while the box holds focus, so the note cannot be
+  typed into the manuscript.
+- **Verification**: the card Word draws for a posted comment
+  ("Comment from <author>. <note>. On <date>") is the evidence, with
+  `count of comments` accepted as well. Modern Word comments never appear in
+  that collection at all, which is what the old guard tripped over; the pane
+  is the only place they are visible.
+- **The comment box belongs to the active document's window only**: a draft
+  left open in another document can never receive this document's note.
 - **Visible failure**: a comment that cannot be added now says so in the
   status line and a toast, and the note is deliberately left on the
   clipboard instead of vanishing into a `print`.

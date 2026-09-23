@@ -11,9 +11,9 @@ Each group exercises a specific defect found in the 2026-09-10 full-app review:
 
 import hashlib
 import http.server
-import re
 import os
 import platform
+import re
 import socketserver
 import tempfile
 import threading
@@ -5303,7 +5303,7 @@ def _longest_struck_run(rendered: str) -> int:
     return max(
         (
             len(match)
-            for match in re.findall(r"<s style='[^']*'>(.*?)</s>", rendered, re.S)
+            for match in re.findall(r"<s style='[^']*'>(.*?)</s>", rendered, re.DOTALL)
         ),
         default=0,
     )
@@ -5316,7 +5316,7 @@ def _changed_fraction(rendered: str) -> float:
     total = 0
     changed = 0
     pattern = re.compile(
-        r"<s style='[^']*'>(.*?)</s>|<span style='([^']*)'>(.*?)</span>", re.S
+        r"<s style='[^']*'>(.*?)</s>|<span style='([^']*)'>(.*?)</span>", re.DOTALL
     )
     for match in pattern.finditer(rendered):
         struck, style, plain = match.groups()
@@ -5435,19 +5435,22 @@ def _word_comment_harness(
     box_after_trigger: bool,
     fill_works: bool = True,
     box_has_focus: bool = False,
+    count_rises: bool = True,
 ):
     """A MacOSWordIntegration with Word's UI, composer and comments faked."""
     from src import word_integration as wi
 
     integration = wi.MacOSWordIntegration()
     scripts: list[str] = []
-    state = {"comments": 0, "box": False}
+    state = {"comments": 0, "box": False, "posted": False}
 
     def fake_run(script, *args, **kwargs):
         scripts.append(script)
         if 'keystroke "v"' in script:
             # The paste types into the box and Cmd+Return posts the draft.
-            state["comments"] += 1
+            if count_rises:
+                state["comments"] += 1
+            state["posted"] = True
             state["box"] = False
         return "OK"
 
@@ -5456,12 +5459,19 @@ def _word_comment_harness(
     monkeypatch.setattr(wi, "_comment_box_open", lambda _pid: state["box"])
     monkeypatch.setattr(wi, "_comment_box_has_focus", lambda _pid: box_has_focus)
     monkeypatch.setattr(wi, "_press_new_comment_button", lambda _pid: False)
+    # The pane's card for the note is what proves a modern Word comment
+    # landed; Word hides those comments from AppleScript entirely.
+    monkeypatch.setattr(
+        wi, "_comment_posted_in_pane", lambda _pid, _text: state["posted"]
+    )
     monkeypatch.setattr(integration, "_comment_count", lambda: state["comments"])
 
     def fill_box(_pid, _text):
         if not fill_works:
             return False
-        state["comments"] += 1
+        if count_rises:
+            state["comments"] += 1
+        state["posted"] = True
         state["box"] = False
         return True
 
@@ -5544,7 +5554,7 @@ def test_the_ribbon_trigger_is_tried_when_the_menu_item_does_nothing(monkeypatch
     """Insert ▸ Comment is ignored on some builds; Review ▸ New Comment is not."""
     from src import word_integration as wi
 
-    integration, scripts, state = _word_comment_harness(
+    integration, _scripts, state = _word_comment_harness(
         monkeypatch, box_after_trigger=False, fill_works=True
     )
     monkeypatch.setattr(wi, "COMMENT_BOX_TIMEOUT_S", 0.05)
@@ -5561,3 +5571,49 @@ def test_the_ribbon_trigger_is_tried_when_the_menu_item_does_nothing(monkeypatch
 
     assert attempts == ["ribbon"], attempts
     assert state["comments"] == 1
+
+
+def test_an_open_box_is_used_instead_of_being_toggled_shut(monkeypatch):
+    """Word's Insert ▸ Comment cancels an open draft, so it must not be pressed.
+
+    That is what broke the owner's retry: the box ByteProof left open was
+    closed again by the next trigger, so the run found nothing to type into.
+    """
+    integration, _scripts, state = _word_comment_harness(
+        monkeypatch, box_after_trigger=True, fill_works=True
+    )
+    state["box"] = True  # the draft is already on screen
+    attempts: list[str] = []
+
+    def trigger_menu():
+        attempts.append("menu")
+        return True
+
+    monkeypatch.setattr(integration, "_trigger_insert_comment_menu", trigger_menu)
+
+    integration._trigger_comment_and_paste("the reviewer note")
+
+    assert attempts == [], "an open box must not be toggled shut"
+    assert state["comments"] == 1
+
+
+def test_a_comment_word_hides_from_applescript_still_counts_as_success(
+    monkeypatch,
+):
+    """Modern Word comments never reach `count of comments`.
+
+    Word 365 keeps them out of AppleScript's collection entirely, so the old
+    count-based check reported a failure for a comment that was sitting in the
+    pane. The posted card is the evidence.
+    """
+    integration, _scripts, state = _word_comment_harness(
+        monkeypatch,
+        box_after_trigger=True,
+        fill_works=True,
+        count_rises=False,
+    )
+
+    integration._trigger_comment_and_paste("the reviewer note")
+
+    assert state["posted"] is True
+    assert state["comments"] == 0, "the fake keeps the count flat on purpose"
