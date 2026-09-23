@@ -76,18 +76,17 @@ the old rendering is the "entire replacement" in the owner's screenshot.
   heuristic back on), two span-splitting tests, and five comment tests (draft
   box written through Accessibility, focused-box paste fallback, no typing
   without focus, no typing without a box, ribbon second trigger).
-- `./scripts/run_tests.sh` → `test_hardening.py 168 passed`,
+- `./scripts/run_tests.sh` → `test_hardening.py 172 passed`,
   `test_live_preview.py 137 passed`, `test_smoke.py 108 passed`,
   "All test files passed."
 
 ## Shipped build
 
-- `tools/bump_version.py 2.2.1-beta.8` (pre-release: the public feed keeps
-  advertising the last release).
-- `./build_macos.sh arm64` → signed with the Developer ID, installed to
-  `/Applications` (2.2.1-beta.7 moved to the Trash). The stable-signing step
-  warned "keychain locked" and skipped, but the installed app still reports
-  `LIVE PERMISSION: trusted=True`.
-- Apple's notary service was still processing the app submission at hand-off;
-  the DMG is produced when that finishes, and no release is published for a
-  beta.
+- `tools/bump_version.py 2.2.1-beta.9` (pre-release: the public feed keeps
+  advertising the last release). beta.8 shipped the fix as far as the box and
+  the review diff; beta.9 carries the comment posting and verification.
+- `./build_macos.sh arm64` → signed with the Developer ID, notarized, stapled,
+  and the installer `ByteProof_Installer_AppleSilicon.dmg` built. Installed to
+  `/Applications` (2.2.1-beta.8 moved to the Trash); the installed app reports
+  `LIVE PERMISSION: trusted=True` and `stapler validate` passes.
+- No release is published for a beta.
