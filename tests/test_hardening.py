@@ -4931,12 +4931,14 @@ def test_automation_page_is_structured_like_the_others() -> None:
 
 
 
-def test_the_menu_bar_menu_is_opened_by_us_on_macos() -> None:
-    """Regression for the 2026-09-18 crash: clicking the icon aborted the app.
+def test_a_click_on_the_icon_shows_the_window_and_right_click_the_menu() -> None:
+    """Regression for the 2026-09-18 crash, and for the click that stopped working.
 
     AppKit popped the status item menu on macOS 27, and Qt's observer for the
-    menu-tracking notification raised an ObjC assertion while doing it. The
-    click has to reach us, and the menu has to open from our own code.
+    menu-tracking notification raised an ObjC assertion while doing it, so the
+    menu is opened by our own code. Opening it on *every* click then meant a
+    click never brought the window back (the owner's report): a plain click
+    raises the window again, and the menu is one right-click away.
     """
     import platform as platform_mod
 
@@ -4965,15 +4967,23 @@ def test_the_menu_bar_menu_is_opened_by_us_on_macos() -> None:
             window.tray_menu.close()
             app.processEvents()
 
-            # ...and a click on the icon is wired to that same path.
+            # A right-click opens that menu...
             reached: list[bool] = []
             window._show_tray_menu = lambda: reached.append(True)
-            window._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+            window._on_tray_activated(QSystemTrayIcon.ActivationReason.Context)
             assert reached == [True]
+
+            # ...and a plain click raises the window instead.
+            window._show_tray_menu = lambda: reached.append("menu")
+            shown: list[bool] = []
+            window.show_and_raise = lambda: shown.append(True)
+            window._on_tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+            assert shown == [True]
+            assert reached == [True], "a plain click must not open the menu"
         else:
             assert tray.contextMenu() is not None
 
-        shown: list[bool] = []
+        shown = []
         window.show_and_raise = lambda: shown.append(True)
         window._on_tray_activated(QSystemTrayIcon.ActivationReason.DoubleClick)
         assert shown == [True]
@@ -4983,6 +4993,55 @@ def test_the_menu_bar_menu_is_opened_by_us_on_macos() -> None:
         app.processEvents()
 
 
+
+
+def test_a_manual_proofread_stands_the_live_preview_down() -> None:
+    """The two features must not fight over the same selection.
+
+    The owner's log shows a preview starting while a manual proofread was
+    rewriting the same text: the preview spent a provider call, then died on
+    "selection changed" and took its card away with it. The manual task now
+    holds the preview loop until it reports back.
+    """
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+    from src.live_service import LivePreviewService
+
+    app = QApplication.instance() or QApplication([])
+    window = ProofreaderApp(1024, settings_mod.load_runtime_settings())
+    try:
+        # A real service, standing in for the one the app would run: the test
+        # has to see the timer stop and start, which is the actual behaviour.
+        service = LivePreviewService()
+        service.refresh_settings(dict(window.settings))
+        # start() also arms the global pointer watcher, which a test has no
+        # use for; the poll timer is the part this test is about.
+        service._timer = QTimer(service)
+        service._timer.setInterval(500)
+        service._timer.start()
+        window.live_service = service
+        service._previewed_text = "a selection the preview had already read"
+        service._seen_text = "a selection the preview had already read"
+
+        window._hold_live_for_manual_task()
+        assert service._poll_paused_for_manual_task is True
+        assert service._previewed_text == ""
+        assert service._seen_text == ""
+        assert not service._timer.isActive(), (
+            "the poll loop must stop while the manual task owns the selection"
+        )
+
+        window._release_live_hold()
+        assert service._poll_paused_for_manual_task is False
+        assert service._timer.isActive()
+        service._timer.stop()
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
 
 
 def test_small_marks_are_drawn_for_the_screen_they_are_on() -> None:

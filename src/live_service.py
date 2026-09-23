@@ -406,6 +406,7 @@ class LivePreviewService(QObject):
         self._applying = False
         self._apply_started_text = ""
         self._poll_paused_for_apply = False
+        self._poll_paused_for_manual_task = False
         self._apply_previous_app: dict[str, Any] = {}
         self._apply_foreign_frontmost: dict[str, Any] = {}
         self._detach_timer: QTimer | None = None
@@ -481,6 +482,13 @@ class LivePreviewService(QObject):
     def _sample(self, now: float) -> None:
         self._last_now = now
         if not self._settings.get("live_preview", {}).get("enabled", True):
+            return
+        if self._poll_paused_for_manual_task:
+            # A manual proofread owns the selection: it reads, rewrites and
+            # re-selects the very text this loop watches. A preview started
+            # here dies on "selection changed" and leaves the user with a card
+            # that appeared and vanished, so the loop stands down until the
+            # manual task is finished.
             return
         if self._applying:
             # An apply owns the selection right now. Reading AX state here
@@ -2475,6 +2483,30 @@ class LivePreviewService(QObject):
     def _resume_polling_after_apply(self) -> None:
         if getattr(self, "_poll_paused_for_apply", False):
             self._poll_paused_for_apply = False
+        if self._timer is not None and not self._timer.isActive():
+            self._timer.start()
+
+    def hold_for_manual_task(self) -> None:
+        """Stand down while a manual proofread owns the selection.
+
+        The manual flow reads, rewrites and re-selects the same text the poll
+        loop watches. A preview started in that window spends a provider call
+        and then dies on "selection changed", leaving a card that appeared and
+        vanished; the panel is closed and the loop paused instead.
+        """
+        self._poll_paused_for_manual_task = True
+        self._previewed_text = ""
+        self._seen_text = ""
+        if self._timer is not None and self._timer.isActive():
+            self._timer.stop()
+        self._hide_panel()
+
+    def release_after_manual_task(self) -> None:
+        """Let previews resume once the manual proofread is finished."""
+        self._poll_paused_for_manual_task = False
+        self._previewed_text = ""
+        self._seen_text = ""
+        self._retry_not_before = None
         if self._timer is not None and not self._timer.isActive():
             self._timer.start()
 

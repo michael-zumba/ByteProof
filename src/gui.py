@@ -5325,12 +5325,34 @@ class ProofreaderApp(QMainWindow):
         # proofread never pops the main window back up.
         self.note_helper_activity(2.0)
         if kind == "processing":
+            _debug_log(f"APP: pill shown (processing): {message[:60]}")
             self.toast.show_processing(message)
         else:
+            _debug_log(f"APP: pill shown ({kind}): {message[:60]}")
             self.toast.complete(message, kind=kind)
+
+    def _hold_live_for_manual_task(self) -> None:
+        """Keep the live preview out of the way of a manual proofread."""
+        service = getattr(self, "live_service", None)
+        hold = getattr(service, "hold_for_manual_task", None)
+        if callable(hold):
+            try:
+                hold()
+            except Exception:
+                pass
+
+    def _release_live_hold(self) -> None:
+        service = getattr(self, "live_service", None)
+        release = getattr(service, "release_after_manual_task", None)
+        if callable(release):
+            try:
+                release()
+            except Exception:
+                pass
 
     def _cancel_proofread_start(self, message: str) -> None:
         """Undo the starting state when no reliable target can be found."""
+        self._release_live_hold()
         self.run_btn.setEnabled(True)
         self.status_dot.setStyleSheet("background-color: #B91C1C; border-radius: 4px;")
         self.status_label.setText(message)
@@ -5640,27 +5662,21 @@ class ProofreaderApp(QMainWindow):
         self.tray_icon.show()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        """A click on the menu bar icon opens the menu, or the window.
+        """A click on the menu bar icon opens the window; right-click the menu.
 
-        On macOS the menu is ours to open (see _setup_system_tray): a trigger
-        means "show me the menu", a double click means "show me the window".
-        Where the platform owns the context menu, a trigger still means the
-        window, which is how this behaved before.
+        The menu is ours to open (see _setup_system_tray, where the macOS 27
+        crash forced the status item to stop owning it). Opening it on every
+        click meant a click never brought the window back - the documented
+        double click could not arrive either, because the first click had
+        already put a menu under the pointer. A plain click raises the window
+        again, and the menu stays one right-click away.
         """
-        double = QSystemTrayIcon.ActivationReason.DoubleClick
-        if reason == double:
-            self.show_and_raise()
+        reason_map = QSystemTrayIcon.ActivationReason
+        if reason == reason_map.Context:
+            self._show_tray_menu()
             return
-        if reason in (
-            QSystemTrayIcon.ActivationReason.Trigger,
-            QSystemTrayIcon.ActivationReason.Context,
-        ):
-            if self.tray_icon.contextMenu() is None or (
-                reason == QSystemTrayIcon.ActivationReason.Context
-            ):
-                self._show_tray_menu()
-            else:
-                self.show_and_raise()
+        if reason in (reason_map.Trigger, reason_map.DoubleClick):
+            self.show_and_raise()
 
     def _show_tray_menu(self) -> None:
         """Open the menu bar menu at the pointer.
@@ -7037,6 +7053,9 @@ class ProofreaderApp(QMainWindow):
         self.pending_generic_apply = None
         self.pending_generic_preview = None
         self._generic_apply_pending = False
+        # The live preview watches the same selection this task is about to
+        # read and rewrite; it stands down until the task reports back.
+        self._hold_live_for_manual_task()
         self.apply_btn.setVisible(False)
         if self.apply_menu_action is not None:
             self.apply_menu_action.setEnabled(False)
@@ -8195,6 +8214,7 @@ class ProofreaderApp(QMainWindow):
             self.tray_icon.setIcon(self.normal_icon)
 
     def task_finished(self) -> None:
+        self._release_live_hold()
         apply_worker = getattr(self, "generic_apply_worker", None)
         apply_running = (
             self._generic_apply_pending
