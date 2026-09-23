@@ -11,6 +11,7 @@ Each group exercises a specific defect found in the 2026-09-10 full-app review:
 
 import hashlib
 import http.server
+import re
 import os
 import platform
 import socketserver
@@ -5274,3 +5275,289 @@ def test_the_menu_bar_mark_is_square_with_an_inset() -> None:
         bottom,
     )
     assert max(right - left + 1, bottom - top + 1) >= 14, (left, top, right, bottom)
+
+
+# --- the review pane and Word's comment box ----------------------------------
+# Two defects from the 2026-09-23 owner report. The Proposed Changes pane drew
+# whole paragraphs as replaced, and Word showed a comment box that stayed empty
+# because the app stopped before typing into it.
+
+REVIEW_PARAGRAPH = (
+    "To test the balance-sheet-repair mechanism directly rather than infer it "
+    "after the fact, I derive and estimate an ex-ante heterogeneity prediction. "
+    "If the crisis-period signal reflects the speed of balance-sheet repair, it "
+    "should be stronger where banking systems clear distressed assets more "
+    "efficiently. Splitting the panel by a pre-determined measure of repair "
+    "capacity (the country median ratio of nonperforming loans to total loans) "
+    "yields a positive technical attention x crisis x repair efficiency "
+    "coefficient under both country fixed effects (1.343, p < 0.01) and two-way "
+    "fixed effects (1.037, p < 0.01). The net crisis-period association is "
+    "positive and significant in efficient-repair economies (+0.695, p = 0.02) "
+    "and indistinguishable from zero in inefficient-repair economies. This is a "
+    "genuine test rather than an interpretation: a directional prediction, "
+    "derived from the mechanism, that the data could have rejected."
+)
+
+
+def _longest_struck_run(rendered: str) -> int:
+    return max(
+        (
+            len(match)
+            for match in re.findall(r"<s style='[^']*'>(.*?)</s>", rendered, re.S)
+        ),
+        default=0,
+    )
+
+
+def _changed_fraction(rendered: str) -> float:
+    """Share of the rendered text that sits inside a struck or inserted span."""
+    from src.ui_theme import NEW_STYLE
+
+    total = 0
+    changed = 0
+    pattern = re.compile(
+        r"<s style='[^']*'>(.*?)</s>|<span style='([^']*)'>(.*?)</span>", re.S
+    )
+    for match in pattern.finditer(rendered):
+        struck, style, plain = match.groups()
+        if struck is not None:
+            total += len(struck)
+            changed += len(struck)
+        else:
+            total += len(plain)
+            if style == NEW_STYLE:
+                changed += len(plain)
+    return changed / max(total, 1)
+
+
+def test_a_short_edit_in_a_long_paragraph_is_not_shown_as_a_replacement():
+    """One deleted clause must not render as the whole paragraph replaced.
+
+    Past ~200 word tokens the heuristic treats the spaces between words as
+    "popular" and stops matches there, so the alignment collapses: the pane
+    struck through 96% of this paragraph and printed the replacement beside
+    it. That is what the owner saw as "the entire replacement"; with the
+    alignment left alone the same edit marks 5% of the text.
+    """
+    from src.ui_theme import CONTEXT_STYLE, diff_html
+
+    original = REVIEW_PARAGRAPH
+    corrected = original.replace(
+        " directly rather than infer it after the fact,", ""
+    )
+    rendered = diff_html(
+        original, corrected, context=100000, preserve_newlines=True, arrow=False
+    )
+
+    # The paragraph opens with unchanged text, not with a struck original.
+    assert rendered.startswith(f"<span style='{CONTEXT_STYLE}'>")
+    # One phrase changed, so no struck run may swallow the paragraph.
+    assert _longest_struck_run(rendered) < 80, rendered[:200]
+    assert _changed_fraction(rendered) < 0.25, _changed_fraction(rendered)
+
+
+def test_a_rewritten_paragraph_still_marks_only_what_changed():
+    """Even a heavy rewrite keeps the shared text out of the red."""
+    from src.ui_theme import diff_html
+
+    original = REVIEW_PARAGRAPH
+    corrected = original.replace(
+        "Splitting the panel by a pre-determined measure of repair capacity "
+        "(the country median ratio of nonperforming loans to total loans)",
+        "Splitting the panel by a structural, pre-determined measure of repair "
+        "capacity (the country median ratio of nonperforming loans)",
+    ).replace(
+        "To test the balance-sheet-repair mechanism directly rather than infer "
+        "it after the fact, I derive and estimate an ex-ante heterogeneity "
+        "prediction.",
+        "To test the balance-sheet-repair mechanism directly, I derive the "
+        "ex-ante heterogeneity prediction.",
+    )
+    rendered = diff_html(
+        original, corrected, context=100000, preserve_newlines=True, arrow=False
+    )
+    # The closing sentence is untouched in both, and must read as context.
+    assert "the data could have rejected." in rendered
+    assert _changed_fraction(rendered) < 0.5
+
+
+def test_a_whole_paragraph_rewrite_is_never_split_into_a_fake_sub_edit():
+    """The live apply may only write fragments whose alignment is verified.
+
+    With the junk heuristic on, the splitter paired the top of the paragraph
+    with a phrase from its end and returned that as one "word-level" edit: a
+    replacement that would have reached Word as the whole paragraph rewritten.
+    """
+    from src.live_preview import Edit, _split_span_word_level
+
+    before = REVIEW_PARAGRAPH
+    after = (
+        "To test the balance-sheet-repair mechanism directly rather than infer it "
+        "after the fact, I derive and estimate an ex-ante heterogeneity prediction. "
+        "If the crisis-period signal reflects the speed of balance-sheet repair, it "
+        "should be stronger where banking systems clear distressed assets more "
+        "efficiently. Splitting the panel by a pre-determined measure of repair "
+        "capacity (the country median ratio of nonperforming loans to total loans) "
+        "yields a positive technical attention x crisis x repair efficiency "
+        "coefficient under both country fixed effects (1.343, p < 0.01) and two-way "
+        "fixed effects (1.037, p < 0.01). The net crisis-period association is "
+        "positive and significant in efficient-repair economies (+0.695, p = 0.02) "
+        "and indistinguishable from zero in inefficient-repair economies. This is a "
+        "genuine test rather than an interpretation: a directional prediction, "
+        "derived from the mechanism, that the data could have rejected."
+    ).replace(
+        "The repair channel yields a further prediction",
+        "The repair channel yields a further prediction",
+    )
+
+    subs = _split_span_word_level(before, 0, Edit(before, after, "reason"))
+    assert subs == [], subs
+
+
+def test_a_pinpoint_edit_in_a_long_span_stays_pinpoint():
+    """The splitter still does its job: a small change keeps its small edit."""
+    from src.live_preview import Edit, _split_span_word_level
+
+    before = REVIEW_PARAGRAPH
+    after = before.replace(
+        "This is a genuine test", "This is a pre-registered test"
+    )
+    subs = _split_span_word_level(before, 0, Edit(before, after, "reason"))
+    assert len(subs) == 1, subs
+    _start, _end, old, new = subs[0]
+    assert old == "genuine", old
+    assert new == "pre-registered", new
+
+
+def _word_comment_harness(
+    monkeypatch,
+    *,
+    box_after_trigger: bool,
+    fill_works: bool = True,
+    box_has_focus: bool = False,
+):
+    """A MacOSWordIntegration with Word's UI, composer and comments faked."""
+    from src import word_integration as wi
+
+    integration = wi.MacOSWordIntegration()
+    scripts: list[str] = []
+    state = {"comments": 0, "box": False}
+
+    def fake_run(script, *args, **kwargs):
+        scripts.append(script)
+        if 'keystroke "v"' in script:
+            # The paste types into the box and Cmd+Return posts the draft.
+            state["comments"] += 1
+            state["box"] = False
+        return "OK"
+
+    integration._run_applescript = fake_run  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(wi, "_word_pid", lambda: 4242)
+    monkeypatch.setattr(wi, "_comment_box_open", lambda _pid: state["box"])
+    monkeypatch.setattr(wi, "_comment_box_has_focus", lambda _pid: box_has_focus)
+    monkeypatch.setattr(wi, "_press_new_comment_button", lambda _pid: False)
+    monkeypatch.setattr(integration, "_comment_count", lambda: state["comments"])
+
+    def fill_box(_pid, _text):
+        if not fill_works:
+            return False
+        state["comments"] += 1
+        state["box"] = False
+        return True
+
+    monkeypatch.setattr(wi, "_fill_comment_box", fill_box)
+
+    def trigger_menu():
+        if box_after_trigger:
+            state["box"] = True
+        return True
+
+    monkeypatch.setattr(integration, "_trigger_insert_comment_menu", trigger_menu)
+    return integration, scripts, state
+
+
+def test_the_comment_is_written_when_word_only_opened_a_draft_box(monkeypatch):
+    """Word 365 shows a draft box that the comment count cannot see.
+
+    That is the regression: the count guard from the 2.0.2 hardening pass
+    concluded the box never opened and left it empty. The box itself is the
+    signal, and the note is written into it without keystrokes.
+    """
+    integration, scripts, state = _word_comment_harness(
+        monkeypatch, box_after_trigger=True, fill_works=True
+    )
+
+    integration._trigger_comment_and_paste("the reviewer note")
+
+    assert state["comments"] == 1
+    assert not any('keystroke "v"' in script for script in scripts), (
+        "the Accessibility write does not need the clipboard"
+    )
+
+
+def test_a_focused_box_still_takes_the_pasted_note(monkeypatch):
+    """When the box holds the keyboard focus, the paste is the second route."""
+    integration, scripts, state = _word_comment_harness(
+        monkeypatch,
+        box_after_trigger=True,
+        fill_works=False,
+        box_has_focus=True,
+    )
+
+    integration._trigger_comment_and_paste("the reviewer note")
+
+    assert any('keystroke "v"' in script for script in scripts)
+    assert state["comments"] == 1
+
+
+def test_nothing_is_typed_while_the_box_has_no_keyboard_focus(monkeypatch):
+    """A box that cannot be written to must not send the note to the document."""
+    integration, scripts, _state = _word_comment_harness(
+        monkeypatch,
+        box_after_trigger=True,
+        fill_works=False,
+        box_has_focus=False,
+    )
+
+    with pytest.raises(RuntimeError):
+        integration._trigger_comment_and_paste("the reviewer note")
+
+    assert not any('keystroke "v"' in script for script in scripts)
+
+
+def test_no_comment_text_is_typed_when_no_comment_box_opens(monkeypatch):
+    """The safety rule stays: no box, no typing into the manuscript."""
+    from src import word_integration as wi
+
+    integration, scripts, _state = _word_comment_harness(
+        monkeypatch, box_after_trigger=False, fill_works=False
+    )
+    monkeypatch.setattr(wi, "COMMENT_BOX_TIMEOUT_S", 0.05)
+
+    with pytest.raises(RuntimeError):
+        integration._trigger_comment_and_paste("the reviewer note")
+
+    assert not any('keystroke "v"' in script for script in scripts)
+
+
+def test_the_ribbon_trigger_is_tried_when_the_menu_item_does_nothing(monkeypatch):
+    """Insert ▸ Comment is ignored on some builds; Review ▸ New Comment is not."""
+    from src import word_integration as wi
+
+    integration, scripts, state = _word_comment_harness(
+        monkeypatch, box_after_trigger=False, fill_works=True
+    )
+    monkeypatch.setattr(wi, "COMMENT_BOX_TIMEOUT_S", 0.05)
+    attempts: list[str] = []
+
+    def ribbon(_pid):
+        attempts.append("ribbon")
+        state["box"] = True
+        return True
+
+    monkeypatch.setattr(wi, "_press_new_comment_button", ribbon)
+
+    integration._trigger_comment_and_paste("the reviewer note")
+
+    assert attempts == ["ribbon"], attempts
+    assert state["comments"] == 1

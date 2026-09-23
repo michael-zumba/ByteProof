@@ -276,7 +276,14 @@ def _split_span_word_level(
     after_tokens = re.findall(r"\S+|\s+", edit.after)
     if not before_tokens or not after_tokens:
         return []
-    matcher = difflib.SequenceMatcher(None, before_tokens, after_tokens)
+    # autojunk stays off: its junk heuristic treats the spaces between words
+    # as "popular" and stops matches there, which on a long span turns an
+    # alignment of small edits into one whole-span replacement. That is the
+    # difference between Word recording pinpoint revisions and recording the
+    # entire paragraph as replaced.
+    matcher = difflib.SequenceMatcher(
+        None, before_tokens, after_tokens, autojunk=False
+    )
     offsets: list[int] = []
     total = 0
     for token in before_tokens:

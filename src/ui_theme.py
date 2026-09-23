@@ -72,6 +72,15 @@ def diff_html(
     surrounding text stays calm so the pinpoint edits are easy to spot. With
     ``arrow`` the replacement is shown as ``old → new``; the review view turns
     it off, because a whole manuscript of arrows reads as noise.
+
+    ``autojunk`` is off on purpose. difflib's junk heuristic drops the
+    elements it considers "popular" — and in a word token list the spaces
+    between words are the most popular elements there are. Past ~200 tokens
+    that stops matches from extending across a space, so the alignment
+    collapses and a paragraph that changed by one word renders as a
+    strike-through of the whole paragraph plus the whole replacement. The
+    review view diffs whole selections, which is precisely where the
+    heuristic used to bite.
     """
 
     def escape(text: str) -> str:
@@ -80,7 +89,9 @@ def diff_html(
 
     before_tokens = re.findall(r"\S+|\s+", before)
     after_tokens = re.findall(r"\S+|\s+", after)
-    matcher = difflib.SequenceMatcher(None, before_tokens, after_tokens)
+    matcher = difflib.SequenceMatcher(
+        None, before_tokens, after_tokens, autojunk=False
+    )
     parts: list[str] = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         old = "".join(before_tokens[i1:i2])
@@ -397,4 +408,3 @@ QToolButton {{ border: none; background: transparent; color: {SHELL_TEXT_SECONDA
 QToolTip {{ background: {SHELL_TEXT}; color: {SHELL_PRIMARY_FG}; border: none; padding: 4px 6px; }}
 {toggle}
 """
-

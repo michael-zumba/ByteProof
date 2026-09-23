@@ -7737,7 +7737,7 @@ class ProofreaderApp(QMainWindow):
                             word_app = get_word_integration()
                             word_app.add_comment(comment.strip())
                         except Exception as e:
-                            print(f"Comment insertion failed: {e}")
+                            self._report_comment_failure(e)
                     self.status_label.setText(f"Low-similarity correction applied (user approved, {sim_float:.0%}).")
                     self._set_corrected_for_copy("")
                 else:
@@ -7932,6 +7932,27 @@ class ProofreaderApp(QMainWindow):
                 show_apply_button=True,
             )
 
+    def _report_comment_failure(self, error: BaseException) -> None:
+        """Say so when Word would not take the reviewer comment.
+
+        The apply itself worked, so this is a warning rather than a failed
+        proofread: the manuscript is edited and only the note is missing. The
+        note stays on the clipboard, which the message tells the user, so a
+        suggestion Word refused to place is never lost.
+        """
+        try:
+            from .word_integration import _log_word
+
+            _log_word(f"Comment insertion failed: {error}")
+        except Exception:
+            pass
+        message = (
+            "Changes applied. Word would not open a comment box, so the "
+            "reviewer note is on your clipboard instead."
+        )
+        self.status_label.setText(message)
+        self._show_toast(message, kind="warning")
+
     def _show_generic_diff(
         self,
         original: str,
@@ -8014,7 +8035,7 @@ class ProofreaderApp(QMainWindow):
                         word_app = get_word_integration()
                         word_app.add_comment(comment_text.strip())
                     except Exception as e:
-                        print(f"Comment insertion failed: {e}")
+                        self._report_comment_failure(e)
                 self.status_label.setText("Low-similarity correction applied.")
                 self._show_toast("Changes applied to Word.", kind="success")
                 self._set_corrected_for_copy("")
