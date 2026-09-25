@@ -393,6 +393,7 @@ class LivePreviewService(QObject):
         self._mail_composing = True  # fail-open: never break Mail editing
         self._mail_check_at = 0.0
         self._read_only_logged: dict[str, str] = {}
+        self._skip_logged: dict[str, str] = {}
         self._spawned_at = 0.0
         self._undo_pill: UndoPill | None = None
         self._undo_state: dict[str, Any] | None = None
@@ -764,7 +765,7 @@ class LivePreviewService(QObject):
                 # do not fill the log with it on every tick.
                 "app_disabled",
             ):
-                _debug_log(f"LIVE SKIP: {decision} app={target.get('name')!r}")
+                self._log_skip_once(decision, bundle, target)
             return
         if self._retry_not_before is not None and now < self._retry_not_before:
             return
@@ -1138,6 +1139,21 @@ class LivePreviewService(QObject):
         message = f"LIVE SKIP: read_only bundle={bundle} role={role}"
         if self._read_only_logged.get(key) != message:
             self._read_only_logged[key] = message
+            _debug_log(message)
+
+    def _log_skip_once(
+        self, decision: str, bundle: str, target: dict[str, Any]
+    ) -> None:
+        """Say a skip once per app, not once per poll tick.
+
+        The poll runs every 350 ms, and a short selection stays selected while
+        the user reads or thinks: 4,149 of the owner's 5,690 log lines were the
+        same "too_short", which rolled the real evidence out of the file.
+        """
+        key = f"{bundle}:{decision}"
+        message = f"LIVE SKIP: {decision} app={target.get('name')!r}"
+        if self._skip_logged.get(key) != message:
+            self._skip_logged[key] = message
             _debug_log(message)
 
     def _word_scope_for(self, start: int, end: int, text: str) -> str:
@@ -1676,6 +1692,14 @@ class LivePreviewService(QObject):
         Command-C intermittently, and the global one works once the app has
         been brought forward.
         """
+        if self._poll_paused_for_manual_task:
+            # A manual proofread, or the apply it leads to, owns the selection
+            # right now. Every copy here is a real Command-C that empties the
+            # pasteboard before pressing the key, and an apply pastes through
+            # that same pasteboard - the log shows a live sync read clearing it
+            # mid-paste, after which the user was told to check a document that
+            # had already been written. Stay off the clipboard until released.
+            return ""
         reader = getattr(self._editor, "get_selection_by_copy", None)
         try:
             if callable(reader):
@@ -3593,7 +3617,7 @@ class LivePreviewService(QObject):
                 return "Applied all suggestions to the selection."
             _debug_log(
                 "LIVE FULL APPLY: verify mismatch "
-                f"got={got[:40]!r} want={corrected[:40]!r}"
+                f"got={_redact(got)} want={_redact(corrected)}"
             )
             return "Applied — please check the document."
         except Exception as exc:

@@ -5676,3 +5676,222 @@ def test_a_comment_word_hides_from_applescript_still_counts_as_success(
 
     assert state["posted"] is True
     assert state["comments"] == 0, "the fake keeps the count flat on purpose"
+
+
+# --- what the support log may keep -----------------------------------------
+
+
+class _ShortSelectionEditor:
+    """A frontmost app holding a selection too short to preview."""
+
+    def frontmost_app(self):
+        return {"bundle_id": "com.apple.TextEdit", "pid": 1, "name": "TextEdit"}
+
+    def permission_status(self):
+        return True, ""
+
+    def selection_details(self, target):
+        return {
+            "text": "hi",
+            "range": (0, 2),
+            "context_before": "",
+            "context_after": "",
+            "found": True,
+            "editable": True,
+            "role": "AXTextArea",
+        }
+
+
+def test_a_short_selection_is_logged_once_not_on_every_tick(monkeypatch):
+    """4,149 of the owner's 5,690 log lines were this one message.
+
+    A short selection stays selected while the user reads or thinks, and the
+    poll runs every 350 ms, so an unthrottled skip line buries everything the
+    log is kept for and rolls the real evidence out of the file.
+    """
+    from src import generic_editing
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 300, "max_chars": 1500}}
+    )
+    monkeypatch.setattr(service, "_editor", _ShortSelectionEditor())
+
+    for tick in range(6):
+        service._sample(now=1000.0 + tick * 0.4)
+
+    log_path = os.path.join(generic_editing.get_app_support_dir(), "capture.log")
+    with open(log_path, encoding="utf-8") as handle:
+        content = handle.read()
+    assert content.count("LIVE SKIP: too_short") == 1, (
+        "the skip is worth recording once, not once per poll tick"
+    )
+    service.stop()
+
+
+def test_the_hotkey_log_keeps_no_keystrokes(monkeypatch, tmp_path):
+    """The global event monitor saw every key the user typed, in every app."""
+    from src import hotkeys
+
+    log_path = tmp_path / "debug_hotkeys.log"
+    monkeypatch.setattr(hotkeys, "get_hotkey_log_path", lambda: str(log_path))
+    monkeypatch.delenv(hotkeys.KEY_LOGGING_ENV, raising=False)
+
+    hotkeys.log_key_event("Key down: s flags=256")
+    hotkeys.log_debug("Matched hotkey: <cmd>+<shift>+p")
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "Key down" not in content
+    assert "Matched hotkey" in content, "the useful diagnostic stays"
+
+
+def test_key_logging_is_available_when_a_developer_asks_for_it(
+    monkeypatch, tmp_path
+):
+    from src import hotkeys
+
+    log_path = tmp_path / "debug_hotkeys.log"
+    monkeypatch.setattr(hotkeys, "get_hotkey_log_path", lambda: str(log_path))
+    monkeypatch.setenv(hotkeys.KEY_LOGGING_ENV, "1")
+
+    hotkeys.log_key_event("Key down: s flags=256")
+
+    assert "Key down: s" in log_path.read_text(encoding="utf-8")
+
+
+def test_keystrokes_recorded_by_an_older_build_are_dropped(monkeypatch, tmp_path):
+    from src import hotkeys
+
+    log_path = tmp_path / "debug_hotkeys.log"
+    log_path.write_text("Key down: h flags=256\nKey down: i flags=256\n", encoding="utf-8")
+    monkeypatch.setattr(hotkeys, "get_hotkey_log_path", lambda: str(log_path))
+    monkeypatch.delenv(hotkeys.KEY_LOGGING_ENV, raising=False)
+
+    hotkeys.drop_recorded_keystrokes()
+
+    assert not log_path.exists()
+
+
+def test_keystroke_logging_keeps_the_file_when_a_developer_asked_for_it(
+    monkeypatch, tmp_path
+):
+    from src import hotkeys
+
+    log_path = tmp_path / "debug_hotkeys.log"
+    log_path.write_text("Key down: h flags=256\n", encoding="utf-8")
+    monkeypatch.setattr(hotkeys, "get_hotkey_log_path", lambda: str(log_path))
+    monkeypatch.setenv(hotkeys.KEY_LOGGING_ENV, "1")
+
+    hotkeys.drop_recorded_keystrokes()
+
+    assert log_path.exists()
+
+
+def test_a_paste_that_landed_reads_back_with_outlooks_line_endings(monkeypatch):
+    """Outlook stores ``\\n`` as ``\\r\\n``; a landed paste is not a failure.
+
+    The verifier waits for the pasted text before the user's clipboard is put
+    back, and it decides "the paste was not observed" when the document does
+    not contain the text verbatim. Outlook and other WebKit surfaces rewrite
+    line endings, which turned a correct paste into the error the owner saw
+    twice on 2026-09-25 ("Could not confirm the paste").
+    """
+    from src import generic_editing
+
+    pasted = "Dear Sam,\n\nHere is the draft.\n\nRegards,\nAlex"
+    document = "Hi team,\r\n" + pasted.replace("\n", "\r\n") + "\r\nBye"
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_ax_selection",
+        staticmethod(lambda pid: ""),
+    )
+    monkeypatch.setattr(
+        generic_editing, "_mac_ax_field_value", lambda AS, pid: document
+    )
+
+    verdict = generic_editing._wait_for_paste_consumed(
+        None, {"pid": 1}, pasted, timeout=0.05
+    )
+
+    assert verdict == "ok"
+
+
+def test_a_paste_that_did_not_land_is_still_a_mismatch(monkeypatch):
+    """The newline tolerance must not turn verification into a rubber stamp."""
+    from src import generic_editing
+
+    pasted = "Dear Sam,\n\nHere is the draft."
+    document = "Hi team,\nthe original draft is still here\nBye"
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_ax_selection",
+        staticmethod(lambda pid: ""),
+    )
+    monkeypatch.setattr(
+        generic_editing, "_mac_ax_field_value", lambda AS, pid: document
+    )
+
+    verdict = generic_editing._wait_for_paste_consumed(
+        None, {"pid": 1}, pasted, timeout=0.05
+    )
+
+    assert verdict == "mismatch"
+
+
+def test_a_live_copy_stands_down_while_a_manual_task_owns_the_selection(
+    monkeypatch,
+):
+    """The poll posted Command-C inside an apply's paste window.
+
+    That keystroke clears the pasteboard the apply is pasting from, because
+    the copy preserves the user's clipboard by emptying it first. While a
+    manual proofread (or the apply it leads to) owns the selection, the live
+    service must not touch the clipboard at all.
+    """
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    copies: list[int] = []
+
+    class CopyingEditor:
+        def get_selection_by_copy(self, target, attempts):
+            copies.append(attempts)
+            return "the selected words"
+
+    monkeypatch.setattr(service, "_editor", CopyingEditor())
+    service._selection_target = {"pid": 1, "name": "Microsoft Outlook"}
+
+    service.hold_for_manual_task()
+    assert service._read_selection_by_copy() == ""
+    assert copies == [], "no Command-C while the manual task owns the selection"
+
+    service.release_after_manual_task()
+    assert service._read_selection_by_copy() == "the selected words"
+    assert copies == [2]
+    service.stop()
+
+
+def test_the_full_apply_mismatch_keeps_the_document_text_out_of_the_log(
+    monkeypatch,
+):
+    """capture.log is a support artifact, not a copy of the draft."""
+    from src import generic_editing
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service._selection_target = {"pid": 1, "name": "FakeApp", "bundle_id": "x"}
+    monkeypatch.setattr(
+        service._editor,
+        "get_selection_light",
+        lambda target: "Confidential thesis paragraph about patient outcomes",
+    )
+
+    service._verify_full_apply("A completely different rewrite")
+
+    log_path = os.path.join(generic_editing.get_app_support_dir(), "capture.log")
+    with open(log_path, encoding="utf-8") as handle:
+        content = handle.read()
+    assert "Confidential thesis paragraph" not in content
+    assert "len=" in content and "sha=" in content
+    service.stop()

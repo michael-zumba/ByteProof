@@ -248,6 +248,12 @@ def _wait_for_paste_consumed(
     """
     readable = False
     deadline = time.monotonic() + timeout
+    # Outlook and other WebKit surfaces store ``\n`` as ``\r``/``\r\n``, so a
+    # landed paste must be compared the way every other write check compares
+    # it. A verbatim substring test read those line endings as "the paste was
+    # not observed" and the user was told to check a document that was already
+    # correct.
+    wanted = normalize_line_endings(new_text)
     while True:
         pid = target.get("pid") or 0
         texts: list[str] = []
@@ -264,7 +270,8 @@ def _wait_for_paste_consumed(
         except Exception:
             pass
         if any(
-            _same_text(new_text, text) or new_text in text for text in texts
+            _same_text(new_text, text) or wanted in normalize_line_endings(text)
+            for text in texts
         ):
             return "ok"
         if texts:

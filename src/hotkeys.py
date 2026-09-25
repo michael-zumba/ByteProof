@@ -35,6 +35,39 @@ def log_debug(msg: str) -> None:
         pass
 
 
+# Per-key logging is a developer switch, never something a shipped build does.
+# The macOS monitor is global: it sees every key the user presses in every
+# application, and the log is plain text in the support folder, so recording
+# it by default wrote passphrases and private drafts to disk.
+KEY_LOGGING_ENV = "BYTEPROOF_DEBUG_HOTKEYS"
+
+
+def key_logging_enabled() -> bool:
+    """Whether a developer asked for per-key diagnostics."""
+    return os.environ.get(KEY_LOGGING_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def log_key_event(msg: str) -> None:
+    """Record one keystroke, only when a developer asked for it."""
+    if key_logging_enabled():
+        log_debug(msg)
+
+
+def drop_recorded_keystrokes() -> None:
+    """Delete keystrokes an older build wrote, unless logging is on now."""
+    if key_logging_enabled():
+        return
+    try:
+        os.remove(get_hotkey_log_path())
+    except OSError:
+        pass
+
+
 # Shifted punctuation produced by macOS when Shift is held. The old parser
 # only knew ':' and '"' for ';' and "'", so a shortcut like Cmd+Shift+. was
 # stored as "." but the event arrived as ">" and never matched.
@@ -368,6 +401,10 @@ class _MacOSHotkeyManager:
 
     def start(self, prompt_user: bool = True) -> bool:
         self.stop()
+        if SYSTEM == "Darwin":
+            # Every build before 2.2.2-beta.4 wrote each keystroke to the hotkey
+            # log. Nothing needs that history, and it is the user's typing.
+            drop_recorded_keystrokes()
         log_debug(f"Starting macOS HotkeyManager, prompt={prompt_user}")
 
         if not self.callbacks:
@@ -401,7 +438,7 @@ class _MacOSHotkeyManager:
             try:
                 ev_flags = event.modifierFlags()
                 ev_chars = event.charactersIgnoringModifiers()
-                log_debug(f"Key down: {ev_chars} flags={ev_flags}")
+                log_key_event(f"Key down: {ev_chars} flags={ev_flags}")
                 if not ev_chars:
                     return
                 ev_char = str(ev_chars).lower()

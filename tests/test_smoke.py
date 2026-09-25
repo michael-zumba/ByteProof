@@ -4009,5 +4009,87 @@ def main() -> None:
     print("\nALL_SMOKE_TESTS_PASSED")
 
 
+def _apply_harness(monkeypatch):
+    """A window whose apply is stubbed, with the live holds it asks for."""
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    from src import gui, settings
+
+    window = gui.ProofreaderApp(1024, settings.load_runtime_settings())
+    calls: list[str] = []
+
+    class StubService:
+        def hold_for_manual_task(self) -> None:
+            calls.append("hold")
+
+        def release_after_manual_task(self) -> None:
+            calls.append("release")
+
+    class StubWorker:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.done = SimpleNamespace(connect=lambda _callback: None)
+
+        def start(self) -> None:
+            calls.append("start")
+
+    window.live_service = StubService()  # type: ignore[assignment]
+    window._show_toast = lambda *a, **k: None  # type: ignore[assignment]
+    window._start_escape_monitor = lambda: None  # type: ignore[assignment]
+    window._stop_escape_monitor = lambda: None  # type: ignore[assignment]
+    monkeypatch.setattr(gui, "GenericApplyWorker", StubWorker)
+    # The QApplication has to outlive the helper: Qt destroys the window's
+    # widgets when the only reference to the application goes away.
+    return app, window, calls
+
+
+def test_an_apply_holds_the_live_preview_until_the_paste_is_done(monkeypatch) -> None:
+    """The poll posted Command-C inside an apply's paste window.
+
+    A copy empties the pasteboard before pressing Command-C, so a live read
+    landing between the apply's paste and its confirmation made Outlook paste
+    nothing and the user was told to check the document. The live preview has
+    to stand down for the whole write, not just until the proofread returns.
+    """
+    _app, window, calls = _apply_harness(monkeypatch)
+
+    window._apply_generic_text(
+        "Hello world.",
+        "Hello, world.",
+        {"pid": 1, "name": "FakeMail", "bundle_id": "fake.mail"},
+    )
+    assert calls == ["hold", "start"], "the live preview must stand down first"
+
+    window._on_generic_apply_done(True, "Applied to FakeMail.")
+    assert calls == ["hold", "start", "release"]
+    window.close()
+
+
+def test_finishing_the_proofread_leaves_the_hold_under_a_running_apply(
+    monkeypatch,
+) -> None:
+    """The result handler runs before `finished`, so the hold was dropped.
+
+    Auto-apply starts the write from the result handler and the proofread's own
+    `finished` signal follows it in the same event-loop pass. Releasing there
+    put the live preview back on the clipboard while the paste was in flight,
+    which is the race the hold exists to prevent.
+    """
+    _app, window, calls = _apply_harness(monkeypatch)
+
+    window._apply_generic_text(
+        "Hello world.",
+        "Hello, world.",
+        {"pid": 1, "name": "FakeMail", "bundle_id": "fake.mail"},
+    )
+    window.task_finished()
+
+    assert calls == ["hold", "start"], "the apply still owns the selection"
+
+    window._on_generic_apply_done(True, "Applied to FakeMail.")
+    assert calls == ["hold", "start", "release"]
+    window.close()
+
+
 if __name__ == "__main__":
     main()

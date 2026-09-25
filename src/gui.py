@@ -8091,6 +8091,12 @@ class ProofreaderApp(QMainWindow):
         target: dict[str, Any],
     ) -> None:
         self._task_cancel_event.clear()
+        # The apply pastes through the clipboard, and the live preview reads
+        # the selection by emptying the pasteboard and pressing Command-C. A
+        # read landing between the paste and its confirmation made the user's
+        # document look unchanged (Outlook, 2026-09-25), so the live preview
+        # stands down for the whole write, not just until the diff is ready.
+        self._hold_live_for_manual_task()
         app_name = target.get("name") or "the app"
         self.status_label.setText(f"Applying to {app_name}…")
         self._generic_apply_pending = True
@@ -8112,12 +8118,14 @@ class ProofreaderApp(QMainWindow):
         except Exception as e:
             print(f"Error starting apply worker: {e}")
             self._generic_apply_pending = False
+            self._release_live_hold()
             self.apply_btn.setEnabled(True)
             self._stop_escape_monitor()
             self._show_toast("Could not start applying the changes.", kind="error")
             return
 
     def _on_generic_apply_done(self, ok: bool, message: str) -> None:
+        self._release_live_hold()
         self._stop_escape_monitor()
         self._generic_apply_pending = False
         self.apply_btn.setVisible(False)
@@ -8214,13 +8222,17 @@ class ProofreaderApp(QMainWindow):
             self.tray_icon.setIcon(self.normal_icon)
 
     def task_finished(self) -> None:
-        self._release_live_hold()
         apply_worker = getattr(self, "generic_apply_worker", None)
         apply_running = (
             self._generic_apply_pending
             or (apply_worker is not None and apply_worker.isRunning())
         )
         if not apply_running:
+            # Auto-apply starts the write from the result handler, which runs
+            # just before this one: letting the hold go here would put the live
+            # preview back on the clipboard while the paste is in flight and
+            # the apply's own end is what releases it.
+            self._release_live_hold()
             self._stop_escape_monitor()
         self.run_btn.setEnabled(True)
         if self._last_task_cancelled:
