@@ -21,6 +21,7 @@ import subprocess
 import time
 from typing import Any
 
+from .live_preview import CLIPBOARD_FALLBACK_BUNDLE_IDS
 from .settings import get_app_support_dir
 from .utils import normalize_line_endings, normalize_text
 
@@ -96,6 +97,17 @@ def _debug_log(msg: str) -> None:
 # Minimum spacing between two copy keystrokes, whatever asks for them.
 MIN_COPY_INTERVAL_S = 0.5
 _last_copy_attempt_at = 0.0
+# Whether the most recent copy-backed read was refused (the rate-limit window,
+# or missing Accessibility trust) instead of coming back with an answer. A
+# refusal returns "" exactly like a copy that found nothing, and the manual
+# proofread used to report it as "No text selected" (owner log, 2026-09-29).
+_last_copy_read_refused = False
+
+
+def copy_read_refused() -> bool:
+    """Whether the most recent copy-backed selection read was refused."""
+    return _last_copy_read_refused
+
 
 _ax_element_cache: dict[int, tuple[float, Any, Any]] = {}
 AX_ELEMENT_CACHE_S = 2.5
@@ -279,6 +291,51 @@ def _wait_for_paste_consumed(
         if time.monotonic() >= deadline:
             return "mismatch" if readable else "unreadable"
         time.sleep(PASTE_CONFIRM_INTERVAL_S)
+
+
+# Surfaces whose Accessibility text cannot prove a paste landed: Mail's WebKit
+# composer and the new Outlook answer the post-paste read with stale or
+# unrelated text (owner log, 2026-09-29: "Could not confirm the paste" for
+# edits that had landed). A real copy of the still-selected pasted text is the
+# trustworthy evidence, the same rule the live apply's paste check uses.
+PASTE_COPY_EVIDENCE_BUNDLE_IDS = CLIPBOARD_FALLBACK_BUNDLE_IDS | {
+    "com.microsoft.outlook"
+}
+
+
+def copy_verified_paste(
+    target: dict[str, Any], new_text: str, attempts: int = 2
+) -> bool:
+    """Whether a real copy proves the just-pasted text is in the target.
+
+    A read-only check: it never pastes again, so a false negative can only
+    cost a message, never a duplicated paragraph. True only when the copy
+    returns the pasted text itself (trimmed, line endings normalised), which
+    is what a landed paste leaves selected.
+    """
+    if SYSTEM != "Darwin":
+        return False
+    bundle = str(target.get("bundle_id", "")).lower()
+    if bundle not in PASTE_COPY_EVIDENCE_BUNDLE_IDS:
+        return False
+    if not GenericTextEditor._mac_is_frontmost(target):
+        # A copy is answered by whatever owns the keyboard; without the
+        # target in front the read would describe another app.
+        return False
+    pid = int(target.get("pid") or 0)
+    wanted = (new_text or "").strip()
+    bounded = max(1, min(int(attempts), 2))
+    for index in range(bounded):
+        copied = GenericTextEditor._mac_copy_selection(
+            pid, target.get("name") or "", max_attempts=1
+        )
+        if copied:
+            return _same_text(copied.strip(), wanted)
+        if index + 1 < bounded:
+            # The pre-apply selection read shares this Command-C budget; wait
+            # the rate-limit window out before the one bounded retry.
+            time.sleep(MIN_COPY_INTERVAL_S + 0.05)
+    return False
 
 
 def normalize_selection_text(text: str) -> str:
@@ -1100,19 +1157,22 @@ class GenericTextEditor:
     @staticmethod
     def _mac_copy_selection(pid: int = 0, app_name: str = "", max_attempts: int = 3) -> str:
         """Copy the current selection via Cmd+C and return the clipboard text."""
-        global _last_copy_attempt_at
+        global _last_copy_attempt_at, _last_copy_read_refused
         try:
             import ApplicationServices as AS
             if not AS.AXIsProcessTrusted():
+                _last_copy_read_refused = True
                 return ""
             # Every attempt is a real key equivalent: it flashes the app's Edit
             # menu and beeps when there is nothing to copy. Two of them landing
             # within this window means something is looping, so refuse.
             now = time.monotonic()
             if now - _last_copy_attempt_at < MIN_COPY_INTERVAL_S:
+                _last_copy_read_refused = True
                 _debug_log("copy selection skipped: rate limited")
                 return ""
             _last_copy_attempt_at = now
+            _last_copy_read_refused = False
             # Ask the app's own Copy command first. Its menu item reports
             # whether anything is selected, and performing it sends no key
             # equivalent - so nothing beeps and no menu flashes. Posting

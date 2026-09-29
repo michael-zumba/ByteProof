@@ -935,22 +935,44 @@ class GenericApplyWorker(QThread):
                 return
 
             ok, message = editor.replace_selection(self.target, self.corrected)
+            proved_by_copy = False
+            if not ok:
+                # "Could not confirm the paste" is not proof the paste failed:
+                # Mail and the new Outlook expose no trustworthy Accessibility
+                # text for their composers, so a landed write can read back as
+                # stale or unrelated text (owner log, 2026-09-29). A real copy
+                # of the selection is the trustworthy evidence - the same rule
+                # the live apply uses - and it never pastes again.
+                from .generic_editing import _debug_log, copy_verified_paste
+
+                proved_by_copy = copy_verified_paste(self.target, self.corrected)
+                if proved_by_copy:
+                    _debug_log(
+                        "APPLY: Accessibility could not confirm the paste; a "
+                        "copy of the selection proves it landed"
+                    )
+                    ok = True
             if not ok:
                 self.done.emit(False, message or "Could not apply the text.")
                 return
 
             # Verify the paste read-only (no keystrokes), so the system never
-            # plays error beeps after editing.
+            # plays error beeps after editing. A copy already proved the write
+            # for the surfaces whose Accessibility reads cannot (above), and
+            # that proof outranks this weaker read.
             time.sleep(0.4)
             if self.cancel_event.is_set():
                 self.done.emit(False, "Task cancelled.")
                 return
-            after = editor.get_selection_ax_only(self.target)
-            ok_verify, _ = evaluate_apply_verification(
-                self.original,
-                self.corrected,
-                after,
-            )
+            if proved_by_copy:
+                ok_verify = True
+            else:
+                after = editor.get_selection_ax_only(self.target)
+                ok_verify, _ = evaluate_apply_verification(
+                    self.original,
+                    self.corrected,
+                    after,
+                )
             if ok_verify:
                 self.done.emit(
                     True,
@@ -7033,6 +7055,28 @@ class ProofreaderApp(QMainWindow):
         kind = "success" if "applied" in message.lower() else "warning"
         self._show_toast(message, kind=kind)
 
+    def _read_button_target_selection(
+        self, editor: Any, target: dict[str, Any]
+    ) -> tuple[str, bool]:
+        """Read the button target's selection, retrying one refused read.
+
+        The live preview's Command-C read and this one share a single rate
+        limit (MIN_COPY_INTERVAL_S), so a read landing right after the
+        preview's was refused and reported as if the app held no selection
+        (owner log, 2026-09-29). Wait the window out and read once more;
+        (text, refused) tells the caller whether to blame the selection or
+        to admit the read itself did not happen.
+        """
+        from .generic_editing import MIN_COPY_INTERVAL_S, copy_read_refused
+
+        text = editor.get_selection_light(target) or ""
+        refused = bool(not text.strip() and copy_read_refused())
+        if refused:
+            time.sleep(MIN_COPY_INTERVAL_S + 0.05)
+            text = editor.get_selection_light(target) or ""
+            refused = bool(not text.strip() and copy_read_refused())
+        return text, refused
+
     def run_proofread_task(self) -> None:
         if not self._check_license_access():
             return
@@ -7156,15 +7200,27 @@ class ProofreaderApp(QMainWindow):
                         activate_target = True
                     # Fail fast with a clear message if the chosen app has no
                     # selection, instead of starting a pointless AI task.
-                    preview = editor.get_selection_light(best)
+                    preview, read_refused = self._read_button_target_selection(
+                        editor, best
+                    )
                     if not preview or not preview.strip():
                         _debug_log(
-                            f"BUTTON PATH: no selection in {best.get('name')!r}"
+                            f"BUTTON PATH: no selection in {best.get('name')!r} "
+                            f"refused={read_refused}"
                         )
-                        self._cancel_proofread_start(
-                            f"No text selected in {best.get('name') or 'that app'}. "
-                            "Select the text you want proofread, then try again."
-                        )
+                        if read_refused:
+                            self._cancel_proofread_start(
+                                "Could not read the selection in "
+                                f"{best.get('name') or 'that app'} — please try "
+                                "again."
+                            )
+                        else:
+                            self._cancel_proofread_start(
+                                f"No text selected in "
+                                f"{best.get('name') or 'that app'}. "
+                                "Select the text you want proofread, then try "
+                                "again."
+                            )
                         return
         except Exception as e:
             print(f"Target detection failed: {e}")

@@ -2057,7 +2057,12 @@ def polish_selection_once(
     The caller decides whether/how to apply the result; this function only
     reads the selection, runs the AI, and returns the polished text.
     """
-    from .generic_editing import get_generic_editor, normalize_selection_text
+    from .generic_editing import (
+        MIN_COPY_INTERVAL_S,
+        copy_read_refused,
+        get_generic_editor,
+        normalize_selection_text,
+    )
 
     try:
         editor = get_generic_editor()
@@ -2082,12 +2087,34 @@ def polish_selection_once(
                 pass
 
         current_text, context_before, context_after = editor.get_selection_info(target)
+        refused = bool(not (current_text or "").strip() and copy_read_refused())
+        if refused:
+            # The live preview's Command-C read and this manual read share one
+            # rate limit (MIN_COPY_INTERVAL_S). When the preview read the
+            # selection moments before the hotkey, this read is refused - not
+            # answered - and used to be reported as "No text selected". Wait
+            # the window out and read once more, the same bounded retry the
+            # live apply uses for its own clipboard reads.
+            time.sleep(MIN_COPY_INTERVAL_S + 0.05)
+            current_text, context_before, context_after = editor.get_selection_info(
+                target
+            )
+            refused = bool(not (current_text or "").strip() and copy_read_refused())
         if not current_text or not current_text.strip():
             from .generic_editing import _debug_log
+
             _debug_log(
                 f"EMPTY SELECTION: app={app_name!r} pid={target.get('pid')} "
-                f"activate_target={activate_target}"
+                f"activate_target={activate_target} refused={refused}"
             )
+            if refused:
+                return (
+                    f"Could not read the selection in {app_name} — please try again.",
+                    None,
+                    None,
+                    None,
+                    0,
+                )
             return f"No text selected in {app_name}.", None, None, None, 0
         if len(current_text.strip()) < 5:
             return "Selection too short.", current_text, None, None, 0

@@ -5895,3 +5895,364 @@ def test_the_full_apply_mismatch_keeps_the_document_text_out_of_the_log(
     assert "Confidential thesis paragraph" not in content
     assert "len=" in content and "sha=" in content
     service.stop()
+
+
+# --- what the 2026-09-29 Mail session showed ---------------------------------
+
+MAIL_TARGET = {"bundle_id": "com.apple.mail", "pid": 928, "name": "Mail"}
+
+
+class _ScriptedSelectionEditor:
+    """An editor whose selection reads return a scripted sequence.
+
+    The 2026-09-29 log: the live preview read the selection with a real
+    Command-C, the owner pressed the proofread hotkey inside the same
+    half-second, and the manual read came back empty because the copy budget
+    (MIN_COPY_INTERVAL_S) was still spent - not because nothing was selected.
+    """
+
+    def __init__(self, reads: list[tuple[str, str, str]]) -> None:
+        self._reads = reads
+        self.calls = 0
+
+    def permission_status(self) -> tuple[bool, str]:
+        return True, ""
+
+    def frontmost_app(self) -> dict[str, Any]:
+        return dict(MAIL_TARGET)
+
+    def get_selection_info(self, target: dict[str, Any]) -> tuple[str, str, str]:
+        index = min(self.calls, len(self._reads) - 1)
+        self.calls += 1
+        return self._reads[index]
+
+
+def test_a_manual_read_refused_by_the_copy_rate_limit_is_retried(monkeypatch):
+    from src import generic_editing, logic
+
+    editor = _ScriptedSelectionEditor([("", "", ""), ("ab", "", "")])
+    monkeypatch.setattr(generic_editing, "get_generic_editor", lambda: editor)
+    monkeypatch.setattr(generic_editing, "copy_read_refused", lambda: True)
+    monkeypatch.setattr(logic.time, "sleep", lambda _seconds: None)
+
+    status, _text, _corrected, _comment, _start = logic.polish_selection_once(
+        1024, settings={}, target=dict(MAIL_TARGET), activate_target=False
+    )
+
+    assert editor.calls == 2, "the refused read must be retried once"
+    assert status == "Selection too short.", (
+        "the retry's text is the one the task uses"
+    )
+
+
+def test_a_manual_read_refused_twice_reports_a_read_failure(monkeypatch):
+    from src import generic_editing, logic
+
+    editor = _ScriptedSelectionEditor([("", "", "")])
+    monkeypatch.setattr(generic_editing, "get_generic_editor", lambda: editor)
+    monkeypatch.setattr(generic_editing, "copy_read_refused", lambda: True)
+    monkeypatch.setattr(logic.time, "sleep", lambda _seconds: None)
+
+    status, *_rest = logic.polish_selection_once(
+        1024, settings={}, target=dict(MAIL_TARGET), activate_target=False
+    )
+
+    assert editor.calls == 2
+    assert status == "Could not read the selection in Mail — please try again."
+
+
+def test_a_manual_read_answered_with_nothing_still_says_none_selected(monkeypatch):
+    """An app that reports nothing to copy is answered, not refused."""
+    from src import generic_editing, logic
+
+    editor = _ScriptedSelectionEditor([("", "", "")])
+    monkeypatch.setattr(generic_editing, "get_generic_editor", lambda: editor)
+    monkeypatch.setattr(generic_editing, "copy_read_refused", lambda: False)
+
+    status, *_rest = logic.polish_selection_once(
+        1024, settings={}, target=dict(MAIL_TARGET), activate_target=False
+    )
+
+    assert editor.calls == 1, "an answered empty read is not retried"
+    assert status == "No text selected in Mail."
+
+
+class _ButtonReadEditor:
+    def __init__(self, reads: list[str]) -> None:
+        self._reads = reads
+        self.calls = 0
+
+    def get_selection_light(self, target: dict[str, Any]) -> str:
+        index = min(self.calls, len(self._reads) - 1)
+        self.calls += 1
+        return self._reads[index]
+
+
+def test_the_proofread_button_retries_a_refused_read(monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    from src import generic_editing, gui, settings
+
+    window = gui.ProofreaderApp(1024, settings.load_runtime_settings())
+    editor = _ButtonReadEditor(["", "the selected words"])
+    monkeypatch.setattr(generic_editing, "copy_read_refused", lambda: True)
+    monkeypatch.setattr(gui.time, "sleep", lambda _seconds: None)
+
+    text, refused = window._read_button_target_selection(editor, dict(MAIL_TARGET))
+
+    assert editor.calls == 2
+    assert text == "the selected words"
+    assert refused is False
+    window.close()
+
+
+def test_the_proofread_button_says_read_failure_not_no_selection(monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    from src import generic_editing, gui, settings
+
+    window = gui.ProofreaderApp(1024, settings.load_runtime_settings())
+    messages: list[str] = []
+    monkeypatch.setattr(window, "_cancel_proofread_start", messages.append)
+    monkeypatch.setattr(window, "_check_license_access", lambda: True)
+    monkeypatch.setattr(generic_editing, "copy_read_refused", lambda: True)
+    monkeypatch.setattr(gui.time, "sleep", lambda _seconds: None)
+
+    class SelfThenMailEditor:
+        def permission_status(self) -> tuple[bool, str]:
+            return True, ""
+
+        def is_word(self, target: dict[str, Any]) -> bool:
+            return False
+
+        def frontmost_app(self) -> dict[str, Any]:
+            return {
+                "bundle_id": "co.bytemind.byteproof",
+                "pid": os.getpid(),
+                "name": "ByteProof",
+            }
+
+        def activate(self, target: dict[str, Any]) -> bool:
+            return True
+
+        def get_selection_light(self, target: dict[str, Any]) -> str:
+            return ""
+
+    monkeypatch.setattr(gui, "get_generic_editor", lambda: SelfThenMailEditor())
+    window._hotkey_target = None
+    window._last_other_app = dict(MAIL_TARGET)
+
+    window.run_proofread_task()
+
+    assert messages and messages[0].startswith(
+        "Could not read the selection in Mail"
+    )
+    assert "No text selected" not in messages[0]
+    window.close()
+
+
+def test_the_paste_copy_check_spares_apps_with_trustworthy_accessibility(
+    monkeypatch,
+):
+    """TextEdit answers the Accessibility paste check; no keystroke is spent."""
+    from src import generic_editing
+
+    copies: list[Any] = []
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_is_frontmost",
+        staticmethod(lambda target: True),
+    )
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_copy_selection",
+        staticmethod(lambda *args, **kwargs: copies.append(args) or "text"),
+    )
+
+    proved = generic_editing.copy_verified_paste(
+        {"bundle_id": "com.apple.TextEdit", "pid": 1, "name": "TextEdit"},
+        "text",
+    )
+
+    assert proved is False
+    assert copies == [], "a trustworthy AX read needs no Command-C"
+
+
+def test_the_paste_copy_check_never_reads_another_apps_selection(monkeypatch):
+    from src import generic_editing
+
+    copies: list[Any] = []
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_is_frontmost",
+        staticmethod(lambda target: False),
+    )
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_copy_selection",
+        staticmethod(lambda *args, **kwargs: copies.append(args) or "text"),
+    )
+
+    proved = generic_editing.copy_verified_paste(dict(MAIL_TARGET), "text")
+
+    assert proved is False
+    assert copies == [], "a copy is answered by whatever owns the keyboard"
+
+
+def test_a_copy_of_the_pasted_text_proves_the_paste(monkeypatch):
+    from src import generic_editing
+
+    corrected = "Everything else stays where it belongs. "
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_is_frontmost",
+        staticmethod(lambda target: True),
+    )
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_copy_selection",
+        staticmethod(lambda *args, **kwargs: corrected),
+    )
+
+    assert generic_editing.copy_verified_paste(dict(MAIL_TARGET), corrected) is True
+
+
+def test_a_copy_of_other_text_does_not_prove_the_paste(monkeypatch):
+    from src import generic_editing
+
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_is_frontmost",
+        staticmethod(lambda target: True),
+    )
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_copy_selection",
+        staticmethod(lambda *args, **kwargs: "the original words"),
+    )
+
+    assert (
+        generic_editing.copy_verified_paste(
+            dict(MAIL_TARGET), "the corrected words"
+        )
+        is False
+    )
+
+
+def test_the_paste_copy_check_waits_out_the_copy_rate_limit(monkeypatch):
+    """The pre-apply read and this one share the Command-C budget."""
+    from src import generic_editing
+
+    reads: list[int] = []
+
+    def fake_copy(pid: int, name: str, max_attempts: int = 1) -> str:
+        reads.append(max_attempts)
+        return "" if len(reads) == 1 else "the corrected words"
+
+    slept: list[float] = []
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_is_frontmost",
+        staticmethod(lambda target: True),
+    )
+    monkeypatch.setattr(
+        generic_editing.GenericTextEditor,
+        "_mac_copy_selection",
+        staticmethod(fake_copy),
+    )
+    monkeypatch.setattr(generic_editing.time, "sleep", lambda s: slept.append(s))
+
+    proved = generic_editing.copy_verified_paste(
+        dict(MAIL_TARGET), "the corrected words"
+    )
+
+    assert proved is True
+    assert reads == [1, 1], "one bounded retry, one keystroke each"
+    assert slept and slept[0] >= generic_editing.MIN_COPY_INTERVAL_S
+
+
+def test_a_paste_proved_by_a_real_copy_is_not_reported_as_unconfirmed(monkeypatch):
+    """A stale Accessibility read must not turn a landed Mail paste red."""
+    from src import generic_editing, gui
+
+    original = "Everything else stays where it belongs: "
+    corrected = "Everything else stays where it belongs. "
+
+    class Editor:
+        def __init__(self) -> None:
+            self.replace_calls = 0
+
+        def activate(self, target: dict[str, Any]) -> bool:
+            return True
+
+        def get_selection_light(self, target: dict[str, Any]) -> str:
+            return original
+
+        def replace_selection(
+            self, target: dict[str, Any], new_text: str
+        ) -> tuple[bool, str]:
+            self.replace_calls += 1
+            return False, "Could not confirm the paste — please check the document."
+
+        def get_selection_ax_only(self, target: dict[str, Any]) -> str:
+            return original  # WebKit's stale answer, the 2026-09-29 case
+
+    editor = Editor()
+    monkeypatch.setattr(gui, "get_generic_editor", lambda: editor)
+    monkeypatch.setattr(gui.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        generic_editing,
+        "copy_verified_paste",
+        lambda target, text: True,
+    )
+
+    worker = gui.GenericApplyWorker(original, corrected, dict(MAIL_TARGET))
+    outcomes: list[tuple[bool, str]] = []
+    worker.done.connect(lambda ok, message: outcomes.append((ok, message)))
+    worker.run()
+
+    assert outcomes == [(True, "Applied to Mail. Press Cmd/Ctrl+Z to undo.")]
+    assert editor.replace_calls == 1, "the evidence check never pastes again"
+
+
+def test_a_paste_without_copy_evidence_keeps_its_failure_report(monkeypatch):
+    from src import generic_editing, gui
+
+    original = "Everything else stays where it belongs: "
+    corrected = "Everything else stays where it belongs. "
+
+    class Editor:
+        def activate(self, target: dict[str, Any]) -> bool:
+            return True
+
+        def get_selection_light(self, target: dict[str, Any]) -> str:
+            return original
+
+        def replace_selection(
+            self, target: dict[str, Any], new_text: str
+        ) -> tuple[bool, str]:
+            return False, "Could not confirm the paste — please check the document."
+
+        def get_selection_ax_only(self, target: dict[str, Any]) -> str:
+            return original
+
+    monkeypatch.setattr(gui, "get_generic_editor", lambda: Editor())
+    monkeypatch.setattr(gui.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        generic_editing,
+        "copy_verified_paste",
+        lambda target, text: False,
+    )
+
+    worker = gui.GenericApplyWorker(original, corrected, dict(MAIL_TARGET))
+    outcomes: list[tuple[bool, str]] = []
+    worker.done.connect(lambda ok, message: outcomes.append((ok, message)))
+    worker.run()
+
+    assert outcomes == [
+        (False, "Could not confirm the paste — please check the document.")
+    ]
