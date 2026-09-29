@@ -27,38 +27,62 @@ SURFACE_SHEET = (
 )
 PANEL_MIN_WIDTH = 340
 PANEL_MAX_WIDTH = 600
-TITLE_SHEET = "color: #202124; font-size: 14px; font-weight: 600;"
+TITLE_SHEET = "color: #202124; font-size: 15px; font-weight: 600;"
 DIFF_SHEET = "color: #202124; font-size: 14px;"
 REASON_SHEET = "color: #5F6368; font-size: 12px;"
+# White cards on the white surface, separated by a hairline border instead of
+# a grey fill; the hover tint is the only affordance the card itself needs.
 DIFF_BOX = (
-    "QFrame { background: #F7F8FA; border: 1px solid #EDF0F4;"
+    "QFrame { background: #FFFFFF; border: 1px solid #E3E6EB;"
     " border-radius: 12px; }"
+    "QFrame:hover { border-color: #D2D6DB; }"
 )
 PRIMARY_BUTTON = (
     "QPushButton { background: #1A73E8; color: #FFFFFF; border: none;"
-    " border-radius: 20px; padding: 7px 20px; font-size: 14px;"
-    " font-weight: 500; }"
+    " border-radius: 8px; padding: 8px 18px; font-size: 13px;"
+    " font-weight: 600; }"
     "QPushButton:hover { background: #1765CC; }"
     "QPushButton:pressed { background: #1256A8; }"
 )
+# The per-row action steps back so the panel has exactly one filled primary
+# ("Apply all"); the owner's screenshot had six equally loud blue buttons.
+TONAL_BUTTON = (
+    "QPushButton { background: #E8F0FE; color: #1967D2; border: none;"
+    " border-radius: 8px; padding: 8px 16px; font-size: 13px;"
+    " font-weight: 600; }"
+    "QPushButton:hover { background: #D2E3FC; }"
+    "QPushButton:pressed { background: #C6DAFC; }"
+)
 SECONDARY_BUTTON = (
     "QPushButton { background: #FFFFFF; color: #1A73E8;"
-    " border: 1px solid #DADCE0; border-radius: 20px; padding: 7px 20px;"
-    " font-size: 14px; font-weight: 500; }"
+    " border: 1px solid #DADCE0; border-radius: 8px; padding: 8px 18px;"
+    " font-size: 13px; font-weight: 600; }"
     "QPushButton:hover { background: #F8F9FA; }"
     "QPushButton:pressed { background: #EDF0F4; }"
 )
 CLOSE_BUTTON = (
-    "QPushButton { border: none; color: #5F6368; font-size: 16px;"
-    " background: transparent; border-radius: 13px; }"
+    "QPushButton { border: none; color: #5F6368; font-size: 15px;"
+    " background: transparent; border-radius: 8px; }"
     "QPushButton:hover { background: #F1F3F4; color: #202124; }"
     "QPushButton:pressed { background: #E4E7EB; color: #202124; }"
 )
 
-DIVIDER_SHEET = "QFrame { background: #F1F3F5; border: none; }"
+DIVIDER_SHEET = "QFrame { background: #F1F3F4; border: none; }"
 REASON_CHIP = (
     "color: #5F6368; font-size: 11px; background: #F1F3F4;"
-    " border-radius: 9px; padding: 2px 8px;"
+    " border-radius: 6px; padding: 2px 8px;"
+)
+SCROLLBAR_SHEET = (
+    "QScrollArea { border: none; background: transparent; }"
+    "QScrollBar:vertical { background: transparent; width: 8px;"
+    " margin: 2px 0px; }"
+    "QScrollBar::handle:vertical { background: #DADCE0;"
+    " border-radius: 4px; min-height: 32px; }"
+    "QScrollBar::handle:vertical:hover { background: #BDC1C6; }"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical"
+    " { height: 0px; }"
+    "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical"
+    " { background: transparent; }"
 )
 
 
@@ -172,7 +196,7 @@ class _SuggestionPopup(QFrame):
         title = QLabel("Suggested changes")
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(26, 26)
+        close_btn.setFixedSize(28, 28)
         close_btn.setStyleSheet(CLOSE_BUTTON)
         close_btn.clicked.connect(self.dismissed.emit)
         header.addWidget(title)
@@ -180,7 +204,9 @@ class _SuggestionPopup(QFrame):
         header.addWidget(close_btn)
         layout.addLayout(header)
 
-        diff_label = QLabel(diff_html(span.before, span.after))
+        diff_label = QLabel(
+            diff_html(span.before, span.after, panel_style=True)
+        )
         diff_label.setStyleSheet(DIFF_SHEET)
         diff_label.setWordWrap(True)
         diff_label.setMaximumWidth(384)
@@ -585,7 +611,7 @@ class WordSuggestionCard(QWidget):
         title = QLabel("Suggested changes")
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(26, 26)
+        close_btn.setFixedSize(28, 28)
         close_btn.setStyleSheet(CLOSE_BUTTON)
         close_btn.setToolTip("Close (Esc)")
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -628,7 +654,7 @@ class WordSuggestionCard(QWidget):
         title = QLabel(title_text)
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(26, 26)
+        close_btn.setFixedSize(28, 28)
         close_btn.setStyleSheet(CLOSE_BUTTON)
         close_btn.setToolTip("Close (Esc)")
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -639,16 +665,13 @@ class WordSuggestionCard(QWidget):
         self._header_widget = header_widget
         layout.addWidget(header_widget)
         layout.addWidget(_hairline())
-        layout.addSpacing(10)
+        layout.addSpacing(12)
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(8)
+        body_layout.setSpacing(12)
         for index, span in enumerate(spans):
-            if index:
-                body_layout.addWidget(_hairline())
-                body_layout.addSpacing(4)
             row = QHBoxLayout()
             row.setSpacing(10)
             reason_dot = QLabel()
@@ -657,21 +680,47 @@ class WordSuggestionCard(QWidget):
                 f"background-color: {reason_color(span.reason)};"
                 " border-radius: 4px;"
             )
-            row.addWidget(reason_dot, 0, Qt.AlignmentFlag.AlignTop)
+            # Keep the dot on the card's first text line instead of floating
+            # in the gutter above it.
+            dot_holder = QWidget()
+            dot_holder.setFixedWidth(8)
+            dot_layout = QVBoxLayout(dot_holder)
+            dot_layout.setContentsMargins(0, 7, 0, 0)
+            dot_layout.setSpacing(0)
+            dot_layout.addWidget(reason_dot)
+            dot_layout.addStretch()
+            row.addWidget(dot_holder, 0, Qt.AlignmentFlag.AlignTop)
             diff_box = QFrame()
+            diff_box.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
             diff_box.setStyleSheet(DIFF_BOX)
             diff_box_layout = QVBoxLayout(diff_box)
-            diff_box_layout.setContentsMargins(10, 7, 10, 7)
-            diff_label = QLabel(diff_html(span.before, span.after))
+            diff_box_layout.setContentsMargins(12, 9, 12, 9)
+            diff_box_layout.setSpacing(0)
+            diff_label = QLabel(
+                diff_html(span.before, span.after, panel_style=True)
+            )
             diff_label.setStyleSheet(DIFF_SHEET)
             diff_label.setWordWrap(True)
             diff_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
             diff_box_layout.addWidget(diff_label)
+            if span.reason:
+                # The reason is this card's label, not a stripe between two
+                # cards: a small tag in the card's footer, hugging the text.
+                tag = QLabel(span.reason)
+                tag.setStyleSheet(REASON_CHIP)
+                tag.setWordWrap(False)
+                tag_row = QHBoxLayout()
+                tag_row.setContentsMargins(0, 0, 0, 0)
+                tag_row.setSpacing(0)
+                tag_row.addWidget(tag)
+                tag_row.addStretch()
+                diff_box_layout.addSpacing(8)
+                diff_box_layout.addLayout(tag_row)
             self._diff_labels.append(diff_label)
             apply_btn = QPushButton("Apply")
-            apply_btn.setStyleSheet(PRIMARY_BUTTON)
+            apply_btn.setStyleSheet(TONAL_BUTTON)
             apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             apply_btn.clicked.connect(
                 lambda _checked=False, i=index: self.apply_requested.emit(i)
@@ -688,11 +737,6 @@ class WordSuggestionCard(QWidget):
             row.addWidget(dismiss_btn, 0, Qt.AlignmentFlag.AlignTop)
             row.addWidget(apply_btn, 0, Qt.AlignmentFlag.AlignTop)
             body_layout.addLayout(row)
-            if span.reason:
-                reason = QLabel(span.reason)
-                reason.setStyleSheet(REASON_CHIP)
-                reason.setWordWrap(True)
-                body_layout.addWidget(reason)
 
         if len(spans) > 5:
             scroll = QScrollArea()
@@ -700,24 +744,22 @@ class WordSuggestionCard(QWidget):
             scroll.setWidget(body)
             scroll.setMinimumHeight(200)
             scroll.setMaximumHeight(520)
-            scroll.setStyleSheet(
-                "QScrollArea { border: none; background: transparent; }"
-            )
+            scroll.setStyleSheet(SCROLLBAR_SHEET)
             layout.addWidget(scroll)
         else:
             layout.addWidget(body)
 
-        layout.addSpacing(10)
+        layout.addSpacing(12)
         layout.addWidget(_hairline())
-        layout.addSpacing(10)
+        layout.addSpacing(12)
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         apply_all_btn = QPushButton("Apply all")
         apply_all_btn.setStyleSheet(PRIMARY_BUTTON)
         apply_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_all_btn.clicked.connect(self.apply_all_requested.emit)
-        buttons.addWidget(apply_all_btn)
         buttons.addStretch()
+        buttons.addWidget(apply_all_btn)
         layout.addLayout(buttons)
         # Shape the window around the content: widen automatically so the
         # changed fragments fit, then compute the true wrapped heights
@@ -760,7 +802,7 @@ class WordSuggestionCard(QWidget):
         title = QLabel("Suggested changes")
         title.setStyleSheet(TITLE_SHEET)
         close_btn = QPushButton("×")
-        close_btn.setFixedSize(26, 26)
+        close_btn.setFixedSize(28, 28)
         close_btn.setStyleSheet(CLOSE_BUTTON)
         close_btn.setToolTip("Close (Esc)")
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)

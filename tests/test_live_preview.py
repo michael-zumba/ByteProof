@@ -4755,3 +4755,79 @@ def test_word_live_edit_verifies_the_extent_it_wrote(monkeypatch):
         "text item delimiters to {return & linefeed, return, linefeed}"
         in script
     )
+
+
+# --- the suggestion panel's own look (2026-09-30 polish) --------------------
+
+
+def test_the_popup_diff_gets_its_own_style_and_the_review_view_keeps_its():
+    """The panel restyle must not repaint the main window's review view."""
+    from src.ui_theme import diff_html
+
+    default = diff_html("teh cat", "the cat")
+    panel = diff_html("teh cat", "the cat", panel_style=True)
+
+    assert "#C5221F" in default, "the review view keeps its current red"
+    assert "#B3261E" not in default
+    assert "\u00a0→\u00a0" not in default, "the review view keeps plain arrows"
+
+    assert "#B3261E" in panel, "the panel uses the softer red"
+    assert "\u00a0→\u00a0" in panel, (
+        "the arrow stays glued to both words so it cannot dangle at a line end"
+    )
+
+
+def test_the_category_tag_sits_inside_its_suggestion_card():
+    """The tag used to be a full-width stripe between two cards.
+
+    The owner's screenshot showed "Tone / Clarity / Grammar" reading as
+    separators rather than labels. Grouping proof: the tag and the diff text
+    share one card frame.
+    """
+    from PyQt6.QtWidgets import QFrame, QLabel
+
+    from src.live_overlay import WordSuggestionCard
+    from src.live_preview import EditSpan
+
+    card = WordSuggestionCard()
+    card.set_spans(
+        [
+            EditSpan("teh", "the", "Spelling", 0, 3),
+            EditSpan("recieve", "receive", "Spelling", 8, 15),
+        ]
+    )
+
+    tags = [label for label in card.findChildren(QLabel) if label.text() == "Spelling"]
+    assert len(tags) == 2, "one tag per suggestion"
+    for tag in tags:
+        parent = tag.parentWidget()
+        assert isinstance(parent, QFrame), (
+            "the tag must live inside the suggestion card, not beside it"
+        )
+        assert any(
+            "→" in (label.text() or "") for label in parent.findChildren(QLabel)
+        ), "the tag shares its card with the diff text"
+
+
+def test_the_row_apply_is_tonal_and_apply_all_is_the_primary():
+    """One filled primary per panel; the per-row action steps back."""
+    from PyQt6.QtWidgets import QPushButton
+
+    from src.live_overlay import PRIMARY_BUTTON, TONAL_BUTTON, WordSuggestionCard
+    from src.live_preview import EditSpan
+
+    card = WordSuggestionCard()
+    card.set_spans([EditSpan("teh", "the", "Spelling", 0, 3)])
+
+    row_apply = [
+        button for button in card.findChildren(QPushButton) if button.text() == "Apply"
+    ]
+    apply_all = [
+        button
+        for button in card.findChildren(QPushButton)
+        if button.text() == "Apply all"
+    ]
+
+    assert row_apply and apply_all
+    assert row_apply[0].styleSheet() == TONAL_BUTTON
+    assert apply_all[0].styleSheet() == PRIMARY_BUTTON

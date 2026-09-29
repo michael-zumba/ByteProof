@@ -31,6 +31,17 @@ NEW_STYLE = (
 ARROW_STYLE = f"color:{TEXT_ARROW};"
 CONTEXT_STYLE = f"color:{TEXT_MUTED};"
 
+# The floating suggestion panel's diff spelling (2026-09-30 polish): a softer
+# red so a row of strikethroughs reads as a suggestion rather than an alarm,
+# and a non-breaking arrow so "old → new" cannot split across a wrapped line.
+# Opt-in: the review view keeps exactly the spelling it shipped with.
+PANEL_RED_DELETE = "#B3261E"
+PANEL_ARROW = "#80868B"
+PANEL_OLD_STYLE = f"color:{PANEL_RED_DELETE}; background:{RED_DELETE_BG};"
+PANEL_NEW_STYLE = NEW_STYLE
+PANEL_ARROW_STYLE = f"color:{PANEL_ARROW};"
+PANEL_ARROW_TEXT = "\u00a0→\u00a0"
+
 DOT_RED = "#D93025"
 DOT_AMBER = "#F9AB00"
 DOT_BLUE = BLUE_PRIMARY
@@ -59,6 +70,7 @@ def diff_html(
     context: int = 24,
     preserve_newlines: bool = False,
     arrow: bool = True,
+    panel_style: bool = False,
 ) -> str:
     """Render a pinpoint word/character diff, unchanged text left normal.
 
@@ -67,6 +79,10 @@ def diff_html(
     text, e.g. for the main window's review view). With
     ``preserve_newlines`` the caller must render inside a container that
     honours whitespace (``white-space:pre-wrap``).
+
+    ``panel_style`` selects the floating suggestion panel's spelling of the
+    same diff (softer red, glued arrow); the default keeps the review view's
+    current colours untouched.
 
     Only the changed words carry colour, weight or a strike-through; the
     surrounding text stays calm so the pinpoint edits are easy to spot. With
@@ -89,6 +105,10 @@ def diff_html(
 
     before_tokens = re.findall(r"\S+|\s+", before)
     after_tokens = re.findall(r"\S+|\s+", after)
+    old_style = PANEL_OLD_STYLE if panel_style else OLD_STYLE
+    new_style = PANEL_NEW_STYLE if panel_style else NEW_STYLE
+    arrow_style = PANEL_ARROW_STYLE if panel_style else ARROW_STYLE
+    arrow_text = PANEL_ARROW_TEXT if panel_style else " → "
     matcher = difflib.SequenceMatcher(
         None, before_tokens, after_tokens, autojunk=False
     )
@@ -105,18 +125,18 @@ def diff_html(
                     f"<span style='{CONTEXT_STYLE}'>{segment}</span>"
                 )
         elif tag == "delete":
-            parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
+            parts.append(f"<s style='{old_style}'>{escape(old)}</s>")
         elif tag == "insert":
-            parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
+            parts.append(f"<span style='{new_style}'>{escape(new)}</span>")
         elif tag == "replace":
-            parts.append(f"<s style='{OLD_STYLE}'>{escape(old)}</s>")
+            parts.append(f"<s style='{old_style}'>{escape(old)}</s>")
             # The struck original and the replacement already read as a pair
             # through their colour and strike-through; a gap is enough, and in
             # the review view (arrow=False) the arrow itself was the noise.
             parts.append(
-                f"<span style='{ARROW_STYLE}'> → </span>" if arrow else " "
+                f"<span style='{arrow_style}'>{arrow_text}</span>" if arrow else " "
             )
-            parts.append(f"<span style='{NEW_STYLE}'>{escape(new)}</span>")
+            parts.append(f"<span style='{new_style}'>{escape(new)}</span>")
     return "".join(parts) or escape(after)
 
 
