@@ -4250,11 +4250,16 @@ class _FakeAXField:
         range_value,
         range_write_works=True,
         range_readback_lags=False,
+        paste_drift=0,
     ):
         self.value = value
         self.selected = selected
         self.range_value = range_value
         self.range_write_works = range_write_works
+        # The Codex/ChatGPT composer pastes a few code points to the right of
+        # the range it was asked to replace (capture.log 2026-09-30: 574 for a
+        # span at 570). Zero is the well-behaved app.
+        self.paste_drift = paste_drift
         # An app that applies the range write but keeps reporting the old
         # range for a while (ChatGPT does this): the selection is then the only
         # evidence that the range landed.
@@ -4309,7 +4314,12 @@ def _wire_fake_ax_field(monkeypatch, field):
         GenericTextEditor, "_mac_ax_focused", lambda pid: (field, "el")
     )
     monkeypatch.setattr(GenericTextEditor, "_mac_activate", lambda target: True)
-    monkeypatch.setattr("src.generic_editing._mac_set_clipboard", lambda t: None)
+    # The clipboard is where the paste text comes from: the repair pastes
+    # different text than the call under test asked for.
+    monkeypatch.setattr(
+        "src.generic_editing._mac_set_clipboard",
+        lambda t: setattr(field, "clipboard", t),
+    )
     monkeypatch.setattr(
         "src.generic_editing._mac_restore_clipboard", lambda t: None
     )
@@ -4321,11 +4331,14 @@ def _wire_fake_ax_field(monkeypatch, field):
     def fake_post(code, pid):
         field.posted.append(code)
         # A real paste replaces the app's selected range with the new text.
+        # The clipboard is the source of truth: a repair pastes different
+        # text than the original call asked for.
+        pasted = getattr(field, "clipboard", None) or field.new_text
         start, length = field.range_value
+        start += getattr(field, "paste_drift", 0)
         field.value = (
-            field.value[:start] + field.new_text + field.value[start + length :]
+            field.value[:start] + pasted + field.value[start + length :]
         )
-        field.selected = field.new_text
 
     monkeypatch.setattr("src.generic_editing._post_mac_key", fake_post)
     return field
@@ -4428,6 +4441,256 @@ def test_ax_select_range_converts_code_points_to_utf16(monkeypatch):
     assert editor.ax_select_range({"pid": 9}, 2, 3) is True
     # Code points 2..5 sit at UTF-16 units 3..6 (the emoji is one unit pair).
     assert field.range_value == (3, 3)
+
+
+def test_ax_replace_range_repairs_a_late_landing(monkeypatch):
+    """capture.log 2026-09-30: the Codex/ChatGPT composer pasted a few code
+    points late, leaving the head of the original span in front of the new
+    text and swallowing the same number of characters after it - the owner's
+    "some words are not properly ordered". One measured repair over the whole
+    affected region must put the text right; only then is it "Applied."."""
+    field = _FakeAXField(
+        "the quick brown fox",
+        selected="quick",
+        range_value=(4, 5),
+        paste_drift=4,
+    )
+    field.new_text = "quickly"
+    editor = _fake_ax_editor(monkeypatch, field)
+
+    ok, message = editor.ax_replace_range(
+        {"pid": 9, "name": "ChatGPT", "bundle_id": "com.openai.chat"},
+        4,
+        5,
+        "quickly",
+        before_text="quick",
+    )
+
+    assert ok is True and message == "Applied."
+    assert field.value == "the quickly brown fox"
+
+
+def test_ax_replace_range_does_not_repair_an_unexplained_landing(monkeypatch):
+    """A landing that does not fit the late-landing pattern is left alone:
+    no second write into a state the code cannot explain."""
+    field = _FakeAXField(
+        "teh cat sat", selected="teh", range_value=(0, 3), paste_drift=40
+    )
+    field.new_text = "the"
+    editor = _fake_ax_editor(monkeypatch, field)
+    system_events: list[str] = []
+    monkeypatch.setattr(
+        "src.generic_editing._mac_system_events_key",
+        lambda key, name: system_events.append(key),
+    )
+
+    ok, _message = editor.ax_replace_range(
+        {"pid": 9, "name": "ChatGPT", "bundle_id": "com.openai.chat"},
+        0,
+        3,
+        "the",
+        before_text="teh",
+    )
+
+    assert ok is False
+    assert field.posted == [9]  # exactly one paste; no repair keystroke
+
+
+def test_two_drifting_writes_land_exactly_in_reverse_order(monkeypatch):
+    """Apply All works right-to-left; each drifted write must come out exact
+    so the next span's offsets still point at the words it was mapped to."""
+    field = _FakeAXField(
+        "the quick brown fox jumps",
+        selected="",
+        range_value=(0, 0),
+        paste_drift=4,
+    )
+    editor = _fake_ax_editor(monkeypatch, field)
+    target = {"pid": 9, "name": "ChatGPT", "bundle_id": "com.openai.chat"}
+
+    field.new_text = "leaps"
+    ok_first, _ = editor.ax_replace_range(
+        target, 20, 5, "leaps", before_text="jumps"
+    )
+    field.new_text = "quickly"
+    ok_second, _ = editor.ax_replace_range(
+        target, 4, 5, "quickly", before_text="quick"
+    )
+
+    assert ok_first is True and ok_second is True
+    assert field.value == "the quickly brown fox leaps"
+
+
+def test_write_evidence_requires_the_edit_at_the_span_itself(monkeypatch):
+    """A landing beside the span is not "applied".
+
+    capture.log 2026-09-30: every write was reported as present - the new
+    words existed in the field - so the batch kept writing after each
+    mis-landing and left the whole selection scrambled. Only an edit exactly
+    at the span may continue a batch; anything else stops it.
+    """
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    live = {"text": ""}
+
+    class Editor:
+        def field_value(self, target):
+            return live["text"]
+
+    service._editor = Editor()
+    service._selection_target = {
+        "bundle_id": "com.openai.chat",
+        "pid": 9,
+        "name": "ChatGPT",
+    }
+    service._selection_text = "the quick brown fox"
+    service._selection_start = 0
+    span = EditSpan("quick", "quickly", "Word choice", 4, 9)
+
+    # The app pasted four code points late: the words are in the field, but
+    # not where the span is. That is not "applied".
+    live["text"] = "the quicquicklywn fox"
+    assert service._write_evidence(span, "quick", 4) == "unknown"
+    # The edit sitting exactly at the span is applied; the untouched span is
+    # kept.
+    live["text"] = "the quickly brown fox"
+    assert service._write_evidence(span, "quick", 4) == "applied"
+    live["text"] = "the quick brown fox"
+    assert service._write_evidence(span, "quick", 4) == "kept"
+    # A replacement that is a prefix of the original (removing a word) must
+    # not read as applied while the field still holds the original.
+    shorter = EditSpan("quick brown", "quick", "Word choice", 4, 15)
+    assert service._write_evidence(shorter, "quick brown", 4) == "kept"
+    service.stop()
+
+
+def _settled_after_apply(monkeypatch, snapshots):
+    """A service that just applied an edit; the app reports the new selection
+    asynchronously, so the first reads still describe the pre-edit state."""
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+
+    class Editor:
+        def frontmost_app(self):
+            return {
+                "bundle_id": "com.apple.TextEdit",
+                "pid": 9,
+                "name": "TextEdit",
+            }
+
+        def permission_status(self):
+            return True, ""
+
+        def selection_details(self, target):
+            text, start = (
+                snapshots.pop(0) if len(snapshots) > 1 else snapshots[0]
+            )
+            return {
+                "text": text,
+                "range": (start, len(text)),
+                "context_before": "",
+                "context_after": "",
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+        def ax_bounds_for_range(self, target, start, length):
+            return []
+
+    monkeypatch.setattr(service, "_editor", Editor())
+    monkeypatch.setattr("src.live_service.time.sleep", lambda s: None)
+    service._selection_target = {
+        "bundle_id": "com.apple.TextEdit",
+        "pid": 9,
+        "name": "TextEdit",
+    }
+    service._selection_has_range = True
+    service._selection_text = "teh cat sat"
+    service._seen_text = "teh cat sat"
+    service._previewed_text = "teh cat sat"
+    # What the apply wrote: the app must confirm this before the panel
+    # anchors to the new selection.
+    service._apply_result_text = "the cat sat"
+    service._applying = True
+    return service
+
+
+def test_end_apply_re_anchors_to_the_apps_settled_selection(monkeypatch):
+    """The app's own selection is the truth after an apply.
+
+    The Codex/ChatGPT composer reports the selection asynchronously: a single
+    read right after the paste can still describe the pre-edit state, and two
+    agreeing reads can agree on that stale state. A read that matches what
+    the apply wrote wins; the panel anchors there and leaves the edited text
+    to be previewed again on hover."""
+    service = _settled_after_apply(
+        monkeypatch,
+        [
+            ("teh cat sat", 0),
+            ("teh cat sat", 0),
+            ("the cat sat", 0),
+            ("the cat sat", 0),
+        ],
+    )
+
+    service._end_apply()
+
+    assert service._selection_text == "the cat sat"
+    assert service._seen_text == "the cat sat"
+    assert service._previewed_text == ""
+    service.stop()
+
+
+def test_hover_after_apply_previews_the_edited_text(monkeypatch):
+    """Hovering the edited selection captures the new words, not the old."""
+    from PyQt6.QtCore import QPoint
+
+    from src import live_service as live_mod
+    from src.live_preview import Edit
+
+    service = _settled_after_apply(
+        monkeypatch,
+        [
+            ("teh cat sat", 0),
+            ("teh cat sat", 0),
+            ("the cat sat", 0),
+            ("the cat sat", 0),
+        ],
+    )
+    service._end_apply()
+    service._changed_at = 0.0
+
+    class Cursor:
+        def pos(self):
+            return QPoint(100, 100)
+
+    monkeypatch.setattr(live_mod, "QCursor", Cursor())
+    service._pointer_at_capture = QPoint(100, 100)
+    monkeypatch.setattr(service, "_selection_screen_rect", lambda: None)
+    result = {
+        "status": "ok",
+        "edits": [Edit("cat", "cats", "Grammar")],
+        "meta": {"provider": "fake"},
+    }
+    previewed: list[str] = []
+
+    def fake_spawn(target, text, details, key):
+        previewed.append(text)
+        service._on_done(result, key, text)
+
+    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+
+    assert previewed == ["the cat sat"]
+    assert service._pending and service._pending[0].before == "cat"
+    service.stop()
 
 
 def test_apply_all_stops_when_the_app_changed_the_text_unconfirmed(monkeypatch):

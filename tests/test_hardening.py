@@ -4180,6 +4180,112 @@ def test_the_pointer_rule_can_be_turned_off_and_fails_open(monkeypatch):
     unknown.stop()
 
 
+def test_hovering_the_text_again_re_arms_a_dropped_preview(monkeypatch):
+    """Owner, 2026-09-30: the hover trigger is not one-off.
+
+    With the text still selected, moving the pointer away and back over it
+    must bring the live suggestions back - from the cache, so no second
+    provider call - even when the panel was dropped in between (a failed
+    preview is the common case; capture.log shows three in a row).
+    """
+    from src import live_preview as lp
+    from src import live_service as live_mod
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {
+            "live_preview": {
+                "enabled": True,
+                "delay_ms": 0,
+                "max_chars": 4000,
+                "min_words": 1,
+                "require_pointer_near": True,
+            }
+        }
+    )
+
+    class Cursor:
+        def __init__(self) -> None:
+            from PyQt6.QtCore import QPoint
+
+            self.point = QPoint(100, 100)
+
+        def pos(self):
+            from PyQt6.QtCore import QPoint
+
+            return QPoint(self.point)
+
+    cursor = Cursor()
+    monkeypatch.setattr(live_mod, "QCursor", cursor)
+    from PyQt6.QtCore import QPoint
+
+    service._pointer_at_capture = QPoint(100, 100)
+    monkeypatch.setattr(service, "_selection_screen_rect", lambda: None)
+
+    class Editor:
+        def frontmost_app(self):
+            return {
+                "bundle_id": "com.apple.TextEdit",
+                "pid": 1,
+                "name": "TextEdit",
+            }
+
+        def permission_status(self):
+            return True, ""
+
+        def selection_details(self, target):
+            return {
+                "text": "teh cat sat",
+                "range": (0, 11),
+                "context_before": "",
+                "context_after": "",
+                "found": True,
+                "editable": True,
+                "role": "AXTextArea",
+            }
+
+        def ax_bounds_for_range(self, target, start, length):
+            return []
+
+    monkeypatch.setattr(service, "_editor", Editor())
+    result = {
+        "status": "ok",
+        "edits": [lp.Edit("teh", "the", "Spelling")],
+        "meta": {"provider": "fake"},
+    }
+    calls: list[str] = []
+
+    def fake_spawn(target, text, details, key):
+        calls.append(text)
+        service._on_done(result, key, text)
+
+    monkeypatch.setattr(service, "_spawn_preview", fake_spawn)
+
+    service._sample(now=1.0)
+    service._sample(now=2.0)
+    service._sample(now=3.0)
+    assert calls == ["teh cat sat"]
+    assert service._pending
+
+    # The panel goes away while the text stays selected (a dropped preview).
+    service._hide_panel()
+    assert not service._pending
+
+    # Pointer away...
+    cursor.point = QPoint(900, 600)
+    service._sample(now=4.0)
+    assert calls == ["teh cat sat"]
+
+    # ...and back over the same still-selected text.
+    cursor.point = QPoint(110, 105)
+    service._sample(now=5.0)
+    assert service._pending and service._pending[0].before == "teh"
+    assert calls == ["teh cat sat"]  # from the cache, not a second call
+
+    service.stop()
+
+
 def test_the_poll_waits_for_the_pointer_before_spending_a_request(monkeypatch):
     """No pointer, no selection: the panel appears once it comes back."""
     from src import live_service as live_mod

@@ -47,6 +47,7 @@ from .live_preview import (
     settings_fingerprint,
     word_visible_to_doc,
 )
+from .utils import normalize_line_endings
 from .word_integration import (
     SCOPE_COMMENTS,
     SCOPE_MAIN,
@@ -56,6 +57,11 @@ from .word_integration import (
 
 # How often the Mail compose-window check re-runs while Mail is frontmost.
 MAIL_COMPOSE_CHECK_INTERVAL_S = 5.0
+# After an apply, the app's selection is re-read a few times: the
+# Codex/ChatGPT composer reports it asynchronously, so a single read can still
+# describe the pre-edit state. A read matching what the apply wrote wins.
+APPLY_SETTLE_READS = 3
+APPLY_SETTLE_INTERVAL_S = 0.12
 
 # How long the Undo pill stays available after an apply.
 # Live Check respects the same entitlement as the manual flow. The
@@ -371,6 +377,10 @@ class LivePreviewService(QObject):
         self._pointer_prev: QPoint | None = None
         self._selection_rect: tuple[float, QRect | None] | None = None
         self._pointer_away_logged: dict[str, float] = {}
+        # The selection text the pointer has left since it was last previewed.
+        # Coming back to that same still-selected text re-arms the preview
+        # (owner, 2026-09-30: the hover must not be one-off).
+        self._pointer_left_since_text = ""
         # Word position mapping for the batch being applied: prepared once,
         # then shifted by each edit instead of re-scanned per suggestion.
         self._word_prepared = False
@@ -406,6 +416,10 @@ class LivePreviewService(QObject):
         # start a second preview.
         self._applying = False
         self._apply_started_text = ""
+        # What the running apply writes into the selection, when it is known:
+        # the post-apply re-read prefers a state that matches it, so a lagging
+        # app is not anchored to the pre-edit selection.
+        self._apply_result_text: str | None = None
         self._poll_paused_for_apply = False
         self._poll_paused_for_manual_task = False
         self._apply_previous_app: dict[str, Any] = {}
@@ -694,12 +708,37 @@ class LivePreviewService(QObject):
                 self._pointer_at_capture = self._pointer_prev or self._pointer_pos()
                 self._selection_rect = None
                 self._previewed_text = ""
+                self._pointer_left_since_text = ""
                 self._retry_not_before = None
                 self._fail_streak = 0
                 self._hide_panel()
         else:
             self._candidate_text = ""
             self._candidate_count = 0
+
+        # The hover is the request for suggestions. Once the pointer leaves a
+        # selection that was already previewed and the panel is gone, coming
+        # back to the same still-selected text re-arms the trigger, so the
+        # panel returns - from the cache, without a second provider call. A
+        # preview dropped by a transient failure, or a panel the user closed,
+        # must not need a fresh selection. While the pointer is away the panel
+        # itself is untouched: its buttons stay reachable.
+        panel_visible = self._panel is not None and self._panel.isVisible()
+        if (
+            self._previewed_text
+            and text == self._previewed_text
+            and not panel_visible
+        ):
+            if self._pointer_near_selection():
+                if self._pointer_left_since_text == text:
+                    self._pointer_left_since_text = ""
+                    # Let evaluate_trigger see a fresh selection and serve the
+                    # cached panel (or re-run the preview if it was dropped).
+                    self._previewed_text = ""
+                    self._retry_not_before = None
+                    self._fail_streak = 0
+            else:
+                self._pointer_left_since_text = text
 
         stable = now - self._changed_at >= self._delay() / 1000.0
         if self._last_permission_ok != permission_ok:
@@ -1458,7 +1497,9 @@ class LivePreviewService(QObject):
             self.preview_error.emit(message)
         if self._fail_streak >= RETRY_MAX_FAILURES:
             self._retry_not_before = None
-            self._previewed_text = self._seen_text  # give up until reselect
+            # Give up until the selection changes or the pointer leaves and
+            # comes back to it (the re-arm in _sample).
+            self._previewed_text = self._seen_text
             return
         self._previewed_text = ""
         self._retry_not_before = self._last_now + RETRY_COOLDOWN_S
@@ -1468,6 +1509,40 @@ class LivePreviewService(QObject):
         _debug_log("LIVE CANCEL: preview worker cancelled.")
 
     # --- selection state ---
+
+    def _read_apply_result_state(self) -> tuple[str, int, int] | None:
+        """The app's selection after an apply, settled and preferably correct.
+
+        Apps like the Codex/ChatGPT composer report the selection
+        asynchronously: a single read can still describe the pre-edit state,
+        and two agreeing reads can agree on that stale state. What the apply
+        wrote is known, so a read that matches it wins immediately; otherwise
+        the last state two reads agreed on is returned, because that is a
+        description of the app rather than a glitch. Nothing is returned when
+        no state could be read at all.
+        """
+        expected = self._apply_result_text
+        wanted = normalize_line_endings(expected) if expected else None
+        previous: tuple[str, int, int] | None = None
+        settled: tuple[str, int, int] | None = None
+        # Word answers through AppleScript, where every read is expensive; it
+        # keeps the single read it has always had.
+        attempts = 1 if self._selection_is_word else APPLY_SETTLE_READS
+        for attempt in range(attempts):
+            state = self._read_selection_state()
+            if state is not None and state[0]:
+                if wanted is not None and (
+                    normalize_line_endings(state[0]) == wanted
+                ):
+                    return state
+                if attempts == 1:
+                    return state
+                if previous is not None and previous[0] == state[0]:
+                    settled = state
+                previous = state
+            if attempt < attempts - 1:
+                time.sleep(APPLY_SETTLE_INTERVAL_S)
+        return settled
 
     def _read_selection_state(self) -> tuple[str, int, int] | None:
         """Re-read the live selection; (text, start, end) or None on failure."""
@@ -2399,6 +2474,7 @@ class LivePreviewService(QObject):
         """Mark an apply as running so the poll loop leaves it alone."""
         self._applying = True
         self._apply_started_text = self._seen_text
+        self._apply_result_text = None
         try:
             # Remember where the user actually is: applying activates the
             # target app for the paste, and they should be returned to their
@@ -2415,12 +2491,15 @@ class LivePreviewService(QObject):
         self._touch_helpers()
 
     def _end_apply(self) -> None:
-        """Resume polling, without previewing a selection made mid-apply.
+        """Resume polling after an apply, anchored to the app's real selection.
 
-        The user may have selected other text while the edits were being
-        written. That selection must not silently trigger a fresh preview, so
-        it is marked as already seen and the normal debounce only restarts on
-        the next deliberate selection change.
+        The app's own selection is the truth once the writes are done: the
+        text now carries the edits, and that is what the next hover should
+        preview (owner, 2026-09-30). The read is settled first - apps like the
+        Codex/ChatGPT composer report the selection asynchronously, and a
+        single read can still describe the pre-edit state. ``_previewed_text``
+        is deliberately left empty so the pointer sitting with the edited text
+        can ask for a fresh review through the normal trigger.
         """
         self._applying = False
         # An apply consumes the selection: the paste replaced it. Reading it
@@ -2434,16 +2513,30 @@ class LivePreviewService(QObject):
                 return
             if self._selection_has_range or self._selection_is_word:
                 # Accessibility or AppleScript read: no keystroke involved.
-                state = self._read_selection_state()
+                state = self._read_apply_result_state()
                 if state is not None:
                     text, start, _end = state
                     self._selection_text = text
                     self._seen_text = text
-                    self._previewed_text = text
                     self._selection_start = start
-                    self._candidate_text = ""
-                    self._candidate_count = 0
-                    self._changed_at = time.monotonic()
+                    if self._apply_result_text and (
+                        normalize_line_endings(text)
+                        == normalize_line_endings(self._apply_result_text)
+                    ):
+                        # The app confirmed the edited text is selected: let
+                        # the pointer sitting with it ask for a fresh review.
+                        self._previewed_text = ""
+                    else:
+                        # Some other selection was made while the apply ran:
+                        # keep it quiet, as before.
+                        self._previewed_text = text
+                else:
+                    # Could not read where the app's selection is: keep the
+                    # panel closed rather than anchoring to a guess.
+                    self._previewed_text = self._seen_text
+                self._candidate_text = ""
+                self._candidate_count = 0
+                self._changed_at = time.monotonic()
             else:
                 # Clipboard-only app (Mail, Pages): keep the known state; the
                 # next real selection updates it.
@@ -2613,6 +2706,13 @@ class LivePreviewService(QObject):
                     that text without confirming the edit. Nothing else in the
                     selection can be trusted after that.
 
+        Both answers are positional: the text must sit at the span itself.
+        A "found somewhere nearby" match used to read as applied, and on
+        2026-09-30 the Codex/ChatGPT composer landed every write a few code
+        points late - the new words were in the field, just not where the
+        span was - so the batch kept writing and left the selection
+        scrambled. Only an edit exactly at the span may continue a batch.
+
         A failure with an unreadable field is "kept" on purpose. Every refusal
         on that path happens *before* a keystroke: the AX path will not paste
         unless the sub-range is confirmed, and the Word path re-reads the range
@@ -2623,11 +2723,35 @@ class LivePreviewService(QObject):
         live = self._live_edit_text()
         if not live:
             return "kept"
-        if self._locate_span(live, before_text, expected_abs) is not None:
-            return "kept"
-        if self._locate_span(live, span.after, expected_abs) is not None:
+        wanted_before = normalize_line_endings(before_text)
+        wanted_after = normalize_line_endings(span.after)
+        at_span = self._text_at(live, expected_abs, len(span.after))
+        if at_span == wanted_after:
+            # A replacement that starts with the original words (quick ->
+            # quickly) also matches the untouched-span test below, so the
+            # reconstruction decides: if the text after the replacement is
+            # the rest of the original span, nothing was written.
+            if len(wanted_before) > len(wanted_after):
+                tail = self._text_at(
+                    live,
+                    expected_abs + len(wanted_after),
+                    len(wanted_before) - len(wanted_after),
+                )
+                if tail == wanted_before[len(wanted_after):]:
+                    return "kept"
             return "applied"
+        if self._text_at(
+            live, expected_abs, len(before_text)
+        ) == wanted_before:
+            return "kept"
         return "unknown"
+
+    @staticmethod
+    def _text_at(text: str, start: int, length: int) -> str:
+        """The field text at ``start``, newline-canonical for comparison."""
+        if start < 0 or length < 0:
+            return ""
+        return normalize_line_endings(text[start : start + length])
 
     def _live_edit_text(self, target: dict[str, Any] | None = None) -> str:
         """The target field's current text, or "" when it cannot be read.
@@ -3039,6 +3163,7 @@ class LivePreviewService(QObject):
             + span.after
             + self._selection_text[rel_start + len(before_text) :]
         )
+        self._apply_result_text = expected
         # A paste consumes the selection: the app is left holding the pasted
         # words or a collapsed caret. Select the user's text again, now
         # carrying the edit, so the rest of the review still points at the
@@ -3406,6 +3531,7 @@ class LivePreviewService(QObject):
                     self._selection_text, landed
                 )
                 self._seen_text = self._selection_text
+                self._apply_result_text = self._selection_text
             panel = self._panel
             if self._pending and panel is not None:
                 panel.set_spans(list(self._pending))
@@ -3417,9 +3543,9 @@ class LivePreviewService(QObject):
             # Every write landed and was verified, so the app is holding the
             # captured text with the edits in it: put the selection back over
             # it rather than leaving the user's place on the last paste.
-            self._select_corrected_selection(
-                apply_edits_to_text(self._selection_text, batch)
-            )
+            applied_text = apply_edits_to_text(self._selection_text, batch)
+            self._apply_result_text = applied_text
+            self._select_corrected_selection(applied_text)
             message = (
                 "Applied 1 suggestion."
                 if applied == 1
@@ -3445,6 +3571,7 @@ class LivePreviewService(QObject):
             landed = [span for span in batch if span not in skipped]
             self._selection_text = apply_edits_to_text(self._selection_text, landed)
             self._seen_text = self._selection_text
+            self._apply_result_text = self._selection_text
             message = (
                 f"Applied {applied} of {total} suggestions — "
                 f"{len(skipped)} could not be placed. Press Apply All to retry."
@@ -3503,6 +3630,7 @@ class LivePreviewService(QObject):
             _debug_log("LIVE FULL APPLY: nothing to apply")
             self._hide_panel()
             return
+        self._apply_result_text = corrected
         ok, message = self._editor.replace_selection(
             self._selection_target, corrected
         )

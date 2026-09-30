@@ -62,6 +62,12 @@ RANGE_CONFIRM_DELAY_S = 0.12
 PASTE_CONFIRM_TIMEOUT_S = 1.2
 PASTE_CONFIRM_INTERVAL_S = 0.08
 PASTE_SETTLE_S = 0.15
+# How far past the range it was asked to replace a paste may land and still be
+# repairable. capture.log 2026-09-30: the Codex/ChatGPT composer pasted 3 and 4
+# code points late, leaving the head of the span in front of the new text and
+# swallowing the same number of characters after it - the owner saw that as
+# "some words are not properly ordered".
+MAX_LATE_LANDING = 8
 
 
 def _redact(text: str | None) -> str:
@@ -1616,13 +1622,19 @@ class GenericTextEditor:
         ):
             elements.append(alt_focused)
 
-        def _set_range(el: Any) -> tuple[int | None, int | None]:
+        def _set_range(
+            el: Any, pos: int | None = None, want: int | None = None
+        ) -> tuple[int | None, int | None]:
             # The service works in code points, but the app expects UTF-16
             # code units for its range attribute. Convert before writing so
             # pastes land exactly where intended (emoji-safe). Returns the
             # written (start, length) on success, (None, None) on failure.
-            cu_start = start
-            cu_end = start + length
+            # ``pos``/``want`` override the caller's span for the repair of a
+            # paste that landed late (see _repair_late_landing).
+            span_start = start if pos is None else pos
+            span_len = length if want is None else want
+            cu_start = span_start
+            cu_end = span_start + span_len
             try:
                 err, value = AS.AXUIElementCopyAttributeValue(
                     el, AS.kAXValueAttribute, None
@@ -1630,9 +1642,9 @@ class GenericTextEditor:
                 if err == 0 and isinstance(value, str):
                     from .live_preview import codepoint_to_utf16_index
 
-                    cu_start = codepoint_to_utf16_index(value, start)
+                    cu_start = codepoint_to_utf16_index(value, span_start)
                     cu_end = codepoint_to_utf16_index(
-                        value, start + length
+                        value, span_start + span_len
                     )
             except Exception:
                 pass
@@ -1731,18 +1743,27 @@ class GenericTextEditor:
         bundle = str(target.get("bundle_id", "")).lower()
         is_browser = bundle in BROWSER_BUNDLE_IDS
 
-        def _range_slice(n: int | None = None) -> str | None:
-            want = length if n is None else n
+        def _field_value() -> str | None:
+            """The focused field's whole AXValue, when it is readable."""
             for el in elements:
                 try:
                     err, value = AS.AXUIElementCopyAttributeValue(
                         el, AS.kAXValueAttribute, None
                     )
-                    if err == 0 and isinstance(value, str):
-                        return value[start : start + want]
                 except Exception:
                     continue
+                if err == 0 and isinstance(value, str):
+                    return value
             return None
+
+        def _slice_at(pos: int, want: int) -> str | None:
+            value = _field_value()
+            if value is None or pos < 0:
+                return None
+            return value[pos : pos + want]
+
+        def _range_slice(n: int | None = None) -> str | None:
+            return _slice_at(start, length if n is None else n)
 
         def _find_written_text() -> int | None:
             """Offset of the text we asked the app to write, if it is readable.
@@ -1809,7 +1830,12 @@ class GenericTextEditor:
                         return False
             return readable
 
-        def _confirm_range(el: Any, cu_start: int, cu_len: int) -> bool:
+        def _confirm_range(
+            el: Any,
+            cu_start: int,
+            cu_len: int,
+            expect: str | None = None,
+        ) -> bool:
             # Some apps (e.g. ChatGPT) apply the range-selection write
             # asynchronously: the immediate readback still shows the old
             # range. Re-read over a short window, and also accept a
@@ -1818,16 +1844,19 @@ class GenericTextEditor:
             # match proves the position. The span's text must be exactly what
             # the app has selected *and* have a single home in the field, or
             # the app could be sitting on a different occurrence of the same
-            # words and the write would land there instead.
+            # words and the write would land there instead. ``expect``
+            # overrides the span text for the late-landing repair, whose
+            # range holds a different slice of the field.
+            wanted = before_text if expect is None else expect
             if _range_confirmed(el, cu_start, cu_len):
                 return True
             for _attempt in range(RANGE_CONFIRM_RETRIES):
                 time.sleep(RANGE_CONFIRM_DELAY_S)
                 if _range_confirmed(el, cu_start, cu_len):
                     return True
-                if not before_text or not _selection_holds(el, before_text):
+                if not wanted or not _selection_holds(el, wanted):
                     continue
-                if not _span_text_is_unique(before_text):
+                if not _span_text_is_unique(wanted):
                     _debug_log(
                         "ax_replace_range: the selection holds the span's "
                         "text but that text is not unique in the field; "
@@ -1945,8 +1974,8 @@ class GenericTextEditor:
             _restore_selection()
             return False, "Could not apply the edit in this app."
 
-        def _paste() -> None:
-            _mac_set_clipboard(new_text)
+        def _paste(text: str) -> None:
+            _mac_set_clipboard(text)
             # Activating costs ~0.3 s; when the click already left the target
             # frontmost (the common case) it is skipped entirely.
             if not GenericTextEditor._mac_is_frontmost(target):
@@ -1955,9 +1984,109 @@ class GenericTextEditor:
             _post_mac_key(9, target.get("pid") or 0)  # kVK_ANSI_V
             time.sleep(0.2)
 
+        # The field as it was before the paste. A late landing can only be
+        # repaired against this, so it is captured here rather than guessed.
+        pre_value: list[str | None] = [None]
+
+        def _repair_late_landing() -> bool:
+            """Put right a paste the app landed a few code points late.
+
+            capture.log 2026-09-30: the Codex/ChatGPT composer confirmed the
+            range, then pasted at ``start + drift`` (3 and 4 code points were
+            seen), leaving the head of the original span in front of the new
+            text and swallowing the same number of characters after it - the
+            owner saw that as "some words are not properly ordered".
+
+            The state is only repairable when every part of it is proven
+            against the field as it was before the write:
+
+                value[:start]             == pre[:start]
+                value[start:late]         == old[:drift]
+                value[late:late+len(new)] == new
+                value[late+len(new):]     == pre[end+drift:]
+
+            The repair then asks the app to replace the whole affected region
+            (the leftover plus the insert), compensated by the measured drift:
+            the app acts exactly on [start, start+drift+len(new)) and the
+            replacement restores what the late paste swallowed. Nothing is
+            written unless the result verifies, and a newline convention that
+            shifts offsets is left alone.
+            """
+            if before_text is None or not new_text or pre_value[0] is None:
+                return False
+            value = _field_value()
+            if value is None:
+                return False
+            before = normalize_line_endings(pre_value[0])
+            now = normalize_line_endings(value)
+            if len(before) != len(pre_value[0]) or len(now) != len(value):
+                return False
+            end = start + len(before_text)
+            if before[start:end] != normalize_line_endings(before_text):
+                return False
+            position = now.find(new_text)
+            drift: int | None = None
+            while position >= 0:
+                candidate = position - start
+                if (
+                    0 < candidate <= MAX_LATE_LANDING
+                    and now[:start] == before[:start]
+                    and now[start:position] == before[start:position]
+                    and now[position + len(new_text):]
+                    == before[end + candidate:]
+                ):
+                    drift = candidate
+                    break
+                position = now.find(new_text, position + 1)
+            if drift is None:
+                return False
+            repair_start = start - drift
+            repair_len = drift + len(new_text)
+            if repair_start < 0:
+                return False
+            replacement = new_text + pre_value[0][end : end + drift]
+            guard = _slice_at(repair_start, repair_len)
+            if guard is None or now[repair_start : repair_start + repair_len] != (
+                normalize_line_endings(guard)
+            ):
+                return False
+            for el in elements:
+                try:
+                    written = _set_range(el, repair_start, repair_len)
+                except Exception:
+                    continue
+                if written[0] is None:
+                    continue
+                if _confirm_range(el, written[0], written[1], expect=guard):
+                    break
+            else:
+                return False
+            if _slice_at(repair_start, repair_len) != guard:
+                return False
+            _debug_log(
+                "ax_replace_range: repairing a late landing "
+                f"(drift={drift}) at start={start}"
+            )
+            _paste(replacement)
+            settled = _field_value()
+            for _attempt in range(3):
+                if settled is not None and (
+                    normalize_line_endings(
+                        settled[start : start + len(new_text)]
+                    )
+                    == normalize_line_endings(new_text)
+                    and normalize_line_endings(settled[start + len(new_text):])
+                    == before[end:]
+                ):
+                    return True
+                time.sleep(0.3)
+                settled = _field_value()
+            return False
+
         saved = _mac_clipboard_string()
         try:
-            _paste()
+            pre_value[0] = _field_value()
+            _paste(new_text)
             verdict = _verify_range_write(AS, elements, start, new_text)
             _log_paste_verdict(verdict, new_text)
             if verdict == "mismatch":
@@ -1992,6 +2121,8 @@ class GenericTextEditor:
                 return True, "Applied."
             if verdict == "unreadable":
                 return True, "Applied — please check the document."
+            if _repair_late_landing():
+                return True, "Applied."
             # Nothing proves the keystroke landed over the span. Say where the
             # text ended up (a paste that missed lands wherever the app's own
             # caret was, and that is what the owner saw as "the edit lost its
