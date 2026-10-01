@@ -1,0 +1,30 @@
+name: ByteProof licence service
+
+# The licence service has its own dependencies (FastAPI, Stripe) that the
+# desktop app does not ship, so it gets its own small job. It is not part of
+# the macOS release gate; the app tests already cover the shared key format.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Licence service tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r server/requirements.txt -r server/requirements-dev.txt
+      - name: Lint (ruff)
+        run: python -m ruff check server
+      - name: Run tests
+        run: python -m pytest --confcutdir=server server/tests

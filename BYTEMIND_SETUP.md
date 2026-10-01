@@ -80,41 +80,52 @@ identity; losing it means granting Accessibility once more.
 
 ## Still to do before selling
 
-### 1. Licensing (Polar — live)
+### 1. Licensing (Stripe + ByteProof licence service)
 
-Polar is the canonical payment and license owner. The checkout link lives in
-`src/settings.py` (`POLAR_CHECKOUT_URL`) and the price is managed in the
-Polar dashboard:
+Stripe Checkout takes the payment and the ByteProof licence service in
+`server/` issues one key per purchase and enforces the 2-computer limit. The
+price (NZ$49 incl. GST) and the Payment Link live in Stripe; the app points at
+the website buy section (`PURCHASE_URL` in `src/settings.py`) and the licence
+service URL (`LICENSE_API_URL`, default `https://api.bytemind.co.nz`), both
+overridable with `BYTEPROOF_PURCHASE_URL` / `BYTEPROOF_LICENSE_API_URL`.
 
-```python
-POLAR_ORGANIZATION_ID = "..."   # Polar -> Settings -> Organization -> ID
-POLAR_CHECKOUT_URL = "https://buy.polar.sh/..."   # Polar -> Products -> Checkout Links
-```
+If you change the price in Stripe, also update the button label in
+`src/gui.py` (`Purchase License ($49)`) and the trial-expired copy to match.
 
-The current price is **NZD $49 incl. GST, one-time**. If you change the price
-in the Polar dashboard, also update the button label in `src/gui.py`
-(`Purchase License ($49)`) and the trial-expired copy to match.
+#### How activation works (Stripe)
 
-#### How activation works (Polar)
-
-1. The customer pays on the Polar checkout page; Polar emails them a license
-   key and shows it in their customer portal.
+1. The customer pays on Stripe Checkout (card, Apple Pay, Google Pay, Alipay).
+   Stripe emails the key, and the thank-you page shows it too.
 2. In the app, Settings → License → "Already Paid? Activate with License Key",
-   paste the key. The app registers this computer's fingerprint with Polar.
-3. Polar enforces the 2-device limit on its own durable servers. To switch
-   machines, "Deactivate This Computer" frees the slot.
+   paste the key (or click the button in the email). The app registers this
+   computer's fingerprint with the licence service.
+3. The service enforces the 2-computer limit and returns a signed,
+   machine-bound licence the app stores. To switch machines, "Deactivate This
+   Computer" or release a slot in the licence portal ("Manage My Licences" in
+   the app emails a portal link).
+4. Refunds and chargebacks revoke the key; the app shows a blocking notice on
+   the next online check.
 
-**Developer access:** developer emails are handled locally in
-`src/settings.py` (`DEVELOPER_EMAILS`); those addresses unlock full access
-without a key.
+Owner machines: the two `BYTEPROOF_-...` keys are configured with
+`BYTEPROOF_INTERNAL_KEYS` and have no device limit.
 
-#### Legacy Stripe-era server (`server/`) — dev only
+Pre-Polar buyers: their original signed keys still activate locally (the app
+verifies the signature and machine fingerprint without any server).
 
-The old FastAPI + Stripe email-activation server in `server/` is retained only
-for pre-Polar buyers and local testing. It is unreachable from the app while
-Polar is configured and should not be deployed to production. `render.yaml`
-and `Dockerfile` exist only for that legacy path; remove them when the legacy
-registry is retired. See `server/README.md`.
+**Developer access:** developer emails are handled locally via
+`scripts/dev_access.py` / `BYTEPROOF_DEV_EMAILS`; no public address unlocks a
+shipped build.
+
+#### Deploying the licence service
+
+See `server/README.md` for the environment variables, the Stripe setup script
+(`scripts/stripe_setup.py`), and local testing. The short version:
+
+1. `python scripts/stripe_setup.py --base-url https://api.bytemind.co.nz` with
+   a live Stripe key (creates product, price, Payment Link and webhook).
+2. Deploy `server/` to Render with a persistent disk at `/data` and the env
+   vars from the README, plus a restricted Stripe key for the service itself.
+3. Point `api.bytemind.co.nz` at the service and confirm `/health`.
 
 ### 2. Update feed
 

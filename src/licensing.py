@@ -221,7 +221,7 @@ def _save_license_data(data: dict[str, Any]) -> None:
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     try:
-        # The file carries the licence payload; keep it user-private.
+        # The file carries the license payload; keep it user-private.
         os.chmod(tmp_path, 0o600)
     except OSError:
         pass
@@ -354,55 +354,60 @@ def activate_license(license_key: str) -> dict[str, Any]:
     return {"valid": True, "email": result["email"]}
 
 
-def activate_polar_license(result: dict[str, Any]) -> dict[str, Any]:
-    """Store a Polar activation (key + activation id) as this machine's license."""
-    license_key = result.get("key", "").strip()
-    activation_id = result.get("activation_id") or ""
-    if not license_key or not activation_id:
+def activate_service_license(
+    result: dict[str, Any],
+    purchase_key: str = "",
+) -> dict[str, Any]:
+    """Store a license issued by the ByteProof license service (Stripe).
+
+    The service returns the signed, machine-bound key in the same format the
+    app has always verified. Validate it locally before storing, so a
+    tampered or truncated response can never unlock the app.
+    """
+    signed_key = str(result.get("license_key") or "").strip()
+    if not signed_key:
         return {
             "valid": False,
-            "error": "Polar did not return a valid activation for this key.",
+            "error": "The license service did not return a license key.",
         }
-    status = str(result.get("status") or "")
-    if status in ("revoked", "disabled", "expired"):
+
+    checked = validate_license_key(signed_key)
+    if not checked["valid"]:
         return {
             "valid": False,
-            "error": f"This license key is {status}. Please contact ByteMind support.",
+            "error": checked.get("error") or "The license is not valid.",
         }
 
-    expires_at = result.get("expires_at") or None
-    expiry: float | None = None
-    if expires_at:
-        try:
-            from datetime import datetime
+    machine_fp = _get_machine_fingerprint()
+    licensed_machine = checked.get("machine_fp", "")
+    if licensed_machine and licensed_machine != machine_fp:
+        return {
+            "valid": False,
+            "error": "This license key is registered to a different computer.",
+        }
 
-            expiry = datetime.fromisoformat(
-                str(expires_at).replace("Z", "+00:00")
-            ).timestamp()
-        except Exception:
-            expiry = None
-
+    key = (purchase_key or str(result.get("key") or "")).strip()
+    email = str(result.get("email") or "").strip()
     _save_license_data({
-        "provider": "polar",
-        "key": license_key,
-        "activation_id": activation_id,
-        "email": "",
-        "expiry": expiry,
-        "expires_at": expires_at,
-        "limit_activations": result.get("limit_activations"),
+        "provider": "stripe",
+        "key": signed_key,
+        "purchase_key": key,
+        "email": email,
+        "expiry": checked.get("expiry"),
+        "device_limit": result.get("device_limit"),
+        "device_count": result.get("device_count"),
         "activated_at": time.time(),
-        "machine_fp": _get_machine_fingerprint(),
+        "machine_fp": machine_fp,
     })
     return {
         "valid": True,
-        "email": "",
-        "key_display": _display_key(license_key),
-        "expiry": expiry,
+        "email": email,
+        "key_display": _display_key(key) if key else "",
     }
 
 
 def activate_dev_license(email: str) -> dict[str, Any]:
-    """Activate full access for a known developer email (no Polar required)."""
+    """Activate full access for a known developer email (no purchase needed)."""
     email = email.strip().lower()
     if email not in {e.lower() for e in developer_emails()}:
         return {
@@ -431,9 +436,10 @@ def _display_key(license_key: str) -> str:
 def _validated_license_data() -> dict[str, Any] | None:
     """Load the stored license and verify it is still valid.
 
-    Polar licenses are verified against the stored activation (Polar enforces
-    the machine binding and device limit server-side). Legacy signed keys must
-    still cryptographically validate and match this computer's fingerprint.
+    Polar licenses are verified against the stored activation (Polar enforced
+    the machine binding and device limit server-side). Licenses issued by the
+    ByteProof license service (``provider: "stripe"``) and legacy signed keys
+    must cryptographically validate and match this computer's fingerprint.
     """
     def _validate(data: dict[str, Any] | None) -> dict[str, Any] | None:
         if not data:
@@ -459,6 +465,8 @@ def _validated_license_data() -> dict[str, Any] | None:
                 return None
             return data
 
+        # Everything else - service-issued ("stripe") and legacy keys alike -
+        # must carry a genuine, machine-bound signed key.
         if not data.get("key"):
             return None
 
@@ -500,16 +508,21 @@ def get_license_info() -> dict[str, Any]:
     if not data:
         return {"status": "unlicensed"}
     provider = data.get("provider", "legacy")
-    key = data.get("key", "")
+    # ``raw_key`` is what deactivation and online validation should send: the
+    # purchase key for service licenses, the signed key for everything else.
+    key = data.get("purchase_key") or data.get("key", "")
     return {
         "status": "licensed",
         "email": data.get("email", "Unknown"),
         "expiry": data.get("expiry"),
         "activated_at": data.get("activated_at"),
         "provider": provider,
-        "raw_key": data.get("key", ""),
+        "raw_key": key,
+        "purchase_key": data.get("purchase_key", ""),
+        "signed_key": data.get("key", ""),
         "key_display": _display_key(key) if key else "",
         "activation_id": data.get("activation_id", ""),
+        "device_limit": data.get("device_limit"),
     }
 
 

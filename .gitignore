@@ -8,12 +8,16 @@ __pycache__/
 # Environments
 .env
 .venv
+.venv_server/
 .venv_x86/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Licence service runtime data (never commit customer records)
+server/data/
 
 # Distribution / packaging
 .Python

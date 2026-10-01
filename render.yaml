@@ -1,17 +1,53 @@
+# Render Blueprint for the ByteProof licence service.
+#
+# One instance, one persistent disk (SQLite). Starter is the cheapest plan
+# with a disk and no spin-down; Singapore is the closest Render region to
+# New Zealand. See server/README.md for what each secret is.
 services:
   - type: web
-    name: byteproof-api
+    name: byteproof-license-service
     runtime: docker
     repo: https://github.com/michael-zumba/ByteProof
-    plan: free
-    region: oregon
+    plan: starter
+    region: singapore
     dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: false
+    disk:
+      name: byteproof-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
-      - key: STRIPE_SECRET_KEY
+      # ---------------------------------------------------------------- Stripe
+      - key: STRIPE_SECRET_KEY        # restricted key: Checkout Sessions read, Charges read
         sync: false
-      - key: STRIPE_WEBHOOK_SECRET
+      - key: STRIPE_WEBHOOK_SECRET    # whsec_... printed by scripts/stripe_setup.py
         sync: false
-      - key: BYTEPROOF_LICENSE_PRIVATE_KEY
+      # ------------------------------------------------------------- Licensing
+      - key: BYTEPROOF_KEY_SECRET     # record this value; keys are derived from it
         sync: false
+      - key: BYTEPROOF_LICENSE_PRIVATE_KEY   # PEM from tools/generate_license.py
+        sync: false
+      - key: BYTEPROOF_INTERNAL_KEYS  # the two BYTEPROOF_-... owner keys
+        sync: false
+      - key: BYTEPROOF_ADMIN_TOKEN    # record this value for scripts/license_admin.py
+        sync: false
+      - key: BYTEPROOF_PUBLIC_BASE_URL
+        value: https://api.bytemind.co.nz
       - key: BYTEPROOF_DATA_DIR
         value: /data
+      # ---------------------------------------------------------------- Email
+      - key: BYTEPROOF_SMTP_HOST
+        sync: false
+      - key: BYTEPROOF_SMTP_PORT
+        value: "587"
+      - key: BYTEPROOF_SMTP_USER
+        sync: false
+      - key: BYTEPROOF_SMTP_PASSWORD
+        sync: false
+      - key: BYTEPROOF_SMTP_FROM
+        sync: false
+      - key: BYTEPROOF_SMTP_TLS
+        value: "true"
+      - key: BYTEPROOF_BACKUP_EMAIL
+        sync: false

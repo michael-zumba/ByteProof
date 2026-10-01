@@ -130,10 +130,9 @@ from .settings import (
     APP_VERSION,
     COMPANY_NAME,
     LOCAL_MODEL_PROVIDER,
-    POLAR_CHECKOUT_URL,
-    POLAR_ORGANIZATION_ID,
     PRODUCT_URL,
     PROVIDERS,
+    PURCHASE_URL,
     SUPPORT_EMAIL,
     get_app_support_dir,
     note_launch_version,
@@ -315,8 +314,8 @@ def _format_bytes(size: int) -> str:
 
 
 def open_purchase_url(parent: QWidget | None = None) -> None:
-    """Open the Polar checkout page, or explain that payments are pending."""
-    purchase_url = POLAR_CHECKOUT_URL
+    """Open the ByteProof purchase page (Stripe checkout)."""
+    purchase_url = PURCHASE_URL
     if "REPLACE_WITH" in purchase_url:
         QMessageBox.information(
             parent,
@@ -335,13 +334,13 @@ def already_paid_label() -> str:
 
 
 def activation_prompt() -> tuple[str, str]:
-    """Dialog title/prompt for activating a Polar license key."""
+    """Dialog title/prompt for activating a license key."""
     return (
         "Activate with License Key",
         (
-            "Paste the licence key from your Polar receipt email.\n\n"
-            "The key starts with \"polar_\" and looks like "
-            "polar_xxxxxxxxxxxxxxxxxxxx.\n"
+            "Paste the license key from your purchase receipt email.\n\n"
+            "The key starts with \"BYTP-\" and looks like "
+            "BYTP-XXXX-XXXX-XXXX-XXXX.\n"
             "Your email address is not the key — enter the key itself."
         ),
     )
@@ -1030,6 +1029,31 @@ class LicenseValidationWorker(QThread):
         self.done.emit(result)
 
 
+class PortalLinkWorker(QThread):
+    """Ask the license service to email a portal (magic) link."""
+
+    done = pyqtSignal(bool, str)  # pyright: ignore[reportAny]
+
+    def __init__(self, email: str) -> None:
+        super().__init__()
+        self.email = email
+
+    def run(self) -> None:
+        from .license_api import request_portal_link
+
+        try:
+            result = request_portal_link(self.email)
+            self.done.emit(
+                True,
+                str(
+                    result.get("message")
+                    or "Check your email for the license portal link."
+                ),
+            )
+        except Exception as exc:
+            self.done.emit(False, str(exc))
+
+
 class CacheCleanupWorker(QThread):
     done = pyqtSignal(dict)  # pyright: ignore[reportAny]
 
@@ -1675,7 +1699,7 @@ class SettingsDialog(QDialog):
         """Give the License/Updates rows their icon and live status.
 
         The status is what the removed icon buttons were really for: at a
-        glance the user can see whether the licence is active and whether an
+        glance the user can see whether the license is active and whether an
         update is waiting, without a second set of controls.
         """
         tooltips = {
@@ -1695,7 +1719,7 @@ class SettingsDialog(QDialog):
         self.refresh_sidebar_status()
 
     def refresh_sidebar_status(self) -> None:
-        """Show licence state and pending updates on the sidebar rows."""
+        """Show license state and pending updates on the sidebar rows."""
         license_item = self.sidebar.item(self._row_for_page("license_page"))
         updates_item = self.sidebar.item(self._row_for_page("updates_page"))
         if license_item is not None:
@@ -2170,7 +2194,7 @@ class SettingsDialog(QDialog):
             self.pages.addWidget(new_page)
 
     def restore_default_settings(self) -> None:
-        """Put the user-facing preferences back without touching licence/keys."""
+        """Put the user-facing preferences back without touching license/keys."""
         answer = QMessageBox.question(
             self,
             "Restore default settings?",
@@ -4162,7 +4186,7 @@ class SettingsDialog(QDialog):
             self.lbl_status.setText("Licensed")
             self.lbl_status.setObjectName("SettingsStatus")
             tone(self.lbl_status, "success")
-            if lic_info.get("provider") == "polar":
+            if lic_info.get("key_display"):
                 self.lbl_msg.setText(
                     f"License key {lic_info.get('key_display', '')} is active "
                     "on this computer."
@@ -4209,7 +4233,7 @@ class SettingsDialog(QDialog):
         self.btn_auto_activate.clicked.connect(self._auto_activate_from_email)
 
         # One action row: the purchase button, with the quieter route for a
-        # licence bought on the website beside it.
+        # license bought on the website beside it.
         license_actions = QHBoxLayout()
         license_actions.setContentsMargins(0, 0, 0, 0)
         license_actions.setSpacing(12)
@@ -4222,11 +4246,23 @@ class SettingsDialog(QDialog):
         self.btn_deactivate.setObjectName("DangerBtn")
         self.btn_deactivate.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_deactivate.clicked.connect(self.deactivate_license_clicked)
-        deactivate_row = QHBoxLayout()
-        deactivate_row.setContentsMargins(0, 0, 0, 0)
-        deactivate_row.addWidget(self.btn_deactivate)
-        deactivate_row.addStretch(1)
-        layout.addLayout(deactivate_row)
+
+        self.btn_manage_licenses = QPushButton("Manage My Licenses")
+        self.btn_manage_licenses.setObjectName("LinkBtn")
+        self.btn_manage_licenses.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_manage_licenses.setToolTip(
+            "Email yourself a link to see your license key and the computers "
+            "it is active on."
+        )
+        self.btn_manage_licenses.clicked.connect(self.manage_licenses_clicked)
+
+        license_manage_row = QHBoxLayout()
+        license_manage_row.setContentsMargins(0, 0, 0, 0)
+        license_manage_row.setSpacing(12)
+        license_manage_row.addWidget(self.btn_deactivate)
+        license_manage_row.addWidget(self.btn_manage_licenses)
+        license_manage_row.addStretch(1)
+        layout.addLayout(license_manage_row)
         
         if lic_status == "licensed" and lic_info.get("expiry") is None:
             self.btn_buy.setVisible(False)
@@ -4664,7 +4700,7 @@ class SettingsDialog(QDialog):
             self.lbl_status.setText("Licensed")
             self.lbl_status.setObjectName("SettingsStatus")
             tone(self.lbl_status, "success")
-            if lic_info.get("provider") == "polar":
+            if lic_info.get("key_display"):
                 self.lbl_msg.setText(
                     f"License key {lic_info.get('key_display', '')} is active "
                     "on this computer. Works on up to 2 computers."
@@ -4698,16 +4734,10 @@ class SettingsDialog(QDialog):
             self.lbl_status.setText(f"Free Trial ({trial['days_left']} day{'s' if trial['days_left'] != 1 else ''} left)")
             self.lbl_status.setObjectName("SettingsStatus")
             tone(self.lbl_status, "warning")
-            if POLAR_ORGANIZATION_ID:
-                self.lbl_msg.setText(
-                    "Everything included for 7 days. Buy a license, then paste "
-                    "the license key from your receipt email to activate."
-                )
-            else:
-                self.lbl_msg.setText(
-                    "Everything included for 7 days. Buy a license, or activate "
-                    "with the email you used at checkout."
-                )
+            self.lbl_msg.setText(
+                "Everything included for 7 days. Buy a license, then paste "
+                "the license key from your receipt email to activate."
+            )
             self.lbl_msg.setObjectName("SettingsRowHelper")
             self.btn_buy.setVisible(True)
             self.btn_auto_activate.setVisible(True)
@@ -4716,16 +4746,10 @@ class SettingsDialog(QDialog):
             self.lbl_status.setText("Trial Expired")
             self.lbl_status.setObjectName("SettingsStatus")
             tone(self.lbl_status, "error")
-            if POLAR_ORGANIZATION_ID:
-                self.lbl_msg.setText(
-                    "Your free trial has ended. Buy a license, then paste the "
-                    "license key from your receipt email to activate."
-                )
-            else:
-                self.lbl_msg.setText(
-                    "Your free trial has ended. Buy a license, or activate "
-                    "with the email you used at checkout."
-                )
+            self.lbl_msg.setText(
+                "Your free trial has ended. Buy a license, then paste the "
+                "license key from your receipt email to activate."
+            )
             self.lbl_msg.setObjectName("SettingsValue")
             tone(self.lbl_msg, "error")
             self.btn_buy.setVisible(True)
@@ -4751,6 +4775,32 @@ class SettingsDialog(QDialog):
         self._deactivation_worker = worker
         worker.done.connect(self._on_deactivation_done)
         worker.start()
+
+    def manage_licenses_clicked(self) -> None:
+        """Email the customer a link to their license portal."""
+        info = get_license_info()
+        email = str(info.get("email") or "").strip()
+        if not email or "@" not in email:
+            QMessageBox.information(
+                self,
+                "Manage My Licenses",
+                "We do not have an email address for this license. Use the "
+                "portal link from your purchase email, or contact "
+                f"{SUPPORT_EMAIL} and we will help.",
+            )
+            return
+        self.btn_manage_licenses.setEnabled(False)
+        worker = PortalLinkWorker(email)
+        self._portal_link_worker = worker
+        worker.done.connect(self._on_portal_link_done)
+        worker.start()
+
+    def _on_portal_link_done(self, ok: bool, message: str) -> None:
+        self.btn_manage_licenses.setEnabled(True)
+        if ok:
+            QMessageBox.information(self, "Check Your Email", message)
+        else:
+            QMessageBox.warning(self, "Could Not Send Link", message)
 
     def _on_deactivation_done(self, ok: bool, message: str) -> None:
         self.btn_deactivate.setEnabled(True)
@@ -5941,6 +5991,15 @@ class ProofreaderApp(QMainWindow):
         worker.start()
 
     def _on_license_validation_result(self, result: dict) -> None:
+        if result.get("revoked"):
+            QMessageBox.warning(
+                self,
+                "License Revoked",
+                result.get("error")
+                or "This license is no longer valid.",
+            )
+            self._open_license_tab()
+            return
         # validate_license_remote() reports failure as ok=False; testing for a
         # "valid" key here meant revoked licenses were never surfaced.
         if result.get("ok") is False:
@@ -5961,7 +6020,7 @@ class ProofreaderApp(QMainWindow):
         worker.start()
 
     def _confirm_url_activation(self, value: str) -> bool:
-        """Ask the user before a link activates a licence.
+        """Ask the user before a link activates a license.
 
         A ``byteproof://`` link can be opened by any web page, so activation
         must never happen silently: the user confirms the key being accepted.
@@ -5980,7 +6039,7 @@ class ProofreaderApp(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Activate ByteProof?",
-            "This link is asking ByteProof to activate a licence on this "
+            "This link is asking ByteProof to activate a license on this "
             "computer.\n\n"
             f"License key: {preview}\n\n"
             "Only continue if you requested this activation.",
@@ -6703,18 +6762,11 @@ class ProofreaderApp(QMainWindow):
         info = recap
         if info:
             info += "\n\n"
-        if POLAR_ORGANIZATION_ID:
-            info += (
-                "Click 'Purchase' to buy a license. If you have already paid, "
-                "choose 'Already Paid — Activate with License Key' and paste "
-                "the key from your receipt email."
-            )
-        else:
-            info += (
-                "Click 'Purchase' to buy a license. If you have already paid, "
-                "choose 'Already Paid — Activate with Email' and enter the "
-                "email you used at checkout."
-            )
+        info += (
+            "Click 'Purchase' to buy a license. If you have already paid, "
+            "choose 'Already Paid — Activate with License Key' and paste the "
+            "key from your receipt email."
+        )
         msg.setInformativeText(info)
         buy_btn = msg.addButton("Purchase", QMessageBox.ButtonRole.ActionRole)
         paid_btn = msg.addButton(

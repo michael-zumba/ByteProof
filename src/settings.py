@@ -14,31 +14,31 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.2.3-beta.2"
+APP_VERSION = "2.3.0-beta.1"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
 SUPPORT_EMAIL = "bytemind.nz@gmail.com"
 
-# Polar licensing is the canonical payment + license-owner path (the VoiceInk
-# approach). Prices and checkout links are managed in the Polar dashboard;
-# set these env vars to override them for development.
-POLAR_API_URL = "https://api.polar.sh"
-POLAR_ORGANIZATION_ID = os.environ.get(
-    "BYTEPROOF_POLAR_ORGANIZATION_ID", ""
-).strip() or "710df3ef-fa69-4904-98f7-676fad519615"
-POLAR_CHECKOUT_URL = os.environ.get(
-    "BYTEPROOF_POLAR_CHECKOUT_URL", ""
-).strip() or (
-    "https://buy.polar.sh/polar_cl_m1VuSWJu14vqCyvzt13bLpTfKEV20qfRTdaNy1ApIIR"
-)
+# ByteProof licensing: Stripe Checkout takes the payment and the ByteMind
+# license service issues one key per purchase (up to 2 computers). Override
+# these for development against a local test service.
+LICENSE_API_URL = os.environ.get(
+    "BYTEPROOF_LICENSE_API_URL", ""
+).strip() or "https://api.bytemind.co.nz"
+LICENSE_PORTAL_URL = os.environ.get(
+    "BYTEPROOF_LICENSE_PORTAL_URL", ""
+).strip() or (LICENSE_API_URL.rstrip("/") + "/api/byteproof/portal")
+PURCHASE_URL = os.environ.get(
+    "BYTEPROOF_PURCHASE_URL", ""
+).strip() or "https://www.bytemind.co.nz/byteproof#buy"
 
-# Developer-only identities that unlock full access without a Polar key.
+# Developer-only identities that unlock full access without a customer key.
 #
 # Shipped builds carry NONE: a published address must never be a master key.
 # Access is granted only when the machine has an explicit local configuration,
 # either an environment variable or a dev-access.json file in the support
-# folder (see developer_emails()). Customers always use Polar keys.
+# folder (see developer_emails()). Customers always use license keys.
 DEVELOPER_EMAILS: tuple[str, ...] = ()
 DEV_ACCESS_FILE = "dev-access.json"
 DEV_EMAILS_ENV = "BYTEPROOF_DEV_EMAILS"
@@ -55,7 +55,7 @@ def developer_emails() -> tuple[str, ...]:
     an email address is not enough to unlock an installed build.
 
     The result is memoised against the environment value and the file's
-    modification time so licence checks stay cheap.
+    modification time so license checks stay cheap.
     """
     global _dev_emails_cache
 
@@ -360,7 +360,7 @@ def reset_user_settings(current: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of ``current`` with the user-facing sections reset.
 
     Only behaviour and appearance preferences are reset: provider API keys,
-    the licence, the local model choice, and the update state are deliberately
+    the license, the local model choice, and the update state are deliberately
     preserved. A non-expert user can press "Restore default settings" without
     losing access to their paid provider or activation.
     """

@@ -30,8 +30,8 @@ def _normalize_pem(value: str) -> bytes:
     )
     # Remove the PEM markers first (their words are also base64 characters),
     # then extract only real base64 content, ignoring any whitespace quirks.
-    without_markers = re.sub(r"-----BEGIN[^-]*?-----", "", cleaned, flags=re.S)
-    without_markers = re.sub(r"-----END[^-]*?-----", "", without_markers, flags=re.S)
+    without_markers = re.sub(r"-----BEGIN[^-]*?-----", "", cleaned, flags=re.DOTALL)
+    without_markers = re.sub(r"-----END[^-]*?-----", "", without_markers, flags=re.DOTALL)
     body = "".join(re.findall(r"[A-Za-z0-9+/=]+", without_markers))
     wrapped = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
     return (

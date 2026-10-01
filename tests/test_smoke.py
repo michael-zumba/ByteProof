@@ -68,9 +68,10 @@ def test_settings_branding() -> None:
     assert "ByteMind" in settings.APP_SUPPORT_DIR
     assert "bytemind" in settings.PRODUCT_URL
     assert settings.PRODUCT_URL == "https://www.bytemind.co.nz/byteproof"
-    # Polar is the canonical payment + license owner.
-    assert settings.POLAR_ORGANIZATION_ID
-    assert settings.POLAR_CHECKOUT_URL.startswith("https://buy.polar.sh/")
+    # Stripe checkout plus the ByteMind license service is the canonical path.
+    assert settings.LICENSE_API_URL.startswith("https://")
+    assert settings.PURCHASE_URL.startswith("https://")
+    assert "api/byteproof/portal" in settings.LICENSE_PORTAL_URL
     assert "ByteProof Local (Qwen3)" in settings.PROVIDERS
 
 
@@ -102,7 +103,7 @@ def test_open_purchase_url_uses_live_link() -> None:
         open_purchase_url(None)
     finally:
         webbrowser.open = original_open
-    assert opened == [settings.POLAR_CHECKOUT_URL]
+    assert opened == [settings.PURCHASE_URL]
 
 
 def test_triggered_app_identifiers_ignore_unrelated_rules() -> None:
@@ -170,120 +171,154 @@ def _restore_license_storage(originals) -> None:
     ) = originals
 
 
-def test_activation_from_url() -> None:
-    from src import activation, licensing, polar
+def test_activation_from_url_and_service_flow() -> None:
+    from src import activation, license_api, licensing
 
     tmpdir = tempfile.mkdtemp()
     originals = _patch_license_storage(tmpdir)
-    original_activate = polar.activate_key
-    original_org = activation.POLAR_ORGANIZATION_ID
+    generator = _load_license_generator()
+    machine = licensing._get_machine_fingerprint()
+    signed = generator.generate_license_key("buyer@example.com", "unlimited", machine)
+    original_activate_key = license_api.activate_key
+    original_activate_session = license_api.activate_session
+    calls: list[tuple[str, str]] = []
     try:
-        activation.POLAR_ORGANIZATION_ID = "org_test"
-        polar.activate_key = lambda key, label: {
-            "ok": True,
-            "key": key,
-            "activation_id": "act_123",
-            "status": "granted",
-            "limit_activations": 2,
-            "expires_at": None,
-        }
+        def fake_activate_key(key: str, label: str = "") -> dict:
+            calls.append(("key", key))
+            return {
+                "ok": True,
+                "license_key": signed,
+                "key": key,
+                "email": "buyer@example.com",
+                "device_count": 1,
+                "device_limit": 2,
+            }
+
+        def fake_activate_session(session_id: str, label: str = "") -> dict:
+            calls.append(("session", session_id))
+            return {
+                "ok": True,
+                "license_key": signed,
+                "key": "BYTP-FROM-SESSION",
+                "email": "buyer@example.com",
+                "device_count": 1,
+                "device_limit": 2,
+            }
+
+        license_api.activate_key = fake_activate_key
+        license_api.activate_session = fake_activate_session
 
         result = activation.activate_from_url(
-            "byteproof://activate?key=POLAR_TEST_KEY"
+            "byteproof://activate?key=BYTP-AAAA-AAAA-AAAA-AAAA"
         )
         assert result["ok"], result
         assert licensing.is_licensed()
-        assert licensing.get_license_info()["provider"] == "polar"
-        assert licensing.get_license_info()["activation_id"] == "act_123"
+        info = licensing.get_license_info()
+        assert info["provider"] == "stripe"
+        assert info["purchase_key"] == "BYTP-AAAA-AAAA-AAAA-AAAA"
+        assert info["key_display"].endswith("AAAA")
 
         bad = activation.activate_from_url("https://example.com/not-byteproof")
         assert not bad["ok"]
 
-        # Stripe session deep links are obsolete with Polar.
+        licensing.delete_license_data()
         session = activation.activate_from_url(
             "byteproof://activate?session=cs_test_123"
         )
-        assert not session["ok"]
+        assert session["ok"], session
+        assert calls[-1] == ("session", "cs_test_123")
+        assert (
+            licensing.get_license_info()["purchase_key"] == "BYTP-FROM-SESSION"
+        )
     finally:
-        activation.POLAR_ORGANIZATION_ID = original_org
-        polar.activate_key = original_activate
+        license_api.activate_key = original_activate_key
+        license_api.activate_session = original_activate_session
         _restore_license_storage(originals)
 
 
-def test_polar_key_activation_and_validation() -> None:
-    from src import activation, licensing, polar
+def test_service_key_activation_validation_and_deactivation() -> None:
+    from src import activation, license_api, licensing
 
     tmpdir = tempfile.mkdtemp()
     originals = _patch_license_storage(tmpdir)
-    original_activate = polar.activate_key
-    original_validate = polar.validate_key
-    original_deactivate = polar.deactivate_key
-    original_org = activation.POLAR_ORGANIZATION_ID
+    generator = _load_license_generator()
+    machine = licensing._get_machine_fingerprint()
+    signed = generator.generate_license_key("buyer@example.com", "unlimited", machine)
+    original_activate = license_api.activate_key
+    original_validate = license_api.validate_key
+    original_deactivate = license_api.deactivate_key
     try:
-        activation.POLAR_ORGANIZATION_ID = "org_test"
-        polar.activate_key = lambda key, label: {
+        license_api.activate_key = lambda key, label="": {
             "ok": True,
+            "license_key": signed,
             "key": key,
-            "activation_id": "act_456",
-            "status": "granted",
-            "limit_activations": 2,
-            "expires_at": None,
+            "email": "buyer@example.com",
+            "device_count": 1,
+            "device_limit": 2,
         }
-        result = activation.activate_with_key("BP_TEST_1234")
+        result = activation.activate_with_key("BYTP-TEST-0000-0000-0000")
         assert result["ok"], result
         assert licensing.is_licensed()
+        assert licensing.get_license_info()["device_limit"] == 2
 
-        polar.validate_key = lambda key, activation_id: {
-            "status": "granted",
-            "activation": {"id": activation_id},
+        license_api.validate_key = lambda key, fp="": {
+            "ok": True,
+            "valid": True,
+            "revoked": False,
         }
-        assert activation.validate_license_remote()["ok"] is True
-
-        polar.validate_key = lambda key, activation_id: {"status": "revoked"}
         remote = activation.validate_license_remote()
-        assert remote["ok"] is False
-        assert "revoked" in remote["error"]
+        assert remote["ok"] is True
+        assert not remote.get("revoked")
 
-        polar.deactivate_key = lambda key, activation_id: {"ok": True}
-        deactivated = activation.deactivate_license()
-        assert deactivated["ok"]
+        # A refund or chargeback surfaces as revoked, not as a network blip.
+        license_api.validate_key = lambda key, fp="": {
+            "ok": True,
+            "valid": False,
+            "revoked": True,
+        }
+        revoked = activation.validate_license_remote()
+        assert revoked["ok"] is False
+        assert revoked["revoked"] is True
+
+        license_api.deactivate_key = lambda key, fp="": {"ok": True}
+        assert activation.deactivate_license()["ok"]
         assert not licensing.is_licensed()
     finally:
-        polar.activate_key = original_activate
-        polar.validate_key = original_validate
-        polar.deactivate_key = original_deactivate
-        activation.POLAR_ORGANIZATION_ID = original_org
+        license_api.activate_key = original_activate
+        license_api.validate_key = original_validate
+        license_api.deactivate_key = original_deactivate
         _restore_license_storage(originals)
 
 
-def test_polar_activate_parses_top_level_activation() -> None:
-    from src import polar
+def test_service_activation_reports_limits_and_outages() -> None:
+    from src import activation, license_api
 
-    calls: list[tuple[str, dict]] = []
-    original_post = polar._post
-
-    def fake_post(path: str, payload: dict) -> dict:
-        calls.append((path, payload))
-        return {
-            "id": "act_789",
-            "label": "test-machine",
-            "license_key": {
-                "status": "granted",
-                "limit_activations": 2,
-                "expires_at": None,
-            },
-        }
-
-    polar._post = fake_post
+    tmpdir = tempfile.mkdtemp()
+    originals = _patch_license_storage(tmpdir)
+    original_activate = license_api.activate_key
     try:
-        result = polar.activate_key("BP_TEST", label="test-machine")
-        assert result["activation_id"] == "act_789"
-        assert result["status"] == "granted"
-        assert result["limit_activations"] == 2
-        assert calls[0][0] == "/v1/customer-portal/license-keys/activate"
-        assert calls[0][1]["conditions"]["machine_fingerprint"]
+        def at_limit(key: str, label: str = "") -> dict:
+            raise license_api.LicenseApiError(
+                "This license has reached its limit of 2 computers."
+            )
+
+        license_api.activate_key = at_limit
+        limited = activation.activate_with_key("BYTP-LIMIT-0000-0000-0000")
+        assert not limited["ok"]
+        assert "limit of 2 computers" in limited["error"]
+
+        def offline(key: str, label: str = "") -> dict:
+            raise license_api.LicenseApiError(
+                "Cannot reach the ByteProof license service."
+            )
+
+        license_api.activate_key = offline
+        down = activation.activate_with_key("BYTP-OFFLINE-0000-0000-0000")
+        assert not down["ok"]
+        assert "reach" in down["error"]
     finally:
-        polar._post = original_post
+        license_api.activate_key = original_activate
+        _restore_license_storage(originals)
 
 
 def test_developer_email_activation() -> None:
@@ -293,7 +328,6 @@ def test_developer_email_activation() -> None:
 
     tmpdir = tempfile.mkdtemp()
     originals = _patch_license_storage(tmpdir)
-    original_org = activation.POLAR_ORGANIZATION_ID
     original_dev_lic = licensing.developer_emails
     original_dev_act = activation.developer_emails
     try:
@@ -312,48 +346,36 @@ def test_developer_email_activation() -> None:
         assert licensing.is_licensed()
         assert licensing.get_license_info()["provider"] == "dev"
 
-        # With Polar configured, a customer email is not a valid activation.
-        activation.POLAR_ORGANIZATION_ID = "org_test"
+        # A customer email is never a license.
         stranger = activation.activate_with_key("somebody@example.com")
         assert not stranger["ok"]
         assert "license key" in stranger["error"].lower()
     finally:
         licensing.developer_emails = original_dev_lic
         activation.developer_emails = original_dev_act
-        activation.POLAR_ORGANIZATION_ID = original_org
         _restore_license_storage(originals)
 
 
-def test_legacy_email_and_signed_key_fallback() -> None:
+def test_legacy_signed_key_still_activates_locally() -> None:
+    """Pre-2026 buyers keep their keys without the license service."""
     from src import activation, licensing
 
     tmpdir = tempfile.mkdtemp()
-    # Load the generator before patching storage: a skip must not leak it.
     generator = _load_license_generator()
     originals = _patch_license_storage(tmpdir)
-    original_post = activation._post_json
-    original_org = activation.POLAR_ORGANIZATION_ID
     try:
-        # Polar is not configured: support-issued signed keys still work.
-        activation.POLAR_ORGANIZATION_ID = ""
         key = generator.generate_license_key("paid@example.com", "unlimited", "")
         result = activation.activate_with_key(key)
         assert result["ok"], result
         assert result["email"] == "paid@example.com"
         assert licensing.is_licensed()
+        assert licensing.get_license_info()["provider"] == "legacy"
 
-        # Legacy email activation falls back to the ByteMind server.
-        licensing.delete_license_data()
-        activation._post_json = lambda url, payload: {
-            "ok": True,
-            "license_key": key,
-        }
-        email_result = activation.activate_with_key("paid@example.com")
-        assert email_result["ok"], email_result
-        assert email_result["email"] == "paid@example.com"
+        remote = activation.validate_license_remote()
+        assert remote["ok"] is True
+        assert activation.deactivate_license()["ok"]
+        assert not licensing.is_licensed()
     finally:
-        activation.POLAR_ORGANIZATION_ID = original_org
-        activation._post_json = original_post
         _restore_license_storage(originals)
 
 
@@ -437,129 +459,112 @@ def test_secure_store_fallback_restores_license() -> None:
         licensing._secure_store_delete = original_secure_delete
 
 
-def test_server_activation_core_two_machine_limit() -> None:
+def test_license_store_two_machine_limit_and_deactivation() -> None:
     from pathlib import Path
 
-    server_dir = os.path.join(PROJECT_ROOT, "server")
-    if server_dir not in sys.path:
-        sys.path.insert(0, server_dir)
-    from activation_core import (
-        deactivate_machine,
-        load_json,
-        register_machine,
-        validate_machine,
+    from server.license_store import LicenseStore
+
+    store = LicenseStore(Path(tempfile.mkdtemp()) / "licenses.sqlite3")
+    store.init()
+    key = "BYTP-TEST-TEST-TEST-TEST"
+    assert store.upsert_license(
+        key=key,
+        session_id="cs_test_1",
+        email="buyer@example.com",
+        device_limit=2,
+    )
+    assert not store.upsert_license(
+        key=key,
+        session_id="cs_test_1",
+        email="buyer@example.com",
+        device_limit=2,
     )
 
-    tmpdir = Path(tempfile.mkdtemp())
-    licenses_path = tmpdir / "licenses.json"
-    issued: list[tuple[str, str]] = []
+    ok, err, count = store.register_activation(key, "fp-a", "MacBook", 2)
+    assert ok and err is None and count == 1
+    ok, err, count = store.register_activation(key, "fp-b", "", 2)
+    assert ok and err is None and count == 2
 
-    def issue_key(email: str, machine_fp: str) -> str:
-        issued.append((email, machine_fp))
-        return f"key-{email}-{machine_fp}"
+    # A third computer is refused; re-registering an existing one is not.
+    ok, err, count = store.register_activation(key, "fp-c", "", 2)
+    assert not ok and err == "device_limit" and count == 2
+    ok, err, count = store.register_activation(key, "fp-a", "", 2)
+    assert ok and err is None and count == 2
 
-    ok1, key1, err1 = register_machine(
-        licenses_path, "Buyer@Example.com", "fp-a", issue_key
+    # Deactivation frees the slot for the replacement computer.
+    assert store.deactivate(key, "fp-b")
+    ok, err, count = store.register_activation(key, "fp-c", "", 2)
+    assert ok and err is None and count == 2
+    assert not store.deactivate(key, "fp-missing")
+
+    # Internal licenses have no device limit.
+    store.upsert_license(
+        key="BYTEPROOF_-INTERNAL",
+        session_id=None,
+        email="owner@example.com",
+        source="internal",
+        device_limit=None,
     )
-    assert ok1 and err1 is None
-    assert key1 == "key-buyer@example.com-fp-a"
-
-    ok2, key2, _ = register_machine(licenses_path, "buyer@example.com", "fp-b", issue_key)
-    assert ok2 and key2 == "key-buyer@example.com-fp-b"
-
-    # Third computer is rejected.
-    ok3, key3, err3 = register_machine(
-        licenses_path, "buyer@example.com", "fp-c", issue_key
-    )
-    assert not ok3 and key3 is None
-    assert "device limit" in (err3 or "").lower()
-
-    # Re-requesting an existing machine returns its key without issuing a new one.
-    ok_re, key_re, _ = register_machine(
-        licenses_path, "buyer@example.com", "fp-a", issue_key
-    )
-    assert ok_re and key_re == key1
-    assert len(issued) == 2
-
-    # Deactivation frees a slot.
-    assert deactivate_machine(licenses_path, "buyer@example.com", "fp-b")
-    ok4, key4, _ = register_machine(
-        licenses_path, "buyer@example.com", "fp-c", issue_key
-    )
-    assert ok4 and key4 == "key-buyer@example.com-fp-c"
-
-    state = validate_machine(
-        load_json(licenses_path), "buyer@example.com", "fp-c"
-    )
-    assert state["valid"] is True
-    assert state["device_count"] == 2
-    assert state["device_limit"] == 2
-
-
-def test_emailer_graceful_and_link_build() -> None:
-    server_dir = os.path.join(PROJECT_ROOT, "server")
-    if server_dir not in sys.path:
-        sys.path.insert(0, server_dir)
-    import emailer
-
-    keys = (
-        "BYTEPROOF_SMTP_HOST",
-        "BYTEPROOF_SMTP_PORT",
-        "BYTEPROOF_SMTP_USER",
-        "BYTEPROOF_SMTP_PASSWORD",
-        "BYTEPROOF_SMTP_FROM",
-    )
-    saved = {key: os.environ.get(key) for key in keys}
-    for key in keys:
-        os.environ.pop(key, None)
-    try:
-        assert emailer.send_activation_email("buyer@example.com", "cs_test_1") is False
-        os.environ["BYTEPROOF_SMTP_USER"] = "sender@bytemind.co.nz"
-        msg = emailer._build_message("buyer@example.com", "cs_test_1")
-        body = msg.get_body(preferencelist=("plain",)).get_content()
-        assert "byteproof://activate?session=cs_test_1" in body
-        assert msg["To"] == "buyer@example.com"
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
-def test_parse_dev_emails() -> None:
-    sys.path.insert(0, os.path.join(PROJECT_ROOT, "server"))
-    from activation_core import parse_dev_emails
-
-    assert parse_dev_emails(" a@b.c, d@e.f g@h.i ") == {
-        "a@b.c",
-        "d@e.f",
-        "g@h.i",
-    }
-    assert parse_dev_emails("") == set()
-    assert parse_dev_emails(None) == set()
-
-
-def test_register_machine_developer_unlimited() -> None:
-    from pathlib import Path
-
-    sys.path.insert(0, os.path.join(PROJECT_ROOT, "server"))
-    from activation_core import register_machine
-
-    licenses_path = Path(tempfile.mkdtemp()) / "licenses.json"
-
-    def issue(email: str, machine_fp: str) -> str:
-        return f"key-{email}-{machine_fp}"
-
-    for fp in ("fp-1", "fp-2", "fp-3", "fp-4"):
-        ok, key, err = register_machine(
-            licenses_path,
-            "dev@bytemind.co.nz",
-            fp,
-            issue,
-            device_limit=None,
+    for machine in ("one", "two", "three", "four"):
+        ok, err, _ = store.register_activation(
+            "BYTEPROOF_-INTERNAL", machine, "", None
         )
-        assert ok and key == f"key-dev@bytemind.co.nz-{fp}" and err is None
+        assert ok and err is None
+
+
+def test_webhook_events_are_recorded_once() -> None:
+    from pathlib import Path
+
+    from server.license_store import LicenseStore
+
+    store = LicenseStore(Path(tempfile.mkdtemp()) / "licenses.sqlite3")
+    store.init()
+    assert store.record_event("evt_1", "checkout.session.completed") is True
+    assert store.record_event("evt_1", "checkout.session.completed") is False
+    assert store.record_event("evt_2", "charge.refunded") is True
+
+
+def test_emailer_builds_license_email_and_never_raises() -> None:
+    from server.config import Settings
+    from server.emailer import license_email_bodies, send_email
+
+    settings = Settings(
+        support_email="support@example.com",
+        product_url="https://example.com/byteproof",
+        public_base_url="https://api.example.com",
+    )
+    activate = "byteproof://activate?key=BYTP-AAAA-BBBB-CCCC-DDDD"
+    portal = "https://api.example.com/api/byteproof/portal?token=abc123"
+    subject, text, html = license_email_bodies(
+        "BYTP-AAAA-BBBB-CCCC-DDDD", activate, portal, settings
+    )
+    assert "BYTP-AAAA-BBBB-CCCC-DDDD" in subject or "license" in subject.lower()
+    assert "BYTP-AAAA-BBBB-CCCC-DDDD" in text
+    assert activate in text
+    assert portal in html
+    assert "2 computers" in text
+
+    # With no SMTP and no Resend key, sending is a graceful skip.
+    assert (
+        send_email(settings, "buyer@example.com", subject, text, html) is False
+    )
+
+
+def test_settings_parse_internal_keys(monkeypatch) -> None:
+    from server.config import Settings
+
+    monkeypatch.setenv(
+        "BYTEPROOF_INTERNAL_KEYS",
+        "BYTEPROOF_-ONE, BYTEPROOF_-TWO BYTEPROOF_-THREE",
+    )
+    monkeypatch.setenv("BYTEPROOF_ADMIN_TOKEN", "secret-token")
+    settings = Settings.from_env()
+    assert settings.internal_keys == (
+        "BYTEPROOF_-ONE",
+        "BYTEPROOF_-TWO",
+        "BYTEPROOF_-THREE",
+    )
+    assert settings.admin_token == "secret-token"
 
 
 def test_cache_cleanup_logs_and_stale_partials() -> None:
@@ -3824,28 +3829,28 @@ def main() -> None:
     print("PASS open purchase URL uses live link")
     test_licensing_roundtrip()
     print("PASS licensing roundtrip")
-    test_activation_from_url()
-    print("PASS activation from URL (Polar key)")
-    test_polar_key_activation_and_validation()
-    print("PASS Polar key activation + validation + deactivation")
-    test_polar_activate_parses_top_level_activation()
-    print("PASS Polar activate response parsing")
+    test_activation_from_url_and_service_flow()
+    print("PASS activation from URL (license service)")
+    test_service_key_activation_validation_and_deactivation()
+    print("PASS license service activation + validation + deactivation")
+    test_service_activation_reports_limits_and_outages()
+    print("PASS license service limits and outages")
     test_developer_email_activation()
     print("PASS developer email activation")
-    test_legacy_email_and_signed_key_fallback()
-    print("PASS legacy email + signed key fallback")
+    test_legacy_signed_key_still_activates_locally()
+    print("PASS legacy signed keys still activate locally")
     test_tampered_license_rejected()
     print("PASS tampered license rejected")
     test_secure_store_fallback_restores_license()
     print("PASS secure store fallback restores license")
-    test_server_activation_core_two_machine_limit()
-    print("PASS server two-machine limit")
-    test_emailer_graceful_and_link_build()
-    print("PASS activation email builder + graceful skip")
-    test_parse_dev_emails()
-    print("PASS developer email parsing")
-    test_register_machine_developer_unlimited()
-    print("PASS developer unlimited devices")
+    test_license_store_two_machine_limit_and_deactivation()
+    print("PASS license store two-machine limit")
+    test_webhook_events_are_recorded_once()
+    print("PASS webhook idempotency")
+    test_emailer_builds_license_email_and_never_raises()
+    print("PASS license email builder + graceful skip")
+    test_settings_parse_internal_keys()
+    print("PASS internal key configuration")
     test_cache_cleanup_logs_and_stale_partials()
     print("PASS cache cleanup logs + partials")
     test_cache_cleanup_keeps_only_two_models()
