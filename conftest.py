@@ -70,6 +70,11 @@ def _isolated_support_dir(tmp_path, monkeypatch):
     ):
         if hasattr(module, "get_app_support_dir"):
             monkeypatch.setattr(module, "get_app_support_dir", lambda: sandbox)
+    # The trial marker keeps a second copy in the macOS defaults domain (or
+    # the Windows registry). Tests must never read the owner's real one: an
+    # old real trial start makes a fresh test look expired.
+    monkeypatch.setattr(licensing, "_trial_secondary_read", lambda: None)
+    monkeypatch.setattr(licensing, "_trial_secondary_write", lambda _ts: None)
     for module in (settings, local_model, cache_cleanup):
         for name in ("LOCAL_MODEL_DIR", "RUNTIME_DIR", "APP_SUPPORT_DIR"):
             if hasattr(module, name):

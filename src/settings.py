@@ -31,7 +31,7 @@ LICENSE_PORTAL_URL = os.environ.get(
 ).strip() or (LICENSE_API_URL.rstrip("/") + "/api/byteproof/portal")
 PURCHASE_URL = os.environ.get(
     "BYTEPROOF_PURCHASE_URL", ""
-).strip() or "https://www.bytemind.co.nz/byteproof#buy"
+).strip() or "https://www.bytemind.co.nz/byteproof#pricing"
 
 # Developer-only identities that unlock full access without a customer key.
 #

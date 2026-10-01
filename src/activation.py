@@ -174,6 +174,22 @@ def validate_license_remote() -> dict[str, Any]:
                 ),
             }
         if not result.get("valid"):
+            if str(result.get("reason") or "") == "not_activated":
+                # The server knows the key but this computer is not one of its
+                # activations: the slot was released (in the portal or on
+                # another computer), or this is a different machine now. The
+                # license must not keep working here.
+                return {
+                    "ok": False,
+                    "deactivated": True,
+                    "error": (
+                        "This computer is no longer activated for your license "
+                        "key. It was released from the license, or the license "
+                        "is now active on other computers instead. Enter your "
+                        "key again to reactivate this computer, or release a "
+                        "slot in the license portal."
+                    ),
+                }
             return {
                 "ok": False,
                 "error": result.get("error")
@@ -184,6 +200,34 @@ def validate_license_remote() -> dict[str, Any]:
     # Developer, legacy signed, and retired Polar records are all local-only
     # now; nothing to check online.
     return {"ok": True, "provider": provider}
+
+
+def apply_remote_validation(result: dict[str, Any]) -> dict[str, str]:
+    """Act on a validate_license_remote() result.
+
+    A licence the server has revoked, or a computer whose activation was
+    released, must stop working here: the local copy is removed so the app
+    falls back to trial/free mode. Network problems only warn.
+    """
+    if result.get("revoked") or result.get("deactivated"):
+        delete_license_data()
+        kind = "revoked" if result.get("revoked") else "deactivated"
+        return {
+            "kind": kind,
+            "message": str(
+                result.get("error")
+                or "This computer is no longer licensed."
+            ),
+        }
+    if result.get("ok") is False:
+        return {
+            "kind": "warning",
+            "message": str(
+                result.get("error")
+                or "Your license could not be verified online."
+            ),
+        }
+    return {"kind": "none", "message": ""}
 
 
 def activate_from_url(url: str) -> dict[str, Any]:

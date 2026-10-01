@@ -33,6 +33,7 @@ WEBHOOK_EVENTS = [
     "checkout.session.async_payment_succeeded",
     "charge.refunded",
     "charge.dispute.created",
+    "charge.dispute.closed",
 ]
 
 

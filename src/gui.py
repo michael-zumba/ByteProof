@@ -78,6 +78,7 @@ from PyQt6.QtWidgets import (
 from .activation import (
     activate_from_url,
     activate_with_key,
+    apply_remote_validation,
     deactivate_license,
     register_url_scheme,
     validate_license_remote,
@@ -5991,24 +5992,29 @@ class ProofreaderApp(QMainWindow):
         worker.start()
 
     def _on_license_validation_result(self, result: dict) -> None:
-        if result.get("revoked"):
-            QMessageBox.warning(
-                self,
-                "License Revoked",
-                result.get("error")
-                or "This license is no longer valid.",
-            )
+        outcome = apply_remote_validation(result)
+        kind = outcome["kind"]
+        if kind == "none":
+            return
+        if kind in ("revoked", "deactivated"):
+            # The local copy is already gone; the app is back on trial/free
+            # mode until the customer reactivates.
+            self._update_proofread_button()
+            if kind == "revoked":
+                QMessageBox.warning(self, "License Revoked", outcome["message"])
+            else:
+                QMessageBox.information(
+                    self, "Activation Released", outcome["message"]
+                )
             self._open_license_tab()
             return
-        # validate_license_remote() reports failure as ok=False; testing for a
-        # "valid" key here meant revoked licenses were never surfaced.
-        if result.get("ok") is False:
-            self._show_toast(
-                "Your license could not be verified online. If you deactivated "
-                "this computer or changed hardware, open Settings → License "
-                "and enter your license key again.",
-                kind="warning",
-            )
+        # Network or transient failure: never lock a working license.
+        self._show_toast(
+            "Your license could not be verified online. If you deactivated "
+            "this computer or changed hardware, open Settings → License "
+            "and enter your license key again.",
+            kind="warning",
+        )
 
     def _start_activation(self, kind: str, value: str) -> None:
         if kind == "url" and not self._confirm_url_activation(value):

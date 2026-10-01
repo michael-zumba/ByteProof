@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS licenses (
     source         TEXT NOT NULL DEFAULT 'stripe',
     revoked        INTEGER NOT NULL DEFAULT 0,
     revoked_at     INTEGER,
+    revoked_reason TEXT,
     device_limit   INTEGER,
     created_at     INTEGER NOT NULL,
     fulfilled_at   INTEGER,
@@ -72,6 +73,16 @@ class LicenseStore:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
             conn.execute("PRAGMA journal_mode=WAL")
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add columns introduced after the first deployment."""
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(licenses)")
+        }
+        if "revoked_reason" not in columns:
+            conn.execute("ALTER TABLE licenses ADD COLUMN revoked_reason TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=15)
@@ -182,23 +193,52 @@ class LicenseStore:
                 (int(time.time()), key),
             )
 
-    def set_revoked(self, key: str, revoked: bool) -> bool:
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "UPDATE licenses SET revoked = ?, revoked_at = ? WHERE key = ?",
-                (1 if revoked else 0, int(time.time()) if revoked else None, key),
-            )
-            return cursor.rowcount > 0
-
-    def revoke_by_payment_intent(self, payment_intent: str) -> int:
+    def set_revoked(
+        self, key: str, revoked: bool, reason: str | None = None
+    ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE licenses
-                   SET revoked = 1, revoked_at = ?
+                   SET revoked = ?, revoked_at = ?, revoked_reason = ?
+                 WHERE key = ?
+                """,
+                (
+                    1 if revoked else 0,
+                    int(time.time()) if revoked else None,
+                    reason if revoked else None,
+                    key,
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def revoke_by_payment_intent(
+        self, payment_intent: str, reason: str = "refund"
+    ) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE licenses
+                   SET revoked = 1, revoked_at = ?, revoked_reason = ?
                  WHERE payment_intent = ? AND revoked = 0
                 """,
-                (int(time.time()), payment_intent),
+                (int(time.time()), reason, payment_intent),
+            )
+            return cursor.rowcount
+
+    def restore_by_payment_intent(
+        self, payment_intent: str, reason: str = "dispute"
+    ) -> int:
+        """Undo a revocation of the given kind (e.g. a dispute we won)."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE licenses
+                   SET revoked = 0, revoked_at = NULL, revoked_reason = NULL
+                 WHERE payment_intent = ? AND revoked = 1
+                   AND revoked_reason = ?
+                """,
+                (payment_intent, reason),
             )
             return cursor.rowcount
 

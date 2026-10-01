@@ -46,6 +46,18 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def is_paid_session(session: dict[str, Any]) -> bool:
+    """True when a Checkout Session is settled enough to fulfil.
+
+    ``no_payment_required`` is what Stripe reports for a session that costs
+    nothing after a 100%-off promotion code, which must still get a licence.
+    """
+    return str(session.get("payment_status") or "") in (
+        "paid",
+        "no_payment_required",
+    )
+
+
 def session_email(session: dict[str, Any]) -> str:
     details = session.get("customer_details") or {}
     email = details.get("email") or session.get("customer_email") or ""
@@ -60,7 +72,7 @@ def license_from_session(
 ) -> dict[str, Any] | None:
     """Turn a paid Checkout Session into license-row fields."""
     session_id = str(session.get("id") or "")
-    if not session_id or session.get("payment_status") != "paid":
+    if not session_id or not is_paid_session(session):
         return None
     return {
         "key": derive_license_key(session_id, secret),

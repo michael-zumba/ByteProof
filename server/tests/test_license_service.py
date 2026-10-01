@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import base64
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import pytest
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
 import server.activation_api as api
@@ -20,73 +16,12 @@ from server.license_store import LicenseStore
 from server.tests.helpers import (
     KEY_SECRET,
     FakeGateway,
+    fulfil,
     paid_session,
+    post_webhook,
+    verify_signed_key,
     webhook_event,
 )
-
-
-@pytest.fixture
-def client(
-    settings: Settings,
-    gateway: FakeGateway,
-    sent_emails: list[dict[str, Any]],
-) -> Iterator[TestClient]:
-    app = api.create_app(settings, gateway)
-    with TestClient(app) as test_client:
-        yield test_client
-
-
-def post_webhook(
-    client: TestClient,
-    event_id: str,
-    event_type: str,
-    obj: dict[str, Any],
-) -> Any:
-    payload, signature = webhook_event(event_id, event_type, obj)
-    return client.post(
-        "/api/byteproof/stripe-webhook",
-        content=payload,
-        headers={
-            "Stripe-Signature": signature,
-            "Content-Type": "application/json",
-        },
-    )
-
-
-def fulfil(client: TestClient, session: dict[str, Any] | None = None) -> str:
-    session = session or paid_session()
-    response = post_webhook(
-        client,
-        f"evt_{session['id']}",
-        "checkout.session.completed",
-        session,
-    )
-    assert response.status_code == 200
-    return derive_license_key(str(session["id"]), KEY_SECRET)
-
-
-def verify_signed_key(
-    public_key: rsa.RSAPublicKey,
-    signed: str,
-    *,
-    machine_fp: str,
-    email: str,
-) -> None:
-    email_enc, expiry_enc, fp_enc, signature_enc = signed.split("|")
-    data = f"{email_enc}|{expiry_enc}|{fp_enc}".encode()
-    public_key.verify(
-        base64.urlsafe_b64decode(signature_enc),
-        data,
-        padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH,
-        ),
-        hashes.SHA256(),
-    )
-    assert base64.urlsafe_b64decode(fp_enc).decode("utf-8") == machine_fp
-    assert base64.urlsafe_b64decode(email_enc).decode("utf-8") == email
-    assert base64.urlsafe_b64decode(expiry_enc).decode("utf-8") == "unlimited"
-
 
 # -- key derivation ---------------------------------------------------------
 

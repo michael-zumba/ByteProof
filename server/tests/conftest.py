@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.testclient import TestClient
 
 from server.config import Settings
 from server.tests.helpers import KEY_SECRET, WEBHOOK_SECRET, FakeGateway
@@ -72,3 +74,16 @@ def sent_emails(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     monkeypatch.setattr(api, "send_license_email", fake_license_email)
     monkeypatch.setattr(api, "send_portal_email", fake_portal_email)
     return captured
+
+
+@pytest.fixture
+def client(
+    settings: Settings,
+    gateway: FakeGateway,
+    sent_emails: list[dict[str, Any]],
+) -> Iterator[TestClient]:
+    import server.activation_api as api
+
+    app = api.create_app(settings, gateway)
+    with TestClient(app) as test_client:
+        yield test_client

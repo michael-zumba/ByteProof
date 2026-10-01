@@ -38,7 +38,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from .config import Settings
-from .emailer import send_license_email, send_portal_email
+from .emailer import send_email, send_license_email, send_portal_email
 from .license_keys import normalise_key
 from .license_signer import generate_license_key, is_configured
 from .license_store import LicenseStore
@@ -48,7 +48,12 @@ from .pages import (
     portal_page,
     thanks_page,
 )
-from .stripe_sync import StripeGateway, StripeReader, license_from_session
+from .stripe_sync import (
+    StripeGateway,
+    StripeReader,
+    is_paid_session,
+    license_from_session,
+)
 
 log = logging.getLogger("byteproof.license")
 
@@ -154,7 +159,7 @@ def create_app(
         seen = 0
         try:
             for session in gateway.list_sessions(created_gte=created_gte):
-                if session.get("payment_status") != "paid":
+                if not is_paid_session(session):
                     continue
                 if fulfil_session(session):
                     seen += 1
@@ -173,7 +178,10 @@ def create_app(
             # miss can also be a typo, so do not scan Stripe more than once
             # every few minutes.
             now = time.monotonic()
-            if now - last_reconcile["at"] > 300:
+            if (
+                now - last_reconcile["at"] > 300
+                or store.counts()["licenses"] == 0
+            ):
                 last_reconcile["at"] = now
                 reconcile_from_stripe()
             row = store.get_license(key)
@@ -187,11 +195,32 @@ def create_app(
         try:
             backups = settings.data_dir / "backups"
             destination = backups / time.strftime("licenses-%Y-%m-%d.sqlite3")
-            store.backup_to(destination)
+            # VACUUM INTO refuses to overwrite, so stage then replace: running
+            # twice in one day, or after a restart, must not skip the backup.
+            staging = destination.with_suffix(".tmp")
+            store.backup_to(staging)
+            staging.replace(destination)
             keep = sorted(backups.glob("licenses-*.sqlite3"))[-14:]
             for old in sorted(backups.glob("licenses-*.sqlite3"))[:-14]:
                 if old not in keep:
                     old.unlink(missing_ok=True)
+            if time.localtime().tm_wday == 0 and settings.backup_email:
+                send_email(
+                    settings,
+                    settings.backup_email,
+                    "ByteProof license database backup",
+                    (
+                        "Weekly snapshot of the ByteProof license database is "
+                        f"attached ({destination.name}). Keys are also "
+                        "re-derivable from Stripe with BYTEPROOF_KEY_SECRET."
+                    ),
+                    (
+                        "<p>Weekly snapshot of the ByteProof license database "
+                        "is attached.</p><p>Keys are also re-derivable from "
+                        "Stripe with <code>BYTEPROOF_KEY_SECRET</code>.</p>"
+                    ),
+                    attachment=(destination.name, destination.read_bytes()),
+                )
         except Exception as exc:  # pragma: no cover - disk failure path
             log.warning("Backup failed: %s", exc)
 
@@ -267,7 +296,7 @@ def create_app(
             "checkout.session.completed",
             "checkout.session.async_payment_succeeded",
         ):
-            if data.get("payment_status") != "paid":
+            if not is_paid_session(data):
                 log.info(
                     "Checkout session %s is not paid yet (%s); waiting for the "
                     "async confirmation.",
@@ -284,12 +313,27 @@ def create_app(
         elif event_type == "charge.refunded":
             if data.get("refunded") is True:
                 intent = str(data.get("payment_intent") or "")
-                revoked = store.revoke_by_payment_intent(intent) if intent else 0
+                revoked = (
+                    store.revoke_by_payment_intent(intent, "refund")
+                    if intent
+                    else 0
+                )
                 log.info("Refund revoked %s license(s) for %s", revoked, intent)
         elif event_type == "charge.dispute.created":
             intent = str(data.get("payment_intent") or "")
-            revoked = store.revoke_by_payment_intent(intent) if intent else 0
+            revoked = (
+                store.revoke_by_payment_intent(intent, "dispute")
+                if intent
+                else 0
+            )
             log.info("Dispute revoked %s license(s) for %s", revoked, intent)
+        elif event_type == "charge.dispute.closed":
+            intent = str(data.get("payment_intent") or "")
+            if intent and str(data.get("status") or "") == "won":
+                restored = store.restore_by_payment_intent(intent, "dispute")
+                log.info(
+                    "Won dispute restored %s license(s) for %s", restored, intent
+                )
 
     @app.post("/api/byteproof/stripe-webhook")
     async def stripe_webhook(
@@ -340,7 +384,7 @@ def create_app(
                 status_code=400,
                 detail=f"Could not verify the checkout session: {exc}",
             )
-        if session.get("payment_status") != "paid":
+        if not is_paid_session(session):
             raise HTTPException(
                 status_code=402,
                 detail=(
@@ -426,8 +470,13 @@ def create_app(
             )
         license = find_license(key)
         if license is None:
-            return {"ok": False, "valid": False, "revoked": False,
-                    "error": "Unknown license key."}
+            return {
+                "ok": False,
+                "valid": False,
+                "revoked": False,
+                "reason": "unknown_key",
+                "error": "Unknown license key.",
+            }
         machines = store.activations(key)
         registered = any(row["machine_fp"] == machine_fp for row in machines)
         if not registered:
@@ -435,6 +484,7 @@ def create_app(
                 "ok": False,
                 "valid": False,
                 "revoked": bool(license["revoked"]),
+                "reason": "revoked" if license["revoked"] else "not_activated",
                 "error": "This computer is not activated for this license key.",
             }
         if license["revoked"]:
@@ -442,6 +492,7 @@ def create_app(
                 "ok": True,
                 "valid": False,
                 "revoked": True,
+                "reason": "revoked",
                 "error": "This license was refunded or revoked.",
             }
         return {
@@ -545,7 +596,8 @@ def create_app(
     # -- thank-you page -----------------------------------------------------
 
     @app.get("/thanks")
-    def thanks(session_id: str = "") -> HTMLResponse:
+    def thanks(request: Request, session_id: str = "") -> HTMLResponse:
+        limiter.check(request)
         session_id = session_id.strip()
         if not session_id:
             return HTMLResponse(
@@ -577,7 +629,7 @@ def create_app(
                 ),
                 status_code=404,
             )
-        if session.get("payment_status") != "paid":
+        if not is_paid_session(session):
             return HTMLResponse(pending_payment_page(settings, session_id))
         fields = fulfil_session(session)
         if fields is None:
@@ -680,6 +732,21 @@ def create_app(
             license_portal_url(str(license["email"])),
         )
         return {"ok": True, "sent": sent}
+
+    @app.post("/api/byteproof/admin/backup")
+    def admin_backup(
+        x_admin_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_admin(x_admin_token)
+        backup_database()
+        destination = settings.data_dir / "backups" / time.strftime(
+            "licenses-%Y-%m-%d.sqlite3"
+        )
+        return {
+            "ok": True,
+            "file": str(destination),
+            "bytes": destination.stat().st_size if destination.exists() else 0,
+        }
 
     return app
 
