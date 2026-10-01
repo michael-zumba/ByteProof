@@ -40,7 +40,11 @@ from pydantic import BaseModel
 from .config import Settings
 from .emailer import send_email, send_license_email, send_portal_email
 from .license_keys import normalise_key
-from .license_signer import generate_license_key, is_configured
+from .license_signer import (
+    generate_license_key,
+    is_configured,
+    public_key_fingerprint,
+)
 from .license_store import LicenseStore
 from .pages import (
     message_page,
@@ -270,6 +274,7 @@ def create_app(
         return {
             "status": "ok",
             "license_signer_configured": is_configured(),
+            "license_signing_key_fingerprint": public_key_fingerprint(),
             "stripe_configured": gateway.configured,
             "licenses": counts["licenses"],
             "activations": counts["activations"],

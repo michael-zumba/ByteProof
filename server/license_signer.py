@@ -9,6 +9,7 @@ The RSA private key is never committed to the repository. It is loaded from:
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import os
 import re
@@ -17,6 +18,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 
 def _normalize_pem(value: str) -> bytes:
@@ -88,6 +90,20 @@ def is_configured() -> bool:
         return True
     except Exception:
         return False
+
+
+def public_key_fingerprint() -> str | None:
+    """Short fingerprint of the signing key's public half.
+
+    Printed by ``scripts/check_signing_key.py`` and exposed on /health so a
+    deployment can be checked against the key the app has embedded.
+    """
+    try:
+        public = _get_private_key().public_key()
+    except Exception:
+        return None
+    der = public.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    return hashlib.sha256(der).hexdigest()[:16]
 
 
 def generate_license_key(

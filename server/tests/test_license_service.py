@@ -44,9 +44,12 @@ def test_key_derivation_is_stable_and_unambiguous() -> None:
 
 
 def test_health_reports_signer_and_stripe(client: TestClient) -> None:
+    from server.license_signer import public_key_fingerprint
+
     body = client.get("/health").json()
     assert body["status"] == "ok"
     assert body["license_signer_configured"] is True
+    assert body["license_signing_key_fingerprint"] == public_key_fingerprint()
     assert body["stripe_configured"] is True
 
 

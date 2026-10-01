@@ -242,14 +242,24 @@ curl -s https://api.bytemind.co.nz/health
 Expected:
 
 ```json
-{"status":"ok","license_signer_configured":true,"stripe_configured":true,
- "licenses":2,"activations":0}
+{"status":"ok","license_signer_configured":true,
+ "license_signing_key_fingerprint":"a1b2c3d4e5f60718",
+ "stripe_configured":true,"licenses":2,"activations":0}
 ```
 
 - `license_signer_configured:false` → `BYTEPROOF_LICENSE_PRIVATE_KEY` is
   missing or malformed.
 - `stripe_configured:false` → `STRIPE_SECRET_KEY` is missing.
 - `licenses:2` at first boot → the two owner keys were seeded.
+- `license_signing_key_fingerprint` must equal the value printed by:
+
+  ```bash
+  BYTEPROOF_LICENSE_PRIVATE_KEY="$(cat key.pem)" \
+      python scripts/check_signing_key.py
+  ```
+
+  (or run it on the server with the env var already set). A mismatch means
+  the server would sign licences that every customer's app rejects.
 
 Then run the licence-service test suite locally against the code you just
 deployed:
@@ -400,6 +410,7 @@ Typical tasks:
 | Portal link "expired" | links last 30 minutes | request a new one from the app, or `resend` |
 | After a redeploy, licences are missing | disk not mounted at `/data` | Render → Disks; the blueprint creates one |
 | Local test: activation fails | service reachable? `BYTEPROOF_LICENSE_API_URL` correct? | `curl .../health` |
+| App says "License key signature is not valid" | server signing key and the app's embedded public key are different | run `scripts/check_signing_key.py`; fix `BYTEPROOF_LICENSE_PRIVATE_KEY` |
 
 ## Cost summary
 

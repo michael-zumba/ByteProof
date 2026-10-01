@@ -12,4 +12,7 @@ ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn server.activation_api:app --host 0.0.0.0 --port ${PORT}"]
+# Render terminates TLS in front of the container: trust its forwarded
+# headers so request.client.host is the real customer IP (the rate limiter
+# and the logs depend on it).
+CMD ["sh", "-c", "uvicorn server.activation_api:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips=*"]
