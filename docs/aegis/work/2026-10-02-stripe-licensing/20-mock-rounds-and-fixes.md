@@ -48,6 +48,17 @@ fixed, one is a documented trade-off.
    instant. The key is the same and the customer can ignore the duplicate;
    serialising it would need a lock around the send.
 
+Two more were caught by reviewing the deployment path rather than the rounds:
+
+8. **A mismatched signing key was invisible until a customer tried to
+   activate.** `/health` now reports the signing key's public fingerprint and
+   `scripts/check_signing_key.py` compares it with the key embedded in the
+   app, so a wrong `BYTEPROOF_LICENSE_PRIVATE_KEY` fails at deploy time.
+9. **Behind Render's proxy, uvicorn did not trust forwarded headers**, so
+   every request looked like it came from the load balancer: the per-IP rate
+   limiter collapsed into a global one that an attacker could exhaust. The
+   container now runs with `--proxy-headers --forwarded-allow-ips=*`.
+
 ## Test-hygiene bug found
 
 Tests read the *real* macOS `com.bytemind.byteproof` trial marker, so on a
