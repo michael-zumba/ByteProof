@@ -337,6 +337,69 @@ def test_applescript_calls_have_a_timeout() -> None:
     assert "timeout=" in source
 
 
+def test_track_changes_off_is_not_written_when_already_off(monkeypatch) -> None:
+    """Word refuses a redundant set; an already-off document must not ask."""
+    from src import word_integration as wi
+
+    integration = wi.MacOSWordIntegration()
+    scripts: list[str] = []
+
+    def fake_run(script: str, *args: Any, **kwargs: Any) -> str:
+        scripts.append(script)
+        assert "set track revisions" not in script, "redundant write attempted"
+        return "false"
+
+    monkeypatch.setattr(integration, "_run_applescript", fake_run)
+    integration.ensure_track_changes_disabled()
+    assert len(scripts) == 1
+
+
+def test_track_changes_off_tolerates_a_refused_redundant_write(monkeypatch) -> None:
+    """A refusal is fine when Track Changes already sits off (the 10:21 case)."""
+    from src import word_integration as wi
+
+    integration = wi.MacOSWordIntegration()
+    reads = iter([None, False])  # first read is blocked, the retry proves off
+
+    def fake_run(script: str, *args: Any, **kwargs: Any) -> str:
+        if "set track revisions" in script:
+            raise RuntimeError("Can't set track revisions ... (-10006)")
+        state = next(reads)
+        if state is None:
+            raise RuntimeError("Word is busy")
+        return "false"
+
+    monkeypatch.setattr(integration, "_run_applescript", fake_run)
+    integration.ensure_track_changes_disabled()
+
+
+def test_track_changes_refusal_reaches_the_owner_with_a_next_step(monkeypatch) -> None:
+    from src import word_integration as wi
+
+    integration = wi.MacOSWordIntegration()
+
+    def fake_run(script: str, *args: Any, **kwargs: Any) -> str:
+        if "set track revisions" in script:
+            raise RuntimeError("Can't set track revisions ... (-10006)")
+        return "true"  # Word keeps Track Changes on
+
+    monkeypatch.setattr(integration, "_run_applescript", fake_run)
+    with pytest.raises(RuntimeError) as refusal:
+        integration.ensure_track_changes_disabled()
+    assert "Track Changes" in str(refusal.value)
+    assert "dialog" in str(refusal.value)
+
+
+def test_track_changes_scripts_use_a_property_word_has() -> None:
+    """`track changes of active document` is not in Word's dictionary: it only
+    ever produced a syntax error (-2740) and hid the real one."""
+    from src import word_integration
+
+    with open(word_integration.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "track changes of active document" not in source
+
+
 # --- runtime hygiene ---------------------------------------------------------
 
 

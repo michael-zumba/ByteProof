@@ -1355,51 +1355,68 @@ class MacOSWordIntegration(WordIntegration):
         """
         self._run_applescript(script)
 
-    def ensure_track_changes_enabled(self) -> None:
-        scripts = [
-            """
-            tell application "Microsoft Word"
-                set track revisions of active document to true
-            end tell
-            """,
-            """
-            tell application "Microsoft Word"
-                set track changes of active document to true
-            end tell
-            """
-        ]
-        last_error = None
-        for script in scripts:
-            try:
-                self._run_applescript(script)
+    def _read_track_changes(self) -> bool | None:
+        """Word's Track Changes state, or None when it cannot be read."""
+        script = """
+        tell application "Microsoft Word"
+            if not (exists active document) then return "NO_DOCUMENT"
+            return track revisions of active document
+        end tell
+        """
+        try:
+            answer = self._run_applescript(script).strip().lower()
+        except Exception:
+            return None
+        if answer in ("true", "yes"):
+            return True
+        if answer in ("false", "no"):
+            return False
+        return None
+
+    @staticmethod
+    def _track_changes_refused(enabled: bool) -> RuntimeError:
+        state = "on" if enabled else "off"
+        return RuntimeError(
+            f"Microsoft Word would not turn Track Changes {state}. Close any "
+            "dialog Word is showing (or change it on Word's Review tab), then "
+            "try again."
+        )
+
+    def _set_track_changes(self, enabled: bool) -> None:
+        """Make Word's Track Changes match the setting, tolerating refusals.
+
+        Word refuses a set while a dialog or a protected document owns the
+        app, and it refuses a *redundant* set most readily. capture.log
+        2026-10-02: the proofread aborted with "Can't set track revisions of
+        active document to false" (-10006) while Track Changes was already
+        off, and the fallback script asked for a property Word's dictionary
+        does not have (-2740).
+        """
+        if self._read_track_changes() is enabled:
+            return
+        value = "true" if enabled else "false"
+        script = f"""
+        tell application "Microsoft Word"
+            if not (exists active document) then error "No active Word document is open."
+            set track revisions of active document to {value}
+        end tell
+        """
+        try:
+            self._run_applescript(script)
+        except Exception as exc:
+            # The refusal only matters if Word is still in the wrong state.
+            if self._read_track_changes() is enabled:
                 return
-            except Exception as exc:
-                last_error = exc
-        if last_error:
-            raise RuntimeError("Unable to enable Track Changes in Microsoft Word.") from last_error
+            raise self._track_changes_refused(enabled) from exc
+        state = self._read_track_changes()
+        if state is not None and state is not enabled:
+            raise self._track_changes_refused(enabled)
+
+    def ensure_track_changes_enabled(self) -> None:
+        self._set_track_changes(True)
 
     def ensure_track_changes_disabled(self) -> None:
-        scripts = [
-            """
-            tell application "Microsoft Word"
-                set track revisions of active document to false
-            end tell
-            """,
-            """
-            tell application "Microsoft Word"
-                set track changes of active document to false
-            end tell
-            """
-        ]
-        last_error = None
-        for script in scripts:
-            try:
-                self._run_applescript(script)
-                return
-            except Exception as exc:
-                last_error = exc
-        if last_error:
-            raise RuntimeError("Unable to disable Track Changes in Microsoft Word.") from last_error
+        self._set_track_changes(False)
 
     def get_selection_info(self) -> tuple[str, int, int, str, str]:
         """Read the current selection (short timeout: this runs every poll)."""
