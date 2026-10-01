@@ -118,8 +118,9 @@ shipped build.
 
 #### Deploying the licence service
 
-See `server/README.md` for the environment variables, the Stripe setup script
-(`scripts/stripe_setup.py`), and local testing. The short version:
+See `STRIPE_LICENSING_SETUP.md` for the full step-by-step guide (Stripe, tax,
+Render, DNS, email, the website switch and day-2 support), and
+`server/README.md` for the service's own reference. The short version:
 
 1. `python scripts/stripe_setup.py --base-url https://api.bytemind.co.nz` with
    a live Stripe key (creates product, price, Payment Link and webhook).

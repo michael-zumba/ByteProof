@@ -97,7 +97,7 @@ same signed key without consuming a slot.
 | GET | `/api/byteproof/portal?token=…` | HTML: key, computers, release buttons |
 | POST | `/api/byteproof/portal/deactivate` | `{token, machine_fp}` |
 | GET | `/thanks?session_id=…` | Post-checkout page: key + "Open ByteProof" |
-| POST | `/api/byteproof/stripe-webhook` | `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `charge.refunded`, `charge.dispute.created` |
+| POST | `/api/byteproof/stripe-webhook` | `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed` |
 | GET | `/health` | Liveness + signer configured |
 
 Admin (header `X-Admin-Token`, env `BYTEPROOF_ADMIN_TOKEN`): list licenses,
@@ -111,8 +111,9 @@ revoke/restore, re-send key email. A `scripts/license_admin.py` CLI wraps it.
 - **Idempotency**: every webhook event id is recorded; repeated deliveries are
   no-ops. Key derivation is deterministic, so a double fulfilment produces the
   same key.
-- **Revocation**: full refund or dispute → `revoked = 1`. The app shows a
-  blocking license dialog on the next successful online check.
+- **Revocation**: full refund or dispute → `revoked = 1` with a reason; a won
+  dispute restores the licence. The app removes its local copy on the next
+  successful online check, so a revoked or released licence stops working.
 - **Offline behaviour**: the signed key validates offline (signature +
   fingerprint); a failed online check never locks a working license.
 - **Portal**: tokens are random 32-byte values, stored hashed, 30-minute

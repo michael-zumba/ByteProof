@@ -4,6 +4,10 @@ Turns a Stripe payment into one ByteProof licence key and enforces the
 2-computer limit. Stripe is the purchase ledger; this service owns the
 activations, the licence portal, and refund revocation.
 
+The full setup guide (Stripe account, tax, Render, DNS, email, website
+cutover, support operations) is `STRIPE_LICENSING_SETUP.md` in the repository
+root; this file is the technical reference for the service itself.
+
 ```
 Buyer -- Stripe Checkout (Payment Link) -- webhook --> this service
    |                                                     | key = HMAC(session id)
@@ -74,7 +78,7 @@ In another terminal, forward real Stripe events (sandbox or test mode):
 
 ```bash
 stripe listen \
-  --events checkout.session.completed,checkout.session.async_payment_succeeded,charge.refunded,charge.dispute.created \
+  --events checkout.session.completed,checkout.session.async_payment_succeeded,charge.refunded,charge.dispute.created,charge.dispute.closed \
   --forward-to http://127.0.0.1:8000/api/byteproof/stripe-webhook
 ```
 
@@ -93,7 +97,7 @@ STRIPE_API_KEY=sk_... python scripts/stripe_setup.py \
 ```
 
 Creates (or reuses) the product, a tax-inclusive NZ$49 price, the Payment
-Link whose success page shows the key, and the webhook endpoint with the four
+Link whose success page shows the key, and the webhook endpoint with the five
 events this service needs. Add `--no-automatic-tax` for an unclaimed sandbox
 (no head office address or tax registration).
 

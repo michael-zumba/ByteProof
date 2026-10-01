@@ -123,3 +123,8 @@ service is fixed. Licence keys already issued keep working offline regardless.
 7. Sandbox delayed method (SEPA, same code path as Alipay): the unpaid
    `checkout.session.completed` was ignored and the later
    `checkout.session.async_payment_succeeded` issued exactly one key.
+8. Four mock rounds of the full lifecycle, plus the app-side usage cycle
+   (`server/tests/test_lifecycle_simulation.py`,
+   `tests/test_license_cycle.py`) — see
+   `docs/aegis/work/2026-10-02-stripe-licensing/20-mock-rounds-and-fixes.md`
+   for the seven issues they found and the six that were fixed.
