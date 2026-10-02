@@ -24,11 +24,17 @@ class FakeGateway:
     def __init__(self, sessions: dict[str, dict[str, Any]] | None = None) -> None:
         self.sessions = sessions or {}
         self.configured = True
+        self.read_error: Exception | None = None
+
+    def check_read(self) -> bool:
+        return self.read_error is None
 
     def add(self, session: dict[str, Any]) -> None:
         self.sessions[str(session["id"])] = session
 
     def retrieve_session(self, session_id: str) -> dict[str, Any]:
+        if self.read_error is not None:
+            raise self.read_error
         if session_id not in self.sessions:
             raise stripe.InvalidRequestError("No such checkout session", "id")
         return self.sessions[session_id]

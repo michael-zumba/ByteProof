@@ -126,6 +126,23 @@ def create_app(
         token = store.create_portal_token(email, settings.portal_token_ttl_seconds)
         return portal_url(token)
 
+    read_check: dict[str, Any] = {"at": 0.0, "ok": None}
+
+    def stripe_read_ok() -> bool | None:
+        """Can the configured Stripe key actually read? Cached for 5 minutes.
+
+        A key that authenticates but lacks a scope (or is a test-mode key)
+        would otherwise only show up as a confusing "no such session" on the
+        thank-you page.
+        """
+        if not gateway.configured:
+            return None
+        now = time.monotonic()
+        if read_check["ok"] is None or now - read_check["at"] > 300:
+            read_check["ok"] = gateway.check_read()
+            read_check["at"] = now
+        return bool(read_check["ok"])
+
     # -- fulfilment ---------------------------------------------------------
 
     def fulfil_session(
@@ -276,6 +293,7 @@ def create_app(
             "license_signer_configured": is_configured(),
             "license_signing_key_fingerprint": public_key_fingerprint(),
             "stripe_configured": gateway.configured,
+            "stripe_read_ok": stripe_read_ok(),
             "licenses": counts["licenses"],
             "activations": counts["activations"],
         }
@@ -614,6 +632,21 @@ def create_app(
                 ),
                 status_code=400,
             )
+        # The webhook usually records the licence before the browser lands
+        # here, so the stored row is the fastest and most reliable source.
+        # It also keeps this page working if the Stripe read API is
+        # unavailable (a mis-scoped key, or a Stripe outage).
+        stored = store.get_license_by_session(session_id)
+        if stored is not None:
+            return HTMLResponse(
+                thanks_page(
+                    key=str(stored["key"]),
+                    activate_url=activate_url(str(stored["key"])),
+                    portal_url=license_portal_url(str(stored["email"])),
+                    email=str(stored["email"]),
+                    settings=settings,
+                )
+            )
         if not gateway.configured:
             return HTMLResponse(
                 message_page(
@@ -625,14 +658,24 @@ def create_app(
             )
         try:
             session = gateway.retrieve_session(session_id)
-        except stripe.StripeError:
+        except stripe.StripeError as exc:
+            log.warning("Thanks page could not read session %s: %s", session_id, exc)
+            misconfigured = isinstance(
+                exc, (stripe.PermissionError, stripe.AuthenticationError)
+            )
             return HTMLResponse(
                 message_page(
                     "ByteProof",
-                    "We could not find that checkout session.",
+                    (
+                        "Your payment went through and your license key is on "
+                        "its way by email. This page could not reach Stripe to "
+                        "show it here."
+                        if misconfigured
+                        else "We could not find that checkout session."
+                    ),
                     settings,
                 ),
-                status_code=404,
+                status_code=503 if misconfigured else 404,
             )
         if not is_paid_session(session):
             return HTMLResponse(pending_payment_page(settings, session_id))

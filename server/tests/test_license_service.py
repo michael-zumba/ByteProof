@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import stripe
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
@@ -51,6 +52,7 @@ def test_health_reports_signer_and_stripe(client: TestClient) -> None:
     assert body["license_signer_configured"] is True
     assert body["license_signing_key_fingerprint"] == public_key_fingerprint()
     assert body["stripe_configured"] is True
+    assert body["stripe_read_ok"] is True
 
 
 def test_paid_session_issues_one_key_and_one_email(
@@ -378,6 +380,29 @@ def test_thanks_page_shows_the_key_and_waits_for_alipay(
     )
     pending = client.get("/thanks?session_id=cs_test_thanks_pending")
     assert "Almost there" in pending.text
+
+
+def test_thanks_page_survives_a_broken_stripe_read(
+    client: TestClient,
+    gateway: FakeGateway,
+    sent_emails: list[dict[str, Any]],
+) -> None:
+    """The webhook's stored licence is enough; Stripe does not have to answer."""
+    session = paid_session(session_id="cs_test_db_first", email="db@example.com")
+    key = fulfil(client, session)
+
+    # Now the Stripe read path breaks (wrong scope, test key, outage).
+    gateway.read_error = stripe.PermissionError("permission denied", "id")
+    page = client.get("/thanks?session_id=cs_test_db_first")
+    assert page.status_code == 200
+    assert key in page.text
+    assert client.get("/health").json()["stripe_read_ok"] is False
+
+    # An unknown session with a broken key says so honestly instead of
+    # pretending the session does not exist.
+    unknown = client.get("/thanks?session_id=cs_test_never_seen")
+    assert unknown.status_code == 503
+    assert "could not reach Stripe" in unknown.text
 
 
 # -- admin ------------------------------------------------------------------

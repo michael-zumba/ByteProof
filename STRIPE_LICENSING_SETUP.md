@@ -443,6 +443,7 @@ Typical tasks:
 | No key email | SMTP not configured or rejected | Render logs → `Email send failed`; the key is still on the thank-you page and `resend` works |
 | Stripe shows the webhook failing (400) | wrong `STRIPE_WEBHOOK_SECRET` | copy the signing secret again (B2) |
 | Stripe shows the webhook failing (503/500) | service down or no disk/DB | check `/health` and Render logs |
+| Thank-you page says "We could not find that checkout session" | the service's Stripe key cannot read Checkout Sessions (setup key, test-mode key, or a missing scope) | `/health` shows `"stripe_read_ok": false`; put the live read-only key (Checkout Sessions: Read, Charges: Read) in `STRIPE_SECRET_KEY` and redeploy. The key still arrives by email and in the licence portal |
 | Alipay not offered | not enabled in Stripe, or customer not in an Alipay-eligible market | Settings → Payment methods |
 | Tax is zero on a NZ order | no active registration, or head office address missing | Tax → Registrations (A2) |
 | Tax is charged to overseas buyers | a registration exists for their country | expected; Stripe collects where you are registered |

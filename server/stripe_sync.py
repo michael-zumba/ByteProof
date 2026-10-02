@@ -21,6 +21,8 @@ class StripeReader(Protocol):
 
     configured: bool
 
+    def check_read(self) -> bool: ...
+
     def retrieve_session(self, session_id: str) -> dict[str, Any]: ...
 
     def retrieve_charge(self, charge_id: str) -> dict[str, Any]: ...
@@ -94,6 +96,16 @@ class StripeGateway:
     @property
     def configured(self) -> bool:
         return self._client is not None
+
+    def check_read(self) -> bool:
+        """Cheap authenticated read, used by /health to prove the key works."""
+        if self._client is None:
+            return False
+        try:
+            self._client.v1.charges.list({"limit": 1})
+            return True
+        except Exception:
+            return False
 
     def retrieve_session(self, session_id: str) -> dict[str, Any]:
         if self._client is None:
