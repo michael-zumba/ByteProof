@@ -157,7 +157,18 @@ if [ -z "$DEV_ID" ]; then
         | grep -m1 "Developer ID Application" \
         | sed -E 's/^[^"]*"([^"]+)".*/\1/')
 fi
-if [ -n "$DEV_ID" ]; then
+if [ -n "$DEV_ID" ] && [ "${BYTEPROOF_SKIP_NOTARIZE:-}" = "1" ]; then
+    # Local beta builds: sign with the same Developer ID the notarised builds
+    # use, so macOS keeps ByteProof's Accessibility permission across the
+    # update, but skip the Apple notary round trip (which needs the stored
+    # credentials and an in-effect developer agreement).
+    echo ""
+    echo "Signing with Apple Developer ID (notarization skipped): $DEV_ID"
+    codesign --deep --force --options runtime --timestamp \
+        --entitlements "$THIS_DIR/packaging/macos/entitlements.plist" \
+        --sign "$DEV_ID" "$DIST_DIR/$APP_NAME.app"
+    codesign --verify --deep --strict "$DIST_DIR/$APP_NAME.app"
+elif [ -n "$DEV_ID" ]; then
     echo ""
     echo "Notarizing with Apple Developer ID: $DEV_ID"
     BYTEPROOF_DEV_ID="$DEV_ID" "$THIS_DIR/scripts/notarize.sh" "$DIST_DIR/$APP_NAME.app"

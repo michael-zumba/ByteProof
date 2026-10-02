@@ -19,6 +19,9 @@ venv.bak/
 # Licence service runtime data (never commit customer records)
 server/data/
 
+# Previous beta builds kept next to the repo for instant rollback
+previous-versions/
+
 # Distribution / packaging
 .Python
 build/
