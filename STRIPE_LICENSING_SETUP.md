@@ -168,6 +168,22 @@ the four secret values on Render.
 Three things have to exist before a service can run. Only you can do them
 (they involve your card and your GitHub account):
 
+**Which workspace plan?** **Hobby** ($0/month + usage) is enough. According
+to Render's *Platform Features by Plan*, the Pro plan ($25/month) adds
+autoscaling, preview environments, dedicated IPs, per-request HTTP logs,
+metrics streaming, audit logs and Render's own webhook notifications — none
+of which this service uses. Hobby allows 1 member and 25 services; we need
+one service, one disk, one custom domain, and our own application logs (which
+Render shows on every plan). The disk is not a Pro feature: it is
+$0.25/GB/month on every plan.
+
+Two consequences worth knowing: per-request HTTP logs and Render's
+notification webhooks are Pro-only (the service writes its own log lines,
+which do appear); and a service with a disk restarts briefly on each deploy
+instead of zero-downtime — fine for a service that is only needed while a
+customer activates. Render also snapshots disks daily and encrypts them at
+rest.
+
 1. **Payment method.** Render's Starter instance costs about US$7/month, and
    a persistent disk about US$0.25/month; the free instance type has no disk
    and spins down, which a licence service cannot use. Add a card at
@@ -439,6 +455,7 @@ Typical tasks:
 
 | Item | Monthly |
 | --- | --- |
+| Render Hobby workspace | $0 |
 | Render Starter instance | ~US$7 |
 | 1 GB persistent disk | ~US$0.25 |
 | Stripe | per-transaction fees only (plus Alipay's rate where used) |
