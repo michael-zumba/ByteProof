@@ -1,7 +1,7 @@
 {
-  "version": "2.2.2",
-  "release_date": "2026-09-29",
-  "release_notes": "The suggestion panel now reads as clean cards with one Apply all button. The menu bar icon brings the window back, a live edit keeps its place and is never reported as a failure after it lands, and Mail no longer shows \"No text selected\" false alarms. Your keystrokes are no longer written to the support log.",
+  "version": "2.3.0",
+  "release_date": "2026-10-02",
+  "release_notes": "Licensing now runs through Stripe: one key covers two computers, a licence portal moves ByteProof between them, and checkout takes card, Apple Pay, Google Pay and Alipay. Live edits that land late are put right and the hover comes back, a Word proofread no longer stops when Word refuses a redundant Track Changes write, and a refunded or revoked licence is reported clearly.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
   "sha256": {}
