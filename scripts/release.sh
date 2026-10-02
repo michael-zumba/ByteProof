@@ -103,7 +103,15 @@ echo "=== Building Apple Silicon DMG ==="
 "$ROOT/build_macos.sh" arm64
 
 echo "=== Building Intel DMG ==="
-"$ROOT/build_macos.sh" x86_64
+if arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+    "$ROOT/build_macos.sh" x86_64
+else
+    # The x86_64 interpreter needs Rosetta. Missing it must not hold up the
+    # whole release: the feed only serves the Apple Silicon DMG and Windows.
+    echo "Skipped: Rosetta 2 is not installed, so an x86_64 build cannot run here."
+    echo "Install it, then re-run this script to attach the Intel DMG:"
+    echo "  softwareupdate --install-rosetta --agree-to-license"
+fi
 
 # --- Step 4: wait for the Windows build, then upload DMGs --------------------
 
@@ -149,17 +157,43 @@ done
 
 DMG_ARM="$ROOT/ByteProof_Installer_AppleSilicon.dmg"
 DMG_INTEL="$ROOT/ByteProof_Installer_Intel.dmg"
-for dmg in "$DMG_ARM" "$DMG_INTEL"; do
-    if [[ ! -f "$dmg" ]]; then
-        echo "Error: missing $dmg" >&2
-        exit 1
-    fi
-done
+if [[ ! -f "$DMG_ARM" ]]; then
+    echo "Error: missing $DMG_ARM" >&2
+    exit 1
+fi
 
-echo "=== Uploading macOS DMGs to release $TAG ==="
-gh release upload "$TAG" "$DMG_ARM" "$DMG_INTEL" --repo "$REPO" --clobber
+echo "=== Uploading macOS DMG(s) to release $TAG ==="
+if [[ -f "$DMG_INTEL" ]]; then
+    gh release upload "$TAG" "$DMG_ARM" "$DMG_INTEL" --repo "$REPO" --clobber
+else
+    gh release upload "$TAG" "$DMG_ARM" --repo "$REPO" --clobber
+fi
 
 # --- Step 5: publish the update feed to the website --------------------------
+
+echo "=== Hashing the released installers for the update feed ==="
+HASH_DIR="$(mktemp -d)"
+trap 'rm -rf "$HASH_DIR"' EXIT
+gh release download "$TAG" --repo "$REPO" --pattern ByteProof_Windows.zip \
+    --dir "$HASH_DIR" --clobber
+ARM_SHA="$(shasum -a 256 "$DMG_ARM" | awk '{print $1}')"
+WIN_SHA="$(shasum -a 256 "$HASH_DIR/ByteProof_Windows.zip" | awk '{print $1}')"
+python3 - "$WEBSITE_DIR/byteproof-version.json" "$ARM_SHA" "$WIN_SHA" <<'PY'
+import json
+import sys
+
+path, arm_sha, windows_sha = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+data["sha256"] = {
+    "macos_apple_silicon_url": arm_sha,
+    "windows_url": windows_sha,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+print(f"feed checksums: macOS {arm_sha[:12]}…, Windows {windows_sha[:12]}…")
+PY
 
 echo "=== Publishing ByteProof $VERSION to the website ==="
 cd "$WEBSITE_DIR"

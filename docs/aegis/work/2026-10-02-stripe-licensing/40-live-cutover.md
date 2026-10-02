@@ -28,8 +28,8 @@ records what moved and what is left.
    methods and that the NZ GST registration is active under Tax — the
    restricted keys cannot read either setting.
 2. Retire Polar once the website change has been live for a while.
-3. Windows packaging and the public release remain owner-triggered, per the
-   release policy.
+3. Windows packaging and the public release: **done 2026-10-02** as 2.3.0 —
+   see `docs/aegis/work/2026-10-02-release-2.3.0/`.
 
 ## The live purchase test — passed 2026-10-02
 
