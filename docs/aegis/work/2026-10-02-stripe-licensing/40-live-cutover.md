@@ -24,12 +24,31 @@ records what moved and what is left.
 
 ## Left to do
 
-1. **Live purchase test** (owner): buy one NZ$49 licence on the website, check
-   the key on the thank-you page and by email, activate it in the app, then
-   refund it in Stripe and confirm the app reports the revocation.
-2. Confirm in the Stripe Dashboard that **Alipay** is enabled under Payment
+1. Confirm in the Stripe Dashboard that **Alipay** is enabled under Payment
    methods and that the NZ GST registration is active under Tax — the
    restricted keys cannot read either setting.
-3. Retire Polar once the website change has been live for a while.
-4. Windows packaging and the public release remain owner-triggered, per the
+2. Retire Polar once the website change has been live for a while.
+3. Windows packaging and the public release remain owner-triggered, per the
    release policy.
+
+## The live purchase test — passed 2026-10-02
+
+The owner bought a real licence (NZ$1 after a single-use NZ$48 promotion
+code), and the whole cycle behaved:
+
+1. Stripe Checkout → `checkout.session.completed` → licence
+   `BYTP-TSAS-1P7A-4Y4F-VGQB-DRGV` for `zyq.michael@gmail.com`; the key
+   arrived by email.
+2. Activated in the installed 2.3.0-beta.1 app (one device recorded).
+3. **Found and fixed a real bug here**: the thank-you page said "We could not
+   find that checkout session" because the deployed `STRIPE_SECRET_KEY` was
+   the setup key, which cannot read Checkout Sessions. The owner added
+   Checkout Sessions: Read and Charges: Read to that key, and reads worked
+   immediately. The service was then made resilient (`2fce6f4`): `/thanks`
+   answers from the stored licence first, a broken read reports itself
+   honestly, and `/health` exposes `stripe_read_ok`.
+4. Redeploy (Deploy latest commit) preserved every licence row — the
+   persistent disk earned its keep.
+5. Refunded the charge: `charge.refunded` revoked the licence; a fresh
+   machine is refused; the app showed "This license was refunded or revoked"
+   on its next launch and dropped to free mode.

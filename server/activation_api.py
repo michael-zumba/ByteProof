@@ -503,12 +503,17 @@ def create_app(
         machines = store.activations(key)
         registered = any(row["machine_fp"] == machine_fp for row in machines)
         if not registered:
+            revoked = bool(license["revoked"])
             return {
                 "ok": False,
                 "valid": False,
-                "revoked": bool(license["revoked"]),
-                "reason": "revoked" if license["revoked"] else "not_activated",
-                "error": "This computer is not activated for this license key.",
+                "revoked": revoked,
+                "reason": "revoked" if revoked else "not_activated",
+                "error": (
+                    "This license was refunded or revoked."
+                    if revoked
+                    else "This computer is not activated for this license key."
+                ),
             }
         if license["revoked"]:
             return {
