@@ -163,6 +163,29 @@ the four secret values on Render.
 
 ## Part B — the licence service on Render
 
+### B0. A brand-new Render account
+
+Three things have to exist before a service can run. Only you can do them
+(they involve your card and your GitHub account):
+
+1. **Payment method.** Render's Starter instance costs about US$7/month, and
+   a persistent disk about US$0.25/month; the free instance type has no disk
+   and spins down, which a licence service cannot use. Add a card at
+   **avatar (top right) → Account Settings → Billing → Add payment method**.
+2. **GitHub connection.** Render reads the repository through its GitHub
+   app. Go to **New + → Blueprint**, choose *Connect GitHub* when prompted,
+   approve the Render app for the `michael-zumba` account, pick **Only select
+   repositories**, tick **ByteProof**, and install. (You can stop there and
+   come back; the connection is what matters.)
+3. **API key (optional).** Only needed if someone or something else is
+   creating the service for you: **avatar → Account Settings → API Keys →
+   Create API Key**, name it, choose a short expiry, copy the `rnd_...`
+   value (it is shown once).
+
+With those three done, either follow B1–B5 in the dashboard, or hand the API
+key over and let the service, disk, environment variables and domain be
+created through Render's API instead.
+
 ### B1. Deploy
 
 1. Sign in at <https://dashboard.render.com>.
