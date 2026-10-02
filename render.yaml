@@ -37,17 +37,11 @@ services:
       - key: BYTEPROOF_DATA_DIR
         value: /data
       # ---------------------------------------------------------------- Email
-      - key: BYTEPROOF_SMTP_HOST
-        sync: false
-      - key: BYTEPROOF_SMTP_PORT
-        value: "587"
-      - key: BYTEPROOF_SMTP_USER
-        sync: false
-      - key: BYTEPROOF_SMTP_PASSWORD
-        sync: false
-      - key: BYTEPROOF_SMTP_FROM
-        sync: false
-      - key: BYTEPROOF_SMTP_TLS
-        value: "true"
-      - key: BYTEPROOF_BACKUP_EMAIL
-        sync: false
+      # Deliberately not in the Blueprint: the first deploy should only ask
+      # for the six essentials. Add these in the Dashboard afterwards
+      # (Environment tab -> Add Environment Variable):
+      #   BYTEPROOF_SMTP_HOST, BYTEPROOF_SMTP_PORT=587, BYTEPROOF_SMTP_USER,
+      #   BYTEPROOF_SMTP_PASSWORD, BYTEPROOF_SMTP_FROM, BYTEPROOF_SMTP_TLS=true,
+      #   BYTEPROOF_BACKUP_EMAIL
+      # Until then the licence key is still shown on the thank-you page; only
+      # the courtesy email is skipped.
