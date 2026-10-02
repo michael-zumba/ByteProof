@@ -23,12 +23,19 @@ State as of 2026-10-02 10:35.
   (pid 74460); previous beta saved to
   `previous-versions/ByteProof_2.2.3-beta.1.app`.
 
-## Blocked (owner action)
+## Blocked (owner action) — resolved the same day
 
 - Apple notarization returned HTTP 403 — "a required agreement is missing or
-  has expired". The owner must accept the current Apple Developer agreement
-  in App Store Connect before the next build can notarize or produce a DMG.
-  The local beta is unaffected.
+  has expired".
+- **Resolved 2026-10-02.** The gate was the team's *Free Apps Agreement*:
+  Business → Agreements showed it becoming effective 2 Oct 2026 – 15 Aug
+  2027. Once the owner accepted it, `notarytool history` answered again and
+  the **2.3.0-beta.1** build notarised — app and DMG accepted and stapled
+  (DMG submission `543676fd-c82d-4a54-999f-ef75825f73d4`), `spctl` reports
+  "accepted, source=Notarized Developer ID".
+- Lesson for future local betas: `BYTEPROOF_SKIP_NOTARIZE=1` still signs with
+  the Developer ID, because a differently-signed build makes macOS drop
+  ByteProof's Accessibility permission.
 
 ## Next
 
