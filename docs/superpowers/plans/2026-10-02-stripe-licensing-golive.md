@@ -25,25 +25,20 @@ DNS access.
 
 ### 1. Stripe (live mode)
 
-1. Confirm the account is the NZ ByteMind Ltd account and that payouts are
-   enabled.
-2. **Settings → Payment methods**: enable **Alipay** (and keep Card, Apple
-   Pay, Google Pay, Link on). WeChat Pay cannot be enabled for a NZ account.
-3. **Settings → Tax**: confirm the NZ GST registration and the head office
-   address are present; that is what makes `automatic_tax` collect correctly.
-4. Create a restricted key (`rk_live_...`) with **Checkout Sessions: Read**
-   and **Charges: Read** only. This is what the service uses.
-5. Run the setup script with a key that can write products/prices/links/
-   webhooks (a temporary live `sk_` key, or run it from the Dashboard by
-   hand):
+**Done on 2026-10-02** — see
+`docs/aegis/work/2026-10-02-stripe-licensing/30-live-stripe-setup.md`:
+product `prod_VMg2Qo89P7u2bM`, price `price_1ULwgu2BJbkpIesfs1siXnAk`
+(NZ$49, tax-inclusive), Payment Link
+<https://buy.stripe.com/fZueV61d99tv52vaOfgYU00>, webhook
+`we_1ULwqf2BJbkpIesfu7IRLfBp`. The pre-existing link was adopted and now
+redirects to the thank-you page; the webhook signing secret was recorded at
+setup time (it goes to Render only).
 
-   ```bash
-   STRIPE_API_KEY=sk_live_... python scripts/stripe_setup.py \
-       --base-url https://api.bytemind.co.nz
-   ```
-
-   It prints the Payment Link, the webhook endpoint id and the webhook
-   signing secret. Record the secret.
+Still to confirm in the Dashboard: **Alipay** enabled under Payment methods,
+and the NZ GST registration active under Tax (the setup key could not read
+either). The service needs its **own** restricted key with Checkout
+Sessions: Read and Charges: Read; the setup key cannot read sessions or
+charges.
 
 ### 2. Render (licence service)
 
@@ -63,8 +58,8 @@ DNS access.
 
 ### 3. Website
 
-Replace the Polar checkout in both language versions with the live Stripe
-Payment Link, and mention Alipay (important for the Chinese page):
+**Edits made in the working tree, not yet pushed** (the push waits for
+`/health` to answer):
 
 - `byteproof.html:540` and `zh/byteproof.html:540`: swap the `buy.polar.sh`
   href for the Payment Link URL.

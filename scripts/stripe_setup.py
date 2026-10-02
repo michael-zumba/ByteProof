@@ -65,12 +65,14 @@ def find_or_create_product(client: stripe.StripeClient) -> dict[str, Any]:
 def find_or_create_price(
     client: stripe.StripeClient, product_id: str, amount: int, currency: str
 ) -> dict[str, Any]:
+    """Reuse a one-time, tax-inclusive price for this product, or create it."""
     prices = client.v1.prices.list({"product": product_id, "active": True, "limit": 100})
     for price in prices.auto_paging_iter():
         if (
             price.unit_amount == amount
             and price.currency == currency.lower()
             and price.type == "one_time"
+            and price.tax_behavior == "inclusive"
         ):
             print(f"Price: reusing {price.id} ({amount / 100:.2f} {currency})")
             return _plain(price)
@@ -95,29 +97,36 @@ def find_or_create_payment_link(
     success_url: str,
     automatic_tax: bool = True,
 ) -> dict[str, Any]:
-    links = client.v1.payment_links.list({"active": True, "limit": 100})
-    for link in links.auto_paging_iter():
-        line_items = client.v1.payment_links.list_line_items(link.id)
-        for item in line_items.auto_paging_iter():
-            if getattr(item.price, "id", None) == price_id:
-                print(f"Payment Link: reusing {link.url}")
-                return _plain(link)
-    params: dict[str, Any] = {
-        "line_items": [{"price": price_id, "quantity": 1}],
+    """Reuse the link for this price, updating how it finishes, or create it.
+
+    An existing link is *adopted* rather than duplicated: its Payment Link URL
+    is what the website and customers already have.
+    """
+    wanted: dict[str, Any] = {
         "after_completion": {
             "type": "redirect",
             "redirect": {"url": success_url},
         },
         "allow_promotion_codes": True,
         "metadata": PRODUCT_METADATA,
+    }
+    if automatic_tax:
+        wanted["automatic_tax"] = {"enabled": True}
+    links = client.v1.payment_links.list({"active": True, "limit": 100})
+    for link in links.auto_paging_iter():
+        line_items = client.v1.payment_links.line_items.list(link.id)
+        for item in line_items.auto_paging_iter():
+            if getattr(item.price, "id", None) == price_id:
+                updated = client.v1.payment_links.update(link.id, wanted)
+                print(f"Payment Link: adopted and updated {link.url}")
+                return _plain(updated)
+    params: dict[str, Any] = {
+        "line_items": [{"price": price_id, "quantity": 1}],
+        **wanted,
         # payment_method_types is deliberately omitted: Stripe shows the
         # dynamic payment methods enabled in the Dashboard (card, Apple Pay,
         # Google Pay, Alipay...).
     }
-    if automatic_tax:
-        # Stripe Tax needs a head office address and an active registration.
-        # Unclaimed test sandboxes have neither, so this is switchable.
-        params["automatic_tax"] = {"enabled": True}
     link = client.v1.payment_links.create(params)
     print(f"Payment Link: created {link.url}")
     return _plain(link)
