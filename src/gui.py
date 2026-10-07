@@ -2,7 +2,6 @@
 import copy
 import os
 import platform
-import shutil
 import subprocess
 import threading
 import time
@@ -215,6 +214,13 @@ class AppNameLineEdit(QLineEdit):
 
         except Exception as exc:  # see the note above
             print(f"ByteProof: dropEvent failed: {exc}")
+# The Automation list shows whole trigger cards: room for three rows before it
+# starts scrolling, and never taller than four so the card (and its action
+# footer) always fits the settings page without the page itself scrolling.
+AUTOMATION_LIST_MIN_HEIGHT = 204
+AUTOMATION_LIST_MAX_ROWS = 4
+
+
 class AutomationRuleCard(QWidget):
     """A compact trigger card used in the Automation settings page."""
 
@@ -371,6 +377,44 @@ def evaluate_apply_verification(
 def is_update_dismissed(remote_version: str, settings: dict[str, Any]) -> bool:
     """True when the user already dismissed this exact update version."""
     return bool(remote_version) and settings.get("general", {}).get("skipped_update_version") == remote_version
+
+
+def live_check_platform_supported() -> bool:
+    """Whether this platform has a way to read another app's selection.
+
+    macOS reads every app through Accessibility and AppleScript; Windows
+    reads Microsoft Word through COM automation. Everywhere else Live Check
+    has no reader, so its settings page stays disabled.
+    """
+    return platform.system() in ("Darwin", "Windows")
+
+
+def installed_app_bundle_path(app_name: str = APP_NAME) -> str:
+    """The ByteProof bundle an update should replace.
+
+    Prefer the running bundle when it lives somewhere stable. A bundle
+    running straight from a mounted DMG, or from App Translocation's
+    read-only copy, is skipped: replacing those either fails or leaves the
+    real install untouched.
+    """
+    running = ""
+    try:
+        from AppKit import NSBundle
+
+        candidate = str(NSBundle.mainBundle().bundlePath())
+        if candidate.endswith(".app"):
+            running = candidate
+    except Exception:
+        running = ""
+    if running and not running.startswith("/Volumes/") and "AppTranslocation" not in running:
+        return running
+    for path in (
+        os.path.join("/Applications", f"{app_name}.app"),
+        os.path.join(os.path.expanduser("~"), "Applications", f"{app_name}.app"),
+    ):
+        if os.path.isdir(path):
+            return path
+    return os.path.join("/Applications", f"{app_name}.app")
 
 
 class LiveAppsList(QListWidget):
@@ -1453,6 +1497,7 @@ class SettingsDialog(QDialog):
     combo_spelling: QComboBox
     combo_style: QComboBox
     combo_comment: QComboBox
+    comment_row: QWidget
     combo_context: QComboBox
     live_delay_slider: QSlider
     live_delay_label: QLabel
@@ -2086,38 +2131,11 @@ class SettingsDialog(QDialog):
 
         self.combo_comment = QComboBox()
         self.combo_comment.addItems(["None", "Language", "Technical (Reviewer)"])
-
-        access = get_access_status()
-        comment_locked = access.get("tier") == "free"
-        if comment_locked:
-            self.combo_comment.setCurrentIndex(0)
-            self.combo_comment.setEnabled(False)
-            self.combo_comment.setToolTip(
-                "Reviewer comments require a ByteProof license."
-            )
-        else:
-            current_comment = self.settings.get("general", {}).get(
-                "comment_type", "None"
-            )
-            comment_index = self.combo_comment.findText(current_comment)
-            if comment_index >= 0:
-                self.combo_comment.setCurrentIndex(comment_index)
-            else:
-                self.combo_comment.setCurrentIndex(0)
-        spelling_layout.addWidget(
-            make_setting_row(
-                "Add Reviewer Comment",
-                (
-                    "Reviewer comments require a ByteProof license."
-                    if comment_locked
-                    else (
-                        "Adds a Word reviewer comment. Proofreading quality is "
-                        "the same with or without a comment."
-                    )
-                ),
-                self.combo_comment,
-            )
+        self.comment_row = make_setting_row(
+            "Add Reviewer Comment", "", self.combo_comment
         )
+        self._apply_comment_row_state()
+        spelling_layout.addWidget(self.comment_row)
 
         self.combo_context = QComboBox()
         self.combo_context.addItems(
@@ -2171,6 +2189,44 @@ class SettingsDialog(QDialog):
     def update_temp_label(self, value: int) -> None:
         temp = value / 10.0
         self.temp_label.setText(f"{temp:.1f}")
+
+    def _comment_row_hint(self, locked: bool) -> str:
+        if locked:
+            return "Reviewer comments require a ByteProof license."
+        return (
+            "Adds a Word reviewer comment. Proofreading quality is "
+            "the same with or without a comment."
+        )
+
+    def _apply_comment_row_state(self) -> None:
+        """Show the comment row as the current licence tier allows."""
+        locked = get_access_status().get("tier") == "free"
+        self.combo_comment.setEnabled(not locked)
+        if locked:
+            self.combo_comment.setCurrentIndex(0)
+        else:
+            current_comment = self.settings.get("general", {}).get(
+                "comment_type", "None"
+            )
+            index = self.combo_comment.findText(current_comment)
+            self.combo_comment.setCurrentIndex(max(index, 0))
+        hint = self._comment_row_hint(locked)
+        self.combo_comment.setToolTip(hint if locked else "")
+        self.comment_row.setToolTip(hint)
+
+    def refresh_license_gated_rows(self) -> None:
+        """Bring licence-gated controls up to date after an activate/deactivate.
+
+        The comment dropdown and the cloud provider buttons are built from the
+        tier the dialog opened with. Activating from the License page in this
+        same dialog used to leave the comment row locked, still saying a
+        licence was required, until Settings was closed and reopened - which is
+        exactly when a new customer goes looking for reviewer comments. Only
+        the gated state is rewritten, so unsaved edits on other rows survive.
+        """
+        self._apply_comment_row_state()
+        self._refresh_connect_tab()
+        self.refresh_sidebar_status()
 
     def _on_menu_bar_only_toggled(self, checked: bool) -> None:
         """Menu-bar-only mode only works when closing keeps the app alive."""
@@ -2531,11 +2587,22 @@ class SettingsDialog(QDialog):
         )
         layout.addWidget(hotkey_group)
 
-        if platform.system() != "Darwin":
+        if platform.system() == "Windows":
+            # Windows Live Check watches Word through COM automation; the
+            # Accessibility path that covers other apps is macOS-only, so the
+            # rest of the platforms keep the manual proofread hotkey.
+            note = QLabel(
+                "On Windows, Live Check watches Microsoft Word. In other "
+                "apps, select text and press the proofread hotkey instead."
+            )
+            note.setWordWrap(True)
+            note.setObjectName("SettingsValue")
+            layout.addWidget(note)
+        elif not live_check_platform_supported():
             # The engine reads selections through the macOS Accessibility API.
             note = QLabel(
-                "Live Check is available on macOS only for now. On Windows, "
-                "select text and press the proofread hotkey instead."
+                "Live Check is available on macOS and Windows (Word only) "
+                "for now. Select text and press the proofread hotkey instead."
             )
             note.setWordWrap(True)
             note.setObjectName("SettingsValue")
@@ -2745,6 +2812,14 @@ class SettingsDialog(QDialog):
             if self.APP_ID_ALIASES.get(marker.lower(), marker)
             not in self._live_hidden_apps
         ]
+        if platform.system() == "Windows":
+            # Windows Live Check reads Word through COM. Listing the macOS
+            # apps here would offer switches for apps the poll never reads.
+            entries = [
+                (marker, name)
+                for marker, name in entries
+                if "word" in marker.lower() or "word" in name.lower()
+            ]
         for key in rules:
             marker = str(key).strip()
             canonical = self.APP_ID_ALIASES.get(marker.lower(), marker)
@@ -2822,7 +2897,16 @@ class SettingsDialog(QDialog):
     def init_automation_tab(self) -> None:
         page = QWidget()
         self.automation_page = page
-        layout = QVBoxLayout(page)
+        # A rebuilt page (Restore Defaults) starts with the triggers hidden;
+        # the flag must not survive the old widgets.
+        self._automation_rules_shown = False
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.setSpacing(14)
 
@@ -2834,6 +2918,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         group, group_layout = settings_section("Automatic Context Triggers")
+        group.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
 
         
         self.automation_enabled_check = QCheckBox()
@@ -2866,23 +2953,41 @@ class SettingsDialog(QDialog):
         )
 
         group_layout.addSpacing(10)
+        # One card holds the list and its actions. The buttons used to sit on
+        # the page background under a clipped list, which read as if they were
+        # floating over the trigger rows; a card with the actions in its own
+        # footer makes the list and its controls one object.
+        self.automation_card = QFrame()
+        self.automation_card.setObjectName("AutomationCard")
+        card_layout = QVBoxLayout(self.automation_card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+
         self.automation_list = QListWidget()
+        self.automation_list.setObjectName("AutomationList")
+        self.automation_list.setFrameShape(QFrame.Shape.NoFrame)
         self.automation_list.setSelectionMode(
             QListWidget.SelectionMode.SingleSelection
         )
         self.automation_list.setSpacing(6)
-        self.automation_list.setMinimumHeight(240)
+        # Fit whole trigger cards: three rows at minimum, six before the list
+        # starts scrolling, so a card is never sliced in half by the viewport.
+        self.automation_list.setMinimumHeight(AUTOMATION_LIST_MIN_HEIGHT)
         self.automation_list.setSizeAdjustPolicy(
             QListWidget.SizeAdjustPolicy.AdjustToContents
         )
         self.automation_list.itemSelectionChanged.connect(
             self._update_automation_card_selection
         )
-        group_layout.addWidget(self.automation_list)
+        card_layout.addWidget(self.automation_list, 1)
 
-        self.automation_actions_widget = QWidget()
+        self.automation_actions_widget = QFrame()
+        self.automation_actions_widget.setObjectName("AutomationFooter")
+        self.automation_actions_widget.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         button_row = QHBoxLayout(self.automation_actions_widget)
-        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setContentsMargins(12, 10, 12, 10)
         button_row.setSpacing(8)
         self.automation_add_btn = QPushButton("Add Trigger")
         self.automation_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2891,23 +2996,35 @@ class SettingsDialog(QDialog):
         self.automation_remove_btn = QPushButton("Remove Selected")
         self.automation_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.automation_remove_btn.setObjectName("DangerBtn")
+        self.automation_remove_btn.setEnabled(False)
+        self.automation_remove_btn.setToolTip(
+            "Select a trigger in the list to remove it."
+        )
         self.automation_remove_btn.clicked.connect(self._remove_automation_rule)
         self.automation_reset_btn = QPushButton("Reset Defaults")
         self.automation_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.automation_reset_btn.clicked.connect(self._reset_automation_rules)
-        button_row.addWidget(self.automation_add_btn)
-        button_row.addWidget(self.automation_remove_btn)
-        button_row.addWidget(self.automation_reset_btn)
         button_row.addStretch()
-        group_layout.addWidget(self.automation_actions_widget)
+        button_row.addWidget(self.automation_reset_btn)
+        button_row.addWidget(self.automation_remove_btn)
+        button_row.addWidget(self.automation_add_btn)
+        card_layout.addWidget(self.automation_actions_widget)
+
+        group_layout.addWidget(self.automation_card)
 
         layout.addWidget(group)
 
         self._populate_automation_rules(
             self._automation_rules_from_settings(),
         )
+        self.automation_card.setVisible(False)
         self.automation_list.setVisible(False)
         self.automation_actions_widget.setVisible(False)
+        # Extra room goes under the card, not inside its footer.
+        layout.addStretch(1)
+        scroll.setWidget(content)
+        self._automation_scroll_content = content
+        outer.addWidget(scroll)
         self.pages.addWidget(page)
 
     def _automation_rules_from_settings(self) -> list[dict[str, str]]:
@@ -2954,13 +3071,51 @@ class SettingsDialog(QDialog):
             self.automation_summary_label.setText("1 trigger configured")
         else:
             self.automation_summary_label.setText(f"{count} triggers configured")
+        self._update_automation_list_height()
 
+    def _update_automation_list_height(self) -> None:
+        """Size the list to whole trigger cards, within the 3-6 row window.
+
+        ``AdjustToContents`` reports a single card's height, so the viewport
+        used to stop wherever the settings page ran out of room - mid-card.
+        Asking for the exact height of N whole rows keeps every visible card
+        intact and hands the rest to the list's own scrollbar.
+        """
+        count = self.automation_list.count()
+        first = self.automation_list.item(0)
+        row = first.sizeHint().height() if first is not None else 0
+        row = max(row, self.automation_list.sizeHintForRow(0))
+        footer = self.automation_actions_widget.sizeHint().height() or 52
+        if count <= 0 or row <= 0:
+            self.automation_list.setFixedHeight(AUTOMATION_LIST_MIN_HEIGHT)
+            self.automation_card.setFixedHeight(
+                AUTOMATION_LIST_MIN_HEIGHT + footer + 2
+            )
+            return
+        spacing = max(0, self.automation_list.spacing())
+        # Whole rows only: card rows, the spacing QListView puts around each
+        # one, the list's own 8px padding, and slack so the last card - border
+        # included - is never clipped by the viewport.
+        rows = min(count, AUTOMATION_LIST_MAX_ROWS)
+        wanted = rows * row + (2 * rows) * spacing + 16
+        wanted = max(AUTOMATION_LIST_MIN_HEIGHT, wanted)
+        self.automation_list.setFixedHeight(wanted)
+        # Pin the card to its content: otherwise the page's leftover height
+        # stretches the card and pads the footer with dead space.
+        self.automation_card.setFixedHeight(wanted + footer + 2)
+        # A scroll area grows its widget with the content but does not shrink
+        # it again; without this the page keeps the old, taller height (and
+        # the empty space lands inside the card) until the dialog is reopened.
+        content = getattr(self, "_automation_scroll_content", None)
+        if content is not None:
+            content.adjustSize()
     def _update_automation_card_selection(self) -> None:
         selected_items = [
             self.automation_list.item(index)
             for index in range(self.automation_list.count())
             if self.automation_list.item(index).isSelected()
         ]
+        self.automation_remove_btn.setEnabled(bool(selected_items))
         for index in range(self.automation_list.count()):
             item = self.automation_list.item(index)
             widget = self.automation_list.itemWidget(item)
@@ -2968,7 +3123,12 @@ class SettingsDialog(QDialog):
                 widget._apply_selected_style(item in selected_items)
 
     def _toggle_automation_rules(self) -> None:
-        visible = not self.automation_list.isVisible()
+        # Track the state explicitly: isVisible() is false whenever an
+        # ancestor is hidden (tests, or a settings dialog that has not been
+        # shown yet), which would make a second toggle a no-op.
+        visible = not getattr(self, "_automation_rules_shown", False)
+        self._automation_rules_shown = visible
+        self.automation_card.setVisible(visible)
         self.automation_list.setVisible(visible)
         self.automation_actions_widget.setVisible(visible)
         self.automation_toggle_btn.setText(
@@ -3195,6 +3355,7 @@ class SettingsDialog(QDialog):
         self.automation_list.addItem(item)
         self.automation_list.setItemWidget(item, card)
         self.automation_list.setCurrentItem(item)
+        self._update_automation_summary()
 
     def _installed_apps_for_trigger(self) -> list[dict[str, Any]]:
         cached = getattr(self, "_installed_apps_cache", None)
@@ -3406,6 +3567,7 @@ class SettingsDialog(QDialog):
         if row >= 0:
             self.automation_list.takeItem(row)
             self._update_automation_summary()
+            self._update_automation_card_selection()
 
     def pynput_to_qt(self, pynput_str: str) -> str:
         if not pynput_str:
@@ -4535,6 +4697,9 @@ class SettingsDialog(QDialog):
             )
             self.settings["license"]["status"] = "licensed"
             self._refresh_license_tab()
+            # The General page was built while this machine was unlicensed, so
+            # its licence-gated rows have to be told the tier changed.
+            self.refresh_license_gated_rows()
             parent = self.parent()
             if isinstance(parent, ProofreaderApp):
                 parent._update_proofread_button()
@@ -4813,6 +4978,7 @@ class SettingsDialog(QDialog):
                 "A device slot is now free.",
             )
             self._refresh_license_tab()
+            self.refresh_license_gated_rows()
             parent = _find_owner_window(self)
             if isinstance(parent, ProofreaderApp):
                 parent._update_proofread_button()
@@ -5071,14 +5237,15 @@ class ProofreaderApp(QMainWindow):
         self.toast = ToastNotification()
         self._start_app_tracking()
         self.live_service = None
-        # The poll reads the real frontmost app through Accessibility and
-        # AppleScript, so it is pointless (and disruptive) when the app runs
-        # without a screen - offscreen Qt, i.e. the test suite.
+        # The poll reads the real frontmost app's selection: through
+        # Accessibility and AppleScript on macOS, and through Word's COM
+        # automation on Windows. It is pointless (and disruptive) when the app
+        # runs without a screen - offscreen Qt, i.e. the test suite.
         offscreen = False
         _app = QApplication.instance()
         if _app is not None:
             offscreen = "offscreen" in _app.platformName()
-        if platform.system() == "Darwin" and not offscreen:
+        if live_check_platform_supported() and not offscreen:
             from .live_service import LivePreviewService
 
             self.live_service = LivePreviewService(self)
@@ -5101,9 +5268,9 @@ class ProofreaderApp(QMainWindow):
             app_inst = QApplication.instance()
             if app_inst is not None:
                 app_inst.aboutToQuit.connect(self.live_service.stop)
-            # Post-update hint: a reinstall can silently revoke the
+            # Post-update hint (macOS): a reinstall can silently revoke the
             # Accessibility grant, so surface the re-grant path once.
-            if note_launch_version(self.settings):
+            if platform.system() == "Darwin" and note_launch_version(self.settings):
                 save_runtime_settings(self.settings)
                 from .generic_editing import GenericTextEditor
 
@@ -5142,6 +5309,7 @@ class ProofreaderApp(QMainWindow):
         QTimer.singleShot(2500, self._run_cache_cleanup)
         if not getattr(self, "_offscreen_run", False):
             QTimer.singleShot(3000, self._check_for_app_updates)
+            QTimer.singleShot(3200, self._check_update_result_marker)
 
     def _copy_corrected_text(self) -> None:
         if not self.last_corrected:
@@ -5597,6 +5765,19 @@ class ProofreaderApp(QMainWindow):
                     if show_permission_message and not self.hotkey_permission_warned:
                         self.hotkey_permission_warned = True
                         self._show_hotkey_permission_message()
+            elif not started:
+                # No permission is involved here (Windows allows its low-level
+                # keyboard hooks without one), so a failed start is a real
+                # failure. Reporting "Ready" here is what made broken Windows
+                # hotkeys look like they were working.
+                detail = getattr(self.hotkey_manager, "last_error", "") or ""
+                self.status_label.setText(
+                    "Hotkeys unavailable — see ByteProof's debug_hotkeys.log."
+                )
+                self.hotkey_retry_tick = 0
+                self.hotkey_timer.stop()
+                if detail:
+                    print(f"Global hotkeys unavailable: {detail}")
             else:
                 self.status_label.setText("Ready")
                 self.hotkey_retry_tick = 0
@@ -5977,6 +6158,39 @@ class ProofreaderApp(QMainWindow):
         worker.done.connect(self._on_license_validation_result)
         worker.start()
 
+    def _check_update_result_marker(self) -> None:
+        """Report how the unattended update ended, on the first launch after."""
+        from .app_version import take_update_result
+
+        result = take_update_result(get_app_support_dir())
+        if not result:
+            return
+        status = str(result.get("status") or "")
+        version = str(result.get("version") or "")
+        if status == "ok":
+            message = (
+                f"{APP_NAME} updated to {version}."
+                if version
+                else f"{APP_NAME} updated."
+            )
+            self._show_toast(message, kind="success")
+            return
+        if status not in ("failed", "manual"):
+            return
+        message = str(
+            result.get("message")
+            or "ByteProof could not install the update automatically."
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("Update Not Installed")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(message)
+        box.setInformativeText(
+            "The installer has been opened — drag ByteProof to Applications "
+            "to finish, or try Settings → Updates again."
+        )
+        box.exec()
+
     def _run_cache_cleanup(self) -> None:
         """Silently tidy logs, partials, and old models in the background.
 
@@ -6059,6 +6273,9 @@ class ProofreaderApp(QMainWindow):
         refresh = getattr(dialog, "refresh_sidebar_status", None)
         if callable(refresh):
             refresh()
+        gated = getattr(dialog, "refresh_license_gated_rows", None)
+        if callable(gated):
+            gated()
         if ok:
             self._update_proofread_button()
             if message and "@" in message:
@@ -7451,82 +7668,68 @@ class ProofreaderApp(QMainWindow):
         else:
             self.status_label.setText("Downloading update…")
 
-    def _install_macos_update(self, dmg_path: str) -> bool:
-        """Install a downloaded macOS DMG and relaunch ByteProof unattended."""
-        attach = subprocess.run(
-            [
-                "hdiutil",
-                "attach",
-                dmg_path,
-                "-nobrowse",
-                "-noverify",
-                "-noautoopen",
-                "-quiet",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if attach.returncode != 0:
-            return False
+    def _stage_macos_update(self, dmg_path: str) -> bool:
+        """Hand the downloaded DMG to a detached updater and quit into it.
 
-        volume = ""
-        for line in attach.stdout.splitlines():
-            parts = [part.strip() for part in line.split("\t")]
-            if len(parts) >= 3 and parts[2].startswith("/Volumes/"):
-                volume = parts[2]
-                break
-        if not volume:
-            fallback = os.path.join("/Volumes", APP_NAME)
-            if os.path.isdir(fallback):
-                volume = fallback
-        if not volume:
-            subprocess.run(
-                ["hdiutil", "detach", dmg_path, "-quiet"], check=False
-            )
-            return False
+        The swap has to happen while ByteProof is not running, so the helper
+        waits for this process to exit, replaces the bundle, and reopens the
+        new build. Nothing here touches the running bundle, which is why the
+        user never sees macOS' "'ByteProof' is open" warning.
 
-        app_path = os.path.join(volume, f"{APP_NAME}.app")
-        dest_path = os.path.join("/Applications", f"{APP_NAME}.app")
-        if not os.path.exists(app_path) or not os.path.isdir("/Applications"):
-            subprocess.run(["hdiutil", "detach", volume, "-quiet"], check=False)
-            return False
+        The new bundle is copied next to the installed one before quitting, so
+        the headless step is only two renames and a refusal cannot leave the
+        machine without a working app.
+        """
+        from .app_version import stage_macos_payload, stage_macos_update
 
-        backup_path = dest_path + ".backup"
-        moved_old = False
         try:
-            if os.path.exists(dest_path):
-                if os.path.exists(backup_path):
-                    shutil.rmtree(backup_path, ignore_errors=True)
-                shutil.move(dest_path, backup_path)
-                moved_old = True
+            dest_path = installed_app_bundle_path()
+            # Copy the new bundle next to the old one while the app is still
+            # running: if macOS refuses the copy (App Management permission,
+            # a read-only location), the fallback dialog appears with the app
+            # still up instead of a failed install after it has quit.
+            staging_path = stage_macos_payload(dmg_path, dest_path)
+            if not staging_path:
+                from .generic_editing import _debug_log
 
-            copy_result = subprocess.run(
-                ["/usr/bin/ditto", app_path, dest_path],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if copy_result.returncode != 0:
-                if moved_old and os.path.exists(backup_path):
-                    if os.path.exists(dest_path):
-                        shutil.rmtree(dest_path, ignore_errors=True)
-                    shutil.move(backup_path, dest_path)
+                _debug_log(
+                    "UPDATE: could not copy the new bundle next to "
+                    f"{dest_path}; offering the manual install"
+                )
                 return False
+            script_path = stage_macos_update(
+                dmg_path=dmg_path,
+                staging_path=staging_path,
+                dest_path=dest_path,
+                pid=os.getpid(),
+                version=str(self.pending_update_version or ""),
+                support_dir=get_app_support_dir(),
+            )
+            subprocess.Popen(
+                ["/bin/bash", script_path],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            from .generic_editing import _debug_log
 
-            subprocess.run(["hdiutil", "detach", volume, "-quiet"], check=False)
-            if moved_old and os.path.exists(backup_path):
-                shutil.rmtree(backup_path, ignore_errors=True)
-
-            # Launch the new app before the current one exits so the user is
-            # never left without a running instance.
-            subprocess.Popen(["open", "-n", dest_path])
+            _debug_log(
+                f"UPDATE: unattended installer staged for {dest_path}"
+            )
             return True
-        except OSError:
-            if moved_old and os.path.exists(backup_path) and not os.path.exists(dest_path):
-                shutil.move(backup_path, dest_path)
-            subprocess.run(["hdiutil", "detach", volume, "-quiet"], check=False)
+        except Exception as exc:
+            from .generic_editing import _debug_log
+
+            _debug_log(f"UPDATE: could not stage the unattended installer: {exc}")
             return False
+
+    def _quit_for_update(self) -> None:
+        """Leave the stage to the detached installer and exit."""
+        try:
+            self._save_window_geometry()
+        except Exception:
+            pass
+        QApplication.quit()
 
     def _handle_download_finished(self, download_path: str) -> None:
         if download_path and os.path.exists(download_path):
@@ -7534,12 +7737,24 @@ class ProofreaderApp(QMainWindow):
                 ".dmg"
             ):
                 self.status_label.setText("Installing update…")
-                if self._install_macos_update(download_path):
-                    self.status_label.setText("Update installed. Restarting…")
-                    QTimer.singleShot(700, QApplication.quit)
+                if self._stage_macos_update(download_path):
+                    self.status_label.setText(
+                        "Updating — ByteProof will reopen automatically…"
+                    )
+                    self._show_toast(
+                        "Installing the update — ByteProof will reopen "
+                        "automatically.",
+                        kind="success",
+                    )
+                    QTimer.singleShot(900, self._quit_for_update)
                     return
 
-            webbrowser.open("file://" + download_path)
+            # A bare "file://" + path is not a valid URI on Windows
+            # ("file://C:\Users\..."); Path.as_uri() spells both platforms
+            # correctly, spaces and all.
+            from pathlib import Path
+
+            webbrowser.open(Path(download_path).resolve().as_uri())
             self.status_label.setText("Update downloaded. Opening installer...")
             done_msg = QMessageBox(self)
             done_msg.setWindowTitle("Download Complete")
@@ -7554,9 +7769,11 @@ class ProofreaderApp(QMainWindow):
                 )
             else:
                 done_informative = (
-                    "The installer has been opened.\n\n"
-                    "Double-click the DMG file in your Downloads folder if it did not open automatically.\n"
-                    "Drag ByteProof to Applications to complete the update.\n\n"
+                    "macOS did not let ByteProof replace itself automatically, "
+                    "so the installer has been opened instead.\n\n"
+                    "Double-click the DMG file in your Downloads folder if it "
+                    "did not open automatically, then drag ByteProof to "
+                    "Applications to complete the update.\n\n"
                     "Your settings, license, and hotkeys are stored separately and will be kept."
                 )
             done_msg.setInformativeText(

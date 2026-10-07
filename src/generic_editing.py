@@ -599,6 +599,10 @@ class GenericTextEditor:
             "com.microsoft.word" in bundle
             or "microsoft word" in name
             or exe.endswith("winword.exe")
+            # Windows titles end in " - Word". The exe lookup needs
+            # PROCESS_QUERY_LIMITED_INFORMATION, which an elevated Word does
+            # not grant, so the title has to stand on its own there.
+            or name.endswith(" - word")
         )
 
     def get_selection(self, target: dict[str, Any]) -> str:

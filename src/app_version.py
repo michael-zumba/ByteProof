@@ -15,7 +15,10 @@ import hashlib
 import json
 import os
 import platform
+import shlex
+import shutil
 import ssl
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -293,3 +296,276 @@ def _log_update(message: str) -> None:
 def _get_download_url(version_info: dict[str, Any]) -> str | None:
     value = version_info.get(_artifact_key(version_info))
     return value if isinstance(value, str) and value.strip() else None
+
+
+# --- macOS unattended install ------------------------------------------------
+#
+# The app cannot replace its own bundle while it is running without macOS
+# complaining that ByteProof is open (and Finder offering to close it first).
+# So the app quits itself and hands the swap to a detached shell helper: the
+# helper waits for the process to exit, replaces the bundle, clears the
+# quarantine flag, and reopens the new build. The old bundle is kept until the
+# copy has verified, so a failed update leaves a working app behind and the
+# next launch can say so.
+
+_MACOS_UPDATE_TEMPLATE = r"""#!/bin/bash
+# ByteProof unattended updater. Written by the app; safe to delete.
+set -u
+
+APP_PID=@PID@
+DMG=@DMG@
+DEST=@DEST@
+STAGING=@STAGING@
+LOG=@LOG@
+RESULT=@RESULT@
+APP_NAME=@APP_NAME@
+VERSION=@VERSION@
+
+log() {
+  printf '%s %s\n' "$(/bin/date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG" 2>/dev/null
+}
+
+write_result() {
+  printf '{"status":"%s","message":"%s","version":"%s"}\n' "$1" "$2" "$VERSION" > "$RESULT" 2>/dev/null
+}
+
+notify() {
+  # Mock runs set these so a failure branch cannot pop dialogs on screen.
+  [ "${BYTEPROOF_UPDATE_SKIP_NOTIFY:-}" = "1" ] && return 0
+  /usr/bin/osascript -e "display dialog \"$1\" buttons {\"OK\"} default button \"OK\" with title \"ByteProof Update\" with icon caution" >/dev/null 2>&1 &
+}
+
+log "update to $VERSION staged"
+
+# 1. Wait for the old app to quit; it asks itself to quit as the helper starts.
+waited=0
+while [ "$waited" -lt 300 ]; do
+  /bin/kill -0 "$APP_PID" 2>/dev/null || break
+  /bin/sleep 0.2
+  waited=$((waited + 1))
+done
+if /bin/kill -0 "$APP_PID" 2>/dev/null; then
+  log "the app is still running; the update will be offered again next launch"
+  exit 0
+fi
+
+# 2. The new bundle was copied next to the old one while the app still ran, so
+#    the headless step is only two renames.
+if [ ! -d "$STAGING" ]; then
+  log "no staged bundle at $STAGING"
+  write_result "failed" "The downloaded update did not contain ByteProof.app."
+  notify "ByteProof could not install the update automatically. The installer has been opened - drag ByteProof to Applications to finish."
+  /usr/bin/open "$DMG" >/dev/null 2>&1
+  exit 1
+fi
+
+# 3. Swap the bundle, keeping the old one until the new one is in place.
+BACKUP="$DEST.update-backup"
+/bin/rm -rf "$BACKUP" 2>/dev/null
+moved_old=0
+if [ -e "$DEST" ]; then
+  if /bin/mv "$DEST" "$BACKUP" 2>>"$LOG"; then
+    moved_old=1
+  else
+    log "could not move the old bundle aside"
+  fi
+fi
+
+swapped=0
+/bin/mv "$STAGING" "$DEST" 2>>"$LOG" && swapped=1
+if [ "$swapped" != "1" ]; then
+  # Only needed when the app lives somewhere the user cannot write; this is
+  # the one path macOS may ask for an administrator password.
+  if /usr/bin/osascript - "$STAGING" "$DEST" >>"$LOG" 2>&1 <<'APPLESCRIPT'
+on run argv
+  do shell script "/bin/mv " & quoted form of (item 1 of argv) & " " & quoted form of (item 2 of argv) with administrator privileges
+end run
+APPLESCRIPT
+  then
+    swapped=1
+  fi
+fi
+
+if [ "$swapped" = "1" ]; then
+  /usr/bin/xattr -dr com.apple.quarantine "$DEST" 2>/dev/null
+  /bin/rm -rf "$BACKUP" 2>/dev/null
+  /bin/rm -f "$DMG" 2>/dev/null
+  write_result "ok" "ByteProof was updated and relaunched."
+  log "installed $VERSION; relaunching"
+  if [ "${BYTEPROOF_UPDATE_SKIP_OPEN:-}" != "1" ]; then
+    /usr/bin/open "$DEST" >/dev/null 2>&1
+  fi
+  exit 0
+fi
+
+# 4. Put the old app back and hand the DMG to the user.
+if [ "$moved_old" = "1" ] && [ -e "$BACKUP" ]; then
+  /bin/rm -rf "$DEST" 2>/dev/null
+  /bin/mv "$BACKUP" "$DEST" 2>/dev/null
+fi
+write_result "failed" "ByteProof could not install the update automatically."
+log "install failed; the old version is back in place"
+notify "ByteProof could not install the update automatically. The installer has been opened - drag ByteProof to Applications to finish."
+if [ "${BYTEPROOF_UPDATE_SKIP_OPEN:-}" != "1" ]; then
+  /usr/bin/open "$DMG" >/dev/null 2>&1
+fi
+exit 1
+"""
+
+
+def macos_update_script(
+    dmg_path: str,
+    staging_path: str,
+    dest_path: str,
+    pid: int,
+    log_path: str,
+    result_path: str,
+    app_name: str = "ByteProof",
+    version: str = "",
+) -> str:
+    """The detached shell script that swaps the bundle after the app exits."""
+    values = {
+        "@PID@": str(int(pid)),
+        "@DMG@": shlex.quote(dmg_path),
+        "@DEST@": shlex.quote(dest_path),
+        "@STAGING@": shlex.quote(staging_path),
+        "@LOG@": shlex.quote(log_path),
+        "@RESULT@": shlex.quote(result_path),
+        "@APP_NAME@": shlex.quote(app_name),
+        "@VERSION@": shlex.quote(version),
+    }
+    script = _MACOS_UPDATE_TEMPLATE
+    for marker, value in values.items():
+        script = script.replace(marker, value)
+    return script
+
+
+def stage_macos_payload(
+    dmg_path: str,
+    dest_path: str,
+    app_name: str = "ByteProof",
+) -> str | None:
+    """Copy the new app next to the installed one, while the app still runs.
+
+    Doing the slow copy here means the user is still looking at a running app
+    if macOS refuses it (the App Management permission, a read-only location),
+    so the caller can fall back instead of quitting into a failed install.
+    The headless helper then only has to rename two bundles.
+
+    ``dmg_path`` may be a DMG file or an already-mounted directory (tests use
+    the directory form). Returns the staging path, or None on any failure.
+    """
+    staging = dest_path + ".update-staging"
+    source_root = dmg_path
+    attached = ""
+    if os.path.isfile(dmg_path):
+        try:
+            attach = subprocess.run(
+                [
+                    "/usr/bin/hdiutil",
+                    "attach",
+                    dmg_path,
+                    "-nobrowse",
+                    "-noautoopen",
+                    "-readonly",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if attach.returncode != 0:
+            return None
+        for line in attach.stdout.splitlines():
+            parts = [part.strip() for part in line.split("\t")]
+            if len(parts) >= 3 and parts[2].startswith("/Volumes/"):
+                source_root = parts[2]
+                attached = parts[2]
+                break
+        if not attached:
+            return None
+
+    source = os.path.join(source_root, f"{app_name}.app")
+    if not os.path.isdir(source):
+        if attached:
+            subprocess.run(
+                ["/usr/bin/hdiutil", "detach", attached, "-quiet"],
+                check=False,
+            )
+        return None
+
+    try:
+        if os.path.exists(staging):
+            shutil.rmtree(staging, ignore_errors=True)
+        try:
+            copied = subprocess.run(
+                ["/usr/bin/ditto", source, staging],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=600,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            shutil.rmtree(staging, ignore_errors=True)
+            return None
+        if copied.returncode != 0:
+            shutil.rmtree(staging, ignore_errors=True)
+            return None
+        subprocess.run(
+            ["/usr/bin/xattr", "-dr", "com.apple.quarantine", staging],
+            capture_output=True,
+            check=False,
+        )
+        return staging
+    finally:
+        if attached:
+            subprocess.run(
+                ["/usr/bin/hdiutil", "detach", attached, "-quiet"],
+                check=False,
+            )
+
+
+def stage_macos_update(
+    dmg_path: str,
+    staging_path: str,
+    dest_path: str,
+    pid: int,
+    version: str,
+    support_dir: str,
+    app_name: str = "ByteProof",
+) -> str:
+    """Write the updater helper next to the app's support files."""
+    folder = os.path.join(support_dir, "update")
+    os.makedirs(folder, exist_ok=True)
+    script_path = os.path.join(folder, "install-macos-update.sh")
+    script = macos_update_script(
+        dmg_path=dmg_path,
+        staging_path=staging_path,
+        dest_path=dest_path,
+        pid=pid,
+        log_path=os.path.join(folder, "update.log"),
+        result_path=os.path.join(support_dir, "update-result.json"),
+        app_name=app_name,
+        version=version,
+    )
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write(script)
+    os.chmod(script_path, 0o700)
+    return script_path
+
+
+def take_update_result(support_dir: str) -> dict[str, Any] | None:
+    """Read (and clear) the result the unattended helper left behind."""
+    path = os.path.join(support_dir, "update-result.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return data if isinstance(data, dict) else None

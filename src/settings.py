@@ -14,7 +14,7 @@ from config.deepseek_config import (
 from .automation import default_automation_rules
 
 APP_NAME = "ByteProof"
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1-beta.7"
 COMPANY_NAME = "ByteMind Ltd"
 COMPANY_URL = "https://www.bytemind.co.nz"
 PRODUCT_URL = "https://www.bytemind.co.nz/byteproof"
@@ -29,9 +29,12 @@ LICENSE_API_URL = os.environ.get(
 LICENSE_PORTAL_URL = os.environ.get(
     "BYTEPROOF_LICENSE_PORTAL_URL", ""
 ).strip() or (LICENSE_API_URL.rstrip("/") + "/api/byteproof/portal")
+# The purchase button opens Stripe Checkout directly - a Stripe Payment Link,
+# not the product page - so a buyer starts paying in one click. The website
+# page stays the fallback whenever this is overridden for testing.
 PURCHASE_URL = os.environ.get(
     "BYTEPROOF_PURCHASE_URL", ""
-).strip() or "https://www.bytemind.co.nz/byteproof#pricing"
+).strip() or "https://buy.stripe.com/fZueV61d99tv52vaOfgYU00"
 
 # Developer-only identities that unlock full access without a customer key.
 #
@@ -285,6 +288,17 @@ def _normalise_base_url(base_url: str) -> str:
 def _clean_api_keys(keys: list[str]) -> list[str]:
     return [key.strip() for key in keys if isinstance(key, str) and key.strip()]
 
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    """A settings sub-document, or an empty one when the file is malformed.
+
+    A settings.json that is valid JSON but the wrong shape (hand-edited, or
+    written by something other than this app) used to raise while loading and
+    stop ByteProof from starting at all.
+    """
+    return value if isinstance(value, dict) else {}
+
+
 def _default_settings() -> dict[str, Any]:
     return {
         "app_version": APP_VERSION,
@@ -402,6 +416,8 @@ def load_runtime_settings() -> dict[str, Any]:
         settings["app_version"] = APP_VERSION
         return settings
 
+    loaded = _as_mapping(loaded)
+
     # The defaults carry the running build's version, but the file's own
     # version must survive until _stamp_version_and_save: that function writes
     # the file back when the recorded version differs, which is how the
@@ -420,52 +436,54 @@ def load_runtime_settings() -> dict[str, Any]:
         if cleaned_keys:
             settings["providers"]["DeepSeek"]["api_keys"] = cleaned_keys
         
-        if "base_url" in loaded:
+        if isinstance(loaded.get("base_url"), str):
             settings["providers"]["DeepSeek"]["base_url"] = _normalise_base_url(loaded["base_url"])
-        if "model" in loaded:
+        if isinstance(loaded.get("model"), str):
             settings["providers"]["DeepSeek"]["model"] = loaded["model"].strip()
             
         settings["general"]["temperature"] = 0.3
     else:
         # New format
-        if "general" in loaded:
-            settings["general"].update(loaded["general"])
-            if "temperature" not in loaded["general"]:
+        general = _as_mapping(loaded.get("general"))
+        if general:
+            settings["general"].update(general)
+            if "temperature" not in general:
                 settings["general"]["temperature"] = 0.3
         else:
              settings["general"]["temperature"] = 0.3
         
-        if "active_provider" in loaded and loaded["active_provider"] in PROVIDERS:
-            settings["active_provider"] = loaded["active_provider"]
+        active_provider = loaded.get("active_provider")
+        if isinstance(active_provider, str) and active_provider in PROVIDERS:
+            settings["active_provider"] = active_provider
             
-        if "providers" in loaded:
+        if isinstance(loaded.get("providers"), dict):
             for name, data in loaded["providers"].items():
+                data = _as_mapping(data)
                 if name in settings["providers"]:
-                    if "base_url" in data:
+                    if isinstance(data.get("base_url"), str):
                         settings["providers"][name]["base_url"] = _normalise_base_url(data["base_url"])
-                    if "model" in data:
+                    if isinstance(data.get("model"), str):
                         settings["providers"][name]["model"] = data["model"]
-                    if "api_keys" in data:
+                    if isinstance(data.get("api_keys"), list):
                         settings["providers"][name]["api_keys"] = _clean_api_keys(data["api_keys"])
         
-        if "license" in loaded:
-            settings["license"].update(loaded["license"])
+        settings["license"].update(_as_mapping(loaded.get("license")))
 
-    if "local_model" in loaded:
-        settings["local_model"].update(loaded["local_model"])
+    settings["local_model"].update(_as_mapping(loaded.get("local_model")))
 
-    if "automation" in loaded:
-        settings["automation"].update(loaded["automation"])
+    settings["automation"].update(_as_mapping(loaded.get("automation")))
 
-    if "live_preview" in loaded:
-        settings["live_preview"].update(loaded["live_preview"])
+    settings["live_preview"].update(_as_mapping(loaded.get("live_preview")))
 
     _migrate_mac_hotkeys(settings)
     _migrate_live_preview_limits(settings)
     refreshed = refresh_superseded_models(settings)
     if refreshed:
         print(f"Updated default models for: {', '.join(refreshed)}")
-    settings["general"]["temperature"] = max(0.0, min(2.0, settings["general"]["temperature"]))
+    temperature = settings["general"].get("temperature", 0.3)
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+        temperature = 0.3
+    settings["general"]["temperature"] = max(0.0, min(2.0, float(temperature)))
     _stamp_version_and_save(settings, force=bool(refreshed))
     return settings
 

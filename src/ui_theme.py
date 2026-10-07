@@ -44,7 +44,7 @@ PANEL_ARROW_TEXT = "\u00a0→\u00a0"
 
 DOT_RED = "#D93025"
 DOT_AMBER = "#F9AB00"
-DOT_BLUE = BLUE_PRIMARY
+DOT_BLUE = "#4A7BA7"
 
 
 def reason_color(reason: str) -> str:
@@ -180,6 +180,34 @@ SHELL_RADIUS_ROW = 8
 SHELL_RADIUS_CARD = 12
 SHELL_ROW_HEIGHT = 40
 
+# The floating suggestion panel wears the shell's own palette: a warm card on
+# cream with deep-green actions and one filled primary per panel. The red and
+# green diff colours keep their meaning and are left alone.
+PANEL_SURFACE = SHELL_CARD
+PANEL_BORDER = SHELL_BORDER
+PANEL_TEXT = SHELL_TEXT
+PANEL_MUTED = SHELL_TEXT_MUTED
+PANEL_DIVIDER = SHELL_BORDER_LIGHT
+PANEL_CARD = "#FFFFFF"
+PANEL_CARD_BORDER = SHELL_BORDER_LIGHT
+PANEL_CARD_BORDER_HOVER = SHELL_PRIMARY_200
+PANEL_ACCENT = SHELL_PRIMARY
+PANEL_ACCENT_HOVER = SHELL_PRIMARY_600
+PANEL_ACCENT_PRESSED = SHELL_PRIMARY_800
+PANEL_ACCENT_FG = SHELL_PRIMARY_FG
+# The per-row Apply is a tonal chip: strong enough to read as a button on the
+# cream surface without competing with the one filled primary.
+PANEL_TONAL = SHELL_PRIMARY_100
+PANEL_TONAL_HOVER = SHELL_PRIMARY_200
+PANEL_TONAL_PRESSED = SHELL_PRIMARY_300
+PANEL_TONAL_TEXT = SHELL_PRIMARY_800
+PANEL_HOVER_TINT = SHELL_PRIMARY_50
+PANEL_HOVER_TINT_STRONG = SHELL_PRIMARY_100
+PANEL_CHIP_BG = SHELL_MUTED
+PANEL_CHIP_TEXT = SHELL_TEXT_MUTED
+PANEL_SCROLL_HANDLE = SHELL_BORDER
+PANEL_SCROLL_HANDLE_HOVER = SHELL_PRIMARY_200
+
 
 def settings_stylesheet(assets_dir: str | None = None) -> str:
     """The settings dialog's whole look, in one string built from the tokens.
@@ -290,13 +318,28 @@ QFrame#SettingsCallout {{
     border-radius: {SHELL_RADIUS_CARD}px;
 }}
 #AutomationRuleCard {{
-    background: {SHELL_CARD};
+    background: #ffffff;
     border: 1px solid {SHELL_BORDER_LIGHT};
     border-radius: {SHELL_RADIUS_CARD}px;
 }}
 #AutomationRuleCard:hover {{ border-color: {SHELL_BORDER}; }}
 #AutomationRuleCard[selected="true"] {{
     background: {SHELL_PRIMARY_50}; border-color: {SHELL_PRIMARY_200};
+}}
+QFrame#AutomationCard {{
+    background: {SHELL_CARD};
+    border: 1px solid {SHELL_BORDER_LIGHT};
+    border-radius: {SHELL_RADIUS_CARD}px;
+}}
+QListWidget#AutomationList {{
+    background: transparent; border: none; outline: 0;
+    padding: 8px 6px 8px 8px;
+}}
+QListWidget#AutomationList::item {{ border: none; background: transparent; }}
+QListWidget#AutomationList::item:selected {{ background: transparent; }}
+QFrame#AutomationFooter {{
+    background: transparent; border: none;
+    border-top: 1px solid {SHELL_BORDER_LIGHT};
 }}
 QGroupBox {{
     background: {SHELL_CARD};

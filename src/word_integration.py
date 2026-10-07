@@ -208,9 +208,18 @@ def _comment_box_window(AS: Any, pid: int) -> Any | None:
     if not candidates:
         return None
     if document:
+        # Word's window title drops the file extension ("paper", not
+        # "paper.docx") while AppleScript reports the document's real name, so
+        # matching on the name alone never found the window and every comment
+        # was refused with "no comment box". Both spellings are accepted.
+        stem = document.rsplit(".", 1)[0] if "." in document else document
         for window in candidates:
             title = str(_ax_attribute(AS, window, "AXTitle") or "")
-            if title == document or document in title:
+            if (
+                title == document
+                or document in title
+                or (stem and (title == stem or stem in title))
+            ):
                 return window
         # The active document has no window of its own on screen: reading or
         # writing its comment box would land somewhere else.
@@ -841,6 +850,21 @@ class WindowsWordIntegration(WordIntegration):
             _log_word(f"Error getting text (Windows): {e}")
             return "", 0, 0, "", ""
 
+    def active_document_name(self) -> str:
+        """Name of the active document, so a live edit can refuse a switch.
+
+        The macOS integration has always answered this; Windows relied on the
+        range-text guard alone, which cannot tell "same text, different
+        document" apart.
+        """
+        try:
+            word = self._get_word()
+            if not word.Documents.Count:
+                return ""
+            return str(word.ActiveDocument.Name or "")
+        except Exception:
+            return ""
+
     def selection_scope(self) -> str:
         """See WordIntegration.selection_scope."""
         try:
@@ -1419,7 +1443,27 @@ class MacOSWordIntegration(WordIntegration):
         self._set_track_changes(False)
 
     def get_selection_info(self) -> tuple[str, int, int, str, str]:
-        """Read the current selection (short timeout: this runs every poll)."""
+        """Read the current selection (short timeout: this runs every poll).
+
+        A Word that is busy for longer than the poll timeout is asked again
+        before the selection is called empty. Word is single-threaded: a
+        repaint, a plugin, or a comment box opening for a moment used to make
+        a manual proofread answer "Selection is empty." and lose the request,
+        which read like the app refusing to work rather than Word catching its
+        breath.
+        """
+        for attempt in range(3):
+            try:
+                return self._read_selection_info()
+            except WordBusyError as busy:
+                if attempt == 2:
+                    _log_word(f"Selection read failed while Word was busy: {busy}")
+                    return "", 0, 0, "", ""
+                time.sleep(0.4 + attempt * 0.3)
+        return "", 0, 0, "", ""
+
+    def _read_selection_info(self) -> tuple[str, int, int, str, str]:
+        """One read of the selection, raising WordBusyError when Word is busy."""
         script = """
         tell application "Microsoft Word"
             if not (exists active document) then error "No active Word document is open."
@@ -1489,9 +1533,12 @@ class MacOSWordIntegration(WordIntegration):
                     return parts[1], int(parts[0]), 0, parts[2], parts[3]
                 if len(parts) >= 2:
                     return parts[1], int(parts[0]), 0, "", ""
+        except WordBusyError:
+            # The caller retries: Word being busy is not an empty selection.
+            raise
         except Exception as e:
             _log_word(f"Error getting text with context: {e}")
-            
+
         return "", 0, 0, "", ""
 
     def selection_scope(self) -> str:

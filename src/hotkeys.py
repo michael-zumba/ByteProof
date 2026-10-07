@@ -97,6 +97,87 @@ _BASE_TO_SHIFTED = {
 _SHIFTED_TO_BASE = {shifted: base for base, shifted in _BASE_TO_SHIFTED.items()}
 _MODIFIER_ORDER = ("<cmd>", "<ctrl>", "<alt>", "<shift>")
 
+# pynput spells special keys in angle brackets and not always the way the
+# settings file does: Return is <enter>, PageUp is <page_up>, and a bare
+# "space" is not accepted at all. HotKey.parse raises on an unknown token and
+# GlobalHotKeys then refuses the whole mapping, which is how the default
+# "<return>" silently took every Windows hotkey down with it.
+_PYNPUT_KEY_ALIASES: dict[str, str] = {
+    "return": "enter",
+    "enter": "enter",
+    "esc": "esc",
+    "escape": "esc",
+    "space": "space",
+    "spacebar": "space",
+    "tab": "tab",
+    "backspace": "backspace",
+    "delete": "delete",
+    "del": "delete",
+    "insert": "insert",
+    "ins": "insert",
+    "home": "home",
+    "end": "end",
+    "pageup": "page_up",
+    "pgup": "page_up",
+    "pagedown": "page_down",
+    "pgdn": "page_down",
+    "pgdown": "page_down",
+    "up": "up",
+    "down": "down",
+    "left": "left",
+    "right": "right",
+    "capslock": "caps_lock",
+    "printscreen": "print_screen",
+    "prtsc": "print_screen",
+    "scrolllock": "scroll_lock",
+    "numlock": "num_lock",
+    "pause": "pause",
+    "menu": "menu",
+}
+for _function_index in range(1, 25):
+    _PYNPUT_KEY_ALIASES[f"f{_function_index}"] = f"f{_function_index}"
+
+
+def windows_hotkey_string(hotkey: str) -> str | None:
+    """Translate a stored hotkey into the spelling pynput parses on Windows.
+
+    Returns None when the shortcut cannot be expressed for pynput (no key, an
+    unknown special key, modifiers only) so the caller can skip that single
+    binding instead of losing every hotkey to it. ``<cmd>`` becomes ``<ctrl>``:
+    Windows has no Command key, which is also how the macOS defaults were
+    translated before.
+    """
+    if not hotkey or not hotkey.strip():
+        return None
+    modifiers: set[str] = set()
+    key = ""
+    for raw in hotkey.strip().lower().split("+"):
+        token = raw.strip()
+        if not token:
+            continue
+        if token in ("<cmd>", "<win>", "<super>"):
+            modifiers.add("<ctrl>")
+        elif token in ("<ctrl>", "<alt>", "<shift>"):
+            modifiers.add(token)
+        elif token.startswith("<") and token.endswith(">") and len(token) > 2:
+            name = _PYNPUT_KEY_ALIASES.get(token[1:-1])
+            if name is None:
+                return None
+            key = f"<{name}>"
+        elif len(token) == 1:
+            key = token
+        else:
+            name = _PYNPUT_KEY_ALIASES.get(token)
+            if name is None:
+                return None
+            key = f"<{name}>"
+    if not key:
+        return None
+    ordered = [
+        token for token in ("<ctrl>", "<alt>", "<shift>") if token in modifiers
+    ]
+    return "+".join([*ordered, key])
+
 
 def _canonical_key(key: str) -> str | None:
     """Canonicalise a hotkey's final key so shift spellings compare equal."""
@@ -133,6 +214,14 @@ def canonical_hotkey(hotkey: str) -> str | None:
             key = part
     if not key:
         return None
+    if SYSTEM == "Windows":
+        # Windows has no Command key, so a shipped <cmd> default and a
+        # <ctrl> binding recorded in Settings are the same shortcut: clashes
+        # and duplicates have to compare equal there.
+        modifiers = {
+            "<ctrl>" if token in ("<cmd>", "<ctrl>") else token
+            for token in modifiers
+        }
     return _canonical_from_parts(modifiers, key)
 
 
@@ -344,31 +433,63 @@ class _WindowsHotkeyManager:
     def __init__(self, hotkeys: dict[str, Callable[[], None]]) -> None:
         self.callbacks = hotkeys
         self._global: Any = None
+        # Why the last start() failed, so the UI can tell "off" from "broken"
+        # instead of showing the reassuring default.
+        self.last_error = ""
 
     def start(self, prompt_user: bool = True) -> bool:
         self.stop()
+        self.last_error = ""
         if not self.callbacks:
             log_debug("No callbacks defined.")
             return True
         try:
             from pynput import keyboard
         except ImportError:
-            log_debug("pynput is not available for Windows hotkeys.")
+            self.last_error = "pynput is not available for Windows hotkeys."
+            log_debug(self.last_error)
+            return False
+
+        normalized: dict[str, Callable[[], None]] = {}
+        for hk_str, cb in self.callbacks.items():
+            win_str = windows_hotkey_string(hk_str)
+            if win_str is None:
+                # One unreadable shortcut must not cost the user the others.
+                log_debug(f"Windows hotkey skipped, unreadable: {hk_str!r}")
+                continue
+            try:
+                keyboard.HotKey.parse(win_str)
+            except Exception as exc:
+                log_debug(
+                    f"Windows hotkey skipped, pynput refused it ({exc}): "
+                    f"{hk_str!r} -> {win_str!r}"
+                )
+                continue
+            if win_str in normalized:
+                log_debug(
+                    f"Windows hotkey skipped, duplicate of an earlier "
+                    f"binding: {hk_str!r} -> {win_str!r}"
+                )
+                continue
+            normalized[win_str] = cb
+        if not normalized:
+            self.last_error = (
+                "No hotkey could be registered on Windows; see "
+                "debug_hotkeys.log in the ByteProof support folder."
+            )
+            log_debug(self.last_error)
             return False
 
         try:
-            normalized: dict[str, Callable[[], None]] = {}
-            for hk_str, cb in self.callbacks.items():
-                # Windows has no Command key; Command-style defaults map to Ctrl.
-                win_str = hk_str.replace("<cmd>", "<ctrl>")
-                normalized[win_str] = cb
             self._global = keyboard.GlobalHotKeys(normalized)
             self._global.daemon = True
             self._global.start()
             log_debug(f"Windows global hotkeys started: {list(normalized)}")
             return True
         except Exception as e:
-            log_debug(f"Windows hotkey start error: {e}")
+            self.last_error = f"Windows hotkey start error: {e}"
+            log_debug(self.last_error)
+            self._global = None
             return False
 
     def stop(self) -> None:
@@ -579,6 +700,11 @@ class HotkeyManager:
 
     def start(self, prompt_user: bool = True) -> bool:
         return self._impl.start(prompt_user=prompt_user)
+
+    @property
+    def last_error(self) -> str:
+        """Why the last start() failed, when the platform can say."""
+        return str(getattr(self._impl, "last_error", "") or "")
 
     def stop(self) -> None:
         self._impl.stop()

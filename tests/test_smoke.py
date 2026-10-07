@@ -96,6 +96,11 @@ def test_open_purchase_url_uses_live_link() -> None:
     from src import settings
     from src.gui import open_purchase_url
 
+    # The purchase button pays through Stripe Checkout itself; it must not
+    # detour through the product website's pricing section first.
+    assert "stripe.com" in settings.PURCHASE_URL, settings.PURCHASE_URL
+    assert settings.PURCHASE_URL != "https://www.bytemind.co.nz/byteproof#pricing"
+
     opened: list[str] = []
     original_open = webbrowser.open
     webbrowser.open = lambda url, *a, **k: opened.append(url) or True
@@ -2330,6 +2335,33 @@ def test_windows_hidden_span_revision_filtering() -> None:
     integration = WindowsWordIntegration()
     integration._get_word = lambda: _Word()
     assert integration.get_selection_hidden_spans() == [(1, 3), (5, 7)]
+
+
+def test_windows_active_document_name() -> None:
+    """Live edits capture the document name so a switch can be refused."""
+    from src.word_integration import WindowsWordIntegration
+
+    class _Document:
+        Name = "chapter2.docx"
+
+    class _Documents:
+        Count = 1
+
+    class _Word:
+        Documents = _Documents()
+        ActiveDocument = _Document()
+
+    integration = WindowsWordIntegration()
+    integration._get_word = lambda: _Word()
+    assert integration.active_document_name() == "chapter2.docx"
+
+    class _EmptyDocuments:
+        Count = 0
+
+    integration._get_word = lambda: type(
+        "EmptyWord", (), {"Documents": _EmptyDocuments()}
+    )()
+    assert integration.active_document_name() == ""
 
 
 def test_macos_hidden_span_parsing() -> None:

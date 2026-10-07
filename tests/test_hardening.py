@@ -17,7 +17,7 @@ import re
 import socketserver
 import tempfile
 import threading
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -298,6 +298,40 @@ def test_developer_emails_are_empty_in_shipped_defaults() -> None:
     from src import settings
 
     assert settings.DEVELOPER_EMAILS == ()
+
+
+def test_comment_row_unlocks_after_activation_in_the_same_dialog(monkeypatch) -> None:
+    """The owner's report: "Add Reviewer Comment" stayed disabled.
+
+    The row is built from the licence tier the dialog opened with, so a
+    customer who activated from the License page in the same dialog kept
+    seeing the dropdown locked, and the "requires a license" tooltip, until
+    Settings was closed and reopened.
+    """
+    from src import gui
+    from src import settings as settings_mod
+
+    state = {"tier": "free"}
+    monkeypatch.setattr(
+        gui, "get_access_status", lambda: {"tier": state["tier"]}
+    )
+    loaded = settings_mod.load_runtime_settings()
+    loaded.setdefault("general", {})["comment_type"] = "Language"
+    app, owner, dialog = _make_settings_dialog(loaded)
+    try:
+        assert dialog.combo_comment.isEnabled() is False
+        assert dialog.combo_comment.currentText() == "None"
+        assert "license" in dialog.comment_row.toolTip().lower()
+
+        state["tier"] = "licensed"
+        dialog.refresh_license_gated_rows()
+
+        assert dialog.combo_comment.isEnabled() is True
+        # The saved preference comes back, not the forced "None".
+        assert dialog.combo_comment.currentText() == "Language"
+        assert "license" not in dialog.comment_row.toolTip().lower()
+    finally:
+        _dispose(dialog, owner, app)
 
 
 # --- Word document safety ----------------------------------------------------
@@ -2022,6 +2056,195 @@ def test_hotkey_parser_accepts_the_shifted_punctuation_macos_reports():
     assert canonical_hotkey("<cmd>+<shift>+.") == canonical_hotkey(
         "<cmd>+<shift>+>"
     )
+
+
+def test_windows_hotkeys_spell_special_keys_the_pynput_way() -> None:
+    """pynput spells Return <enter>; "<return>" made it refuse every hotkey.
+
+    HotKey.parse raises on an unknown token, GlobalHotKeys then refused the
+    whole mapping, and the app still showed "Ready" - which is why no Windows
+    shortcut worked at all.
+    """
+    from src.hotkeys import windows_hotkey_string
+
+    assert (
+        windows_hotkey_string("<cmd>+<shift>+<return>")
+        == "<ctrl>+<shift>+<enter>"
+    )
+    # Windows has no Command key: the macOS defaults become Ctrl shortcuts.
+    assert windows_hotkey_string("<cmd>+<shift>+;") == "<ctrl>+<shift>+;"
+    assert windows_hotkey_string("<cmd>+<shift>+'") == "<ctrl>+<shift>+'"
+    assert windows_hotkey_string("<cmd>+<shift>+l") == "<ctrl>+<shift>+l"
+    # Keys a user records in Settings are spelled differently by Qt.
+    assert windows_hotkey_string("<ctrl>+PgUp") == "<ctrl>+<page_up>"
+    assert windows_hotkey_string("<ctrl>+Space") == "<ctrl>+<space>"
+    assert windows_hotkey_string("<ctrl>+Insert") == "<ctrl>+<insert>"
+    assert windows_hotkey_string("<ctrl>+F5") == "<ctrl>+<f5>"
+    assert windows_hotkey_string("<ctrl>+F24") == "<ctrl>+<f24>"
+    # Qt's Backtab is Shift+Tab: renaming it to plain Tab would misfire.
+    assert windows_hotkey_string("<ctrl>+Backtab") is None
+    # Unusable shortcuts are dropped instead of poisoning the batch.
+    assert windows_hotkey_string("<ctrl>+<unknown>") is None
+    assert windows_hotkey_string("<ctrl>") is None
+    assert windows_hotkey_string("") is None
+
+
+def test_windows_hotkey_manager_keeps_the_good_bindings(monkeypatch) -> None:
+    """One bad shortcut must not take global hotkeys down with it."""
+    import sys
+    import types
+
+    from src.hotkeys import _WindowsHotkeyManager
+
+    keyboard = types.ModuleType("pynput.keyboard")
+
+    class FakeHotKey:
+        @staticmethod
+        def parse(spec: str):
+            # pynput names the Return key <enter>; "<return>" raises, exactly
+            # like the real HotKey.parse, and that one token used to kill the
+            # whole mapping.
+            if "<return>" in spec or "pause" in spec:
+                raise ValueError(f"invalid key: {spec}")
+            return spec.split("+")
+
+    class FakeGlobalHotKeys:
+        last_mapping: ClassVar[dict[str, Any]] = {}
+
+        def __init__(self, hotkeys: dict[str, Any]) -> None:
+            FakeGlobalHotKeys.last_mapping = dict(hotkeys)
+            self.daemon = False
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    keyboard.HotKey = FakeHotKey  # pyright: ignore[reportAttributeAccessIssue]
+    keyboard.GlobalHotKeys = FakeGlobalHotKeys  # pyright: ignore[reportAttributeAccessIssue]
+    pynput = types.ModuleType("pynput")
+    pynput.keyboard = keyboard  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setitem(sys.modules, "pynput", pynput)
+    monkeypatch.setitem(sys.modules, "pynput.keyboard", keyboard)
+
+    manager = _WindowsHotkeyManager(
+        {
+            "<cmd>+<shift>+<return>": lambda: None,
+            "<ctrl>+<pause>": lambda: None,
+            "<cmd>+<shift>+;": lambda: None,
+        }
+    )
+    try:
+        assert manager.start() is True
+        assert set(FakeGlobalHotKeys.last_mapping) == {
+            "<ctrl>+<shift>+<enter>",
+            "<ctrl>+<shift>+;",
+        }
+    finally:
+        manager.stop()
+
+    # Nothing registrable is a failure the UI can report, not a silent Ready.
+    broken = _WindowsHotkeyManager({"<ctrl>+<unknown>": lambda: None})
+    assert broken.start() is False
+    assert broken.last_error
+
+
+def test_windows_canonical_hotkey_equates_cmd_and_ctrl(monkeypatch) -> None:
+    """A shipped <cmd> default and a recorded <ctrl> are one shortcut."""
+    from src import hotkeys
+
+    monkeypatch.setattr(hotkeys, "SYSTEM", "Windows")
+    assert hotkeys.canonical_hotkey(
+        "<cmd>+<shift>+l"
+    ) == hotkeys.canonical_hotkey("<ctrl>+<shift>+l")
+    assert hotkeys.canonical_hotkey("<cmd>+<shift>+<return>") == (
+        "<ctrl>+<shift>+<return>"
+    )
+
+
+def test_windows_word_selection_reaches_the_live_preview(monkeypatch) -> None:
+    """Windows Live Check reads Word through COM and spawns the preview.
+
+    The service was never even created on Windows, so the poll never looked
+    at a Word selection; this exercises the path the Windows build now takes.
+    """
+    from src import word_integration
+    from src.live_service import LivePreviewService
+
+    service = LivePreviewService()
+    service.refresh_settings(
+        {"live_preview": {"enabled": True, "delay_ms": 600, "max_chars": 1500}}
+    )
+
+    class FakeEditor:
+        @staticmethod
+        def is_word(target: dict[str, Any]) -> bool:
+            return True
+
+        @staticmethod
+        def permission_status() -> tuple[bool, str]:
+            return True, ""
+
+        @staticmethod
+        def frontmost_app() -> dict[str, Any]:
+            return {
+                "hwnd": 4242,
+                "pid": 4242,
+                "name": "Chapter 2 - Word",
+                "exe": (
+                    r"C:\Program Files\Microsoft Office\root\Office16"
+                    r"\WINWORD.EXE"
+                ),
+            }
+
+        @staticmethod
+        def selection_details(target: dict[str, Any]) -> dict[str, Any]:
+            return {}  # no macOS Accessibility tree on Windows
+
+    class FakeWord:
+        @staticmethod
+        def get_selection_info():
+            return "teh cat sat on teh mat", 100, 124, "", ""
+
+        @staticmethod
+        def selection_scope() -> str:
+            return "main"
+
+    service._editor = FakeEditor()
+    monkeypatch.setattr(
+        word_integration, "get_word_integration", lambda: FakeWord()
+    )
+    spawned: list[Any] = []
+    monkeypatch.setattr(
+        service, "_spawn_preview", lambda *args: spawned.append(args)
+    )
+
+    try:
+        service._sample(now=1000.0)
+        service._sample(now=2000.0)
+    finally:
+        service.stop()
+
+    assert spawned, "the Word selection never reached the provider"
+    assert spawned[0][1] == "teh cat sat on teh mat"
+
+
+def test_live_check_is_offered_on_windows_for_word(monkeypatch) -> None:
+    """Windows must create the Live Check service; it used to be skipped."""
+    from src import gui
+
+    monkeypatch.setattr(gui.platform, "system", lambda: "Windows")
+    assert gui.live_check_platform_supported() is True
+    monkeypatch.setattr(gui.platform, "system", lambda: "Darwin")
+    assert gui.live_check_platform_supported() is True
+    monkeypatch.setattr(gui.platform, "system", lambda: "Linux")
+    assert gui.live_check_platform_supported() is False
+
+    # The window must act on that decision, not merely define it.
+    with open(gui.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "if live_check_platform_supported() and not offscreen:" in source
 
 
 def test_hotkey_conflicts_report_duplicates_and_system_keys(monkeypatch):
@@ -5099,6 +5322,42 @@ def test_automation_page_is_structured_like_the_others() -> None:
     _dispose(dialog, owner, app)
 
 
+def test_automation_actions_sit_inside_the_trigger_card() -> None:
+    """The buttons are part of the list, not floating over it.
+
+    The owner's screenshot showed the action row sitting on the page under a
+    clipped list; the fix puts the list and its actions in one bordered card
+    and greys out the destructive action until a trigger is selected.
+    """
+    app, owner, dialog = _make_settings_dialog()
+    dialog.resize(1000, 760)
+    dialog.sidebar.setCurrentRow(2)
+    app.processEvents()
+    dialog._toggle_automation_rules()
+    app.processEvents()
+
+    card = dialog.automation_card
+    assert card.objectName() == "AutomationCard"
+    assert card.isAncestorOf(dialog.automation_list)
+    assert card.isAncestorOf(dialog.automation_actions_widget)
+
+    dialog.automation_list.setCurrentRow(-1)
+    app.processEvents()
+    assert not dialog.automation_remove_btn.isEnabled()
+    dialog.automation_list.setCurrentRow(0)
+    app.processEvents()
+    assert dialog.automation_remove_btn.isEnabled()
+
+    before = dialog.automation_list.count()
+    dialog._remove_automation_rule()
+    app.processEvents()
+    assert dialog.automation_list.count() == before - 1
+    assert dialog.automation_remove_btn.isEnabled() == (
+        dialog.automation_list.currentRow() >= 0
+    )
+    _dispose(dialog, owner, app)
+
+
 
 def test_a_click_on_the_icon_shows_the_window_and_right_click_the_menu() -> None:
     """Regression for the 2026-09-18 crash, and for the click that stopped working.
@@ -5763,6 +6022,52 @@ def test_nothing_is_typed_while_the_box_has_no_keyboard_focus(monkeypatch):
     assert not any('keystroke "v"' in script for script in scripts)
 
 
+def test_a_busy_word_is_asked_again_before_the_selection_is_called_empty(monkeypatch):
+    """Word holding still for a moment must not lose the proofread.
+
+    The poll read has a 1.5 second timeout because it runs on every poll. A
+    repaint or a plugin that holds Word for longer than that used to answer
+    "Selection is empty." and drop the whole request, which reads as the app
+    refusing to work rather than Word catching its breath.
+    """
+    from src import word_integration as wi
+
+    integration = wi.MacOSWordIntegration()
+    attempts = {"count": 0}
+
+    def flaky():
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise wi.WordBusyError("Word did not respond in time")
+        return ("the paragraph", 10, 23, "before ", " after")
+
+    monkeypatch.setattr(integration, "_read_selection_info", flaky)
+    monkeypatch.setattr(wi.time, "sleep", lambda _seconds: None)
+
+    assert integration.get_selection_info() == (
+        "the paragraph", 10, 23, "before ", " after",
+    )
+    assert attempts["count"] == 3
+
+
+def test_a_word_that_stays_busy_still_answers_with_an_empty_selection(monkeypatch):
+    """The retry has a floor: three attempts, then the old answer."""
+    from src import word_integration as wi
+
+    integration = wi.MacOSWordIntegration()
+    attempts = {"count": 0}
+
+    def always_busy():
+        attempts["count"] += 1
+        raise wi.WordBusyError("Word did not respond in time")
+
+    monkeypatch.setattr(integration, "_read_selection_info", always_busy)
+    monkeypatch.setattr(wi.time, "sleep", lambda _seconds: None)
+
+    assert integration.get_selection_info() == ("", 0, 0, "", "")
+    assert attempts["count"] == 3
+
+
 def test_no_comment_text_is_typed_when_no_comment_box_opens(monkeypatch):
     """The safety rule stays: no box, no typing into the manuscript."""
     from src import word_integration as wi
@@ -5823,6 +6128,73 @@ def test_an_open_box_is_used_instead_of_being_toggled_shut(monkeypatch):
 
     assert attempts == [], "an open box must not be toggled shut"
     assert state["comments"] == 1
+
+
+def test_comment_window_matches_a_title_without_the_file_extension(monkeypatch):
+    """Word's window title drops ".docx" while AppleScript keeps it.
+
+    The 2026-10-03 regression: the active document was called
+    "paper.docx" and its window was titled "paper", so the window was never
+    found, every comment was refused with "Word did not open a comment box",
+    and the composer sat open on screen with nothing typed into it.
+    """
+    from src import word_integration as wi
+
+    class FakeApplicationServices:
+        class Window:
+            def __init__(self, title: str) -> None:
+                self.title = title
+
+        @staticmethod
+        def AXUIElementCreateApplication(_pid: int) -> str:
+            return "application"
+
+    wanted = FakeApplicationServices.Window("manuscript_immersive_tech_disclosure")
+    windows = [wanted, FakeApplicationServices.Window("Some other paper")]
+
+    def fake_attribute(_as, node, name):
+        if node == "application" and name == "AXWindows":
+            return windows
+        if name == "AXTitle":
+            return getattr(node, "title", None)
+        return None
+
+    monkeypatch.setattr(wi, "_ax_attribute", fake_attribute)
+    monkeypatch.setattr(
+        wi,
+        "_active_document_name",
+        lambda: "manuscript_immersive_tech_disclosure.docx",
+    )
+
+    assert wi._comment_box_window(FakeApplicationServices, 4242) is wanted
+
+
+def test_comment_window_still_refuses_a_window_it_cannot_identify(monkeypatch):
+    """The guard stays: a draft in another document must never receive a note."""
+    from src import word_integration as wi
+
+    class FakeApplicationServices:
+        class Window:
+            def __init__(self, title: str) -> None:
+                self.title = title
+
+        @staticmethod
+        def AXUIElementCreateApplication(_pid: int) -> str:
+            return "application"
+
+    windows = [FakeApplicationServices.Window("Chapter three")]
+
+    def fake_attribute(_as, node, name):
+        if node == "application" and name == "AXWindows":
+            return windows
+        if name == "AXTitle":
+            return getattr(node, "title", None)
+        return None
+
+    monkeypatch.setattr(wi, "_ax_attribute", fake_attribute)
+    monkeypatch.setattr(wi, "_active_document_name", lambda: "paper.docx")
+
+    assert wi._comment_box_window(FakeApplicationServices, 4242) is None
 
 
 def test_a_comment_word_hides_from_applescript_still_counts_as_success(
@@ -6425,3 +6797,189 @@ def test_a_paste_without_copy_evidence_keeps_its_failure_report(monkeypatch):
     assert outcomes == [
         (False, "Could not confirm the paste — please check the document.")
     ]
+
+
+# --- macOS updates install themselves ---------------------------------------
+
+
+def test_macos_update_helper_waits_and_can_roll_back(tmp_path) -> None:
+    """The helper must never touch a running app, and never lose the old one.
+
+    These are the two promises the old in-process installer broke: macOS
+    refused the swap while ByteProof was open, and a failed copy could leave
+    no app behind at all.
+    """
+    import shutil
+    import subprocess
+
+    from src.app_version import macos_update_script
+
+    dest = str(tmp_path / "Applications" / "ByteProof.app")
+    script = macos_update_script(
+        dmg_path=str(tmp_path / "update.dmg"),
+        staging_path=dest + ".update-staging",
+        dest_path=dest,
+        pid=4242,
+        log_path=str(tmp_path / "update.log"),
+        result_path=str(tmp_path / "update-result.json"),
+        version="2.3.1-beta.5",
+    )
+
+    # It waits for the app to exit before doing anything.
+    assert "/bin/kill -0" in script
+    assert "/bin/sleep 0.2" in script
+    # The heavy copy happened before the quit; headless is only renames, and
+    # the old bundle is kept until the new one is in place.
+    assert 'BACKUP="$DEST.update-backup"' in script
+    assert '/bin/mv "$DEST" "$BACKUP"' in script
+    assert '/bin/mv "$STAGING" "$DEST"' in script
+    assert '/bin/mv "$BACKUP" "$DEST"' in script
+    # The relaunch is silent: no Gatekeeper prompt for the fresh bundle.
+    assert "xattr -dr com.apple.quarantine" in script
+    assert 'BYTEPROOF_UPDATE_SKIP_OPEN' in script
+
+    bash = shutil.which("bash")
+    if bash:
+        parsed = subprocess.run(
+            [bash, "-n"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert parsed.returncode == 0, parsed.stderr
+
+
+@pytest.mark.skipif(
+    platform.system() != "Darwin",
+    reason="the helper replaces a macOS app bundle",
+)
+def test_macos_update_helper_swaps_the_bundle_and_keeps_it_on_failure(
+    tmp_path,
+) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    from src.app_version import macos_update_script, stage_macos_payload
+
+    def make_stub_bundle(folder) -> None:
+        macos_dir = folder / "Contents" / "MacOS"
+        macos_dir.mkdir(parents=True)
+        (folder / "Contents" / "Info.plist").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<plist version="1.0"><dict>'
+            "<key>CFBundleExecutable</key><string>ByteProof</string>"
+            "<key>CFBundleIdentifier</key><string>nz.co.bytemind.stub</string>"
+            "<key>CFBundleName</key><string>ByteProof</string>"
+            "<key>CFBundlePackageType</key><string>APPL</string>"
+            "</dict></plist>"
+        )
+        launcher = macos_dir / "ByteProof"
+        launcher.write_text("#!/bin/bash\nexit 0\n")
+        launcher.chmod(0o755)
+
+    def run_helper(staging, dest, workdir) -> dict[str, Any]:
+        workdir.mkdir(parents=True, exist_ok=True)
+        finished = subprocess.Popen([shutil.which("true") or "true"])
+        finished.wait()  # its pid is reaped, so the wait loop ends at once
+        script_path = workdir / "update.sh"
+        script_path.write_text(
+            macos_update_script(
+                dmg_path=str(workdir / "update.dmg"),
+                staging_path=str(staging),
+                dest_path=str(dest),
+                pid=finished.pid,
+                log_path=str(workdir / "update.log"),
+                result_path=str(workdir / "update-result.json"),
+                version="2.3.1-beta.5",
+            )
+        )
+        subprocess.run(
+            ["/bin/bash", str(script_path)],
+            env={**os.environ, "BYTEPROOF_UPDATE_SKIP_OPEN": "1"},
+            timeout=60,
+            check=False,
+        )
+        return json.loads((workdir / "update-result.json").read_text())
+
+    # A good update: the payload is staged, then renamed into place.
+    volume = tmp_path / "volume"
+    make_stub_bundle(volume / "ByteProof.app")
+    dest = tmp_path / "Applications" / "ByteProof.app"
+    dest.mkdir(parents=True)
+    (dest / "old.txt").write_text("old build")
+
+    staging = stage_macos_payload(str(volume), str(dest))
+    assert staging and staging.endswith(".update-staging")
+    result = run_helper(staging, dest, tmp_path / "good")
+    assert result["status"] == "ok"
+    assert (dest / "Contents" / "MacOS" / "ByteProof").exists()
+    assert not (dest / "old.txt").exists()
+    assert not os.path.exists(staging)
+
+    # A broken update: staging fails (no app on the volume), so the running
+    # app is told to fall back; nothing is quit and nothing is replaced.
+    empty_volume = tmp_path / "empty-volume"
+    empty_volume.mkdir()
+    dest2 = tmp_path / "Applications2" / "ByteProof.app"
+    dest2.mkdir(parents=True)
+    (dest2 / "old.txt").write_text("still here")
+    assert stage_macos_payload(str(empty_volume), str(dest2)) is None
+
+    # And if the staged copy disappears before the headless step, the helper
+    # still leaves the old bundle alone and reports the failure.
+    result2 = run_helper(dest2 / ".update-staging", dest2, tmp_path / "bad")
+    assert result2["status"] == "failed"
+    assert (dest2 / "old.txt").read_text() == "still here"
+
+
+def test_update_result_marker_is_read_once(tmp_path) -> None:
+    from src.app_version import take_update_result
+
+    marker = tmp_path / "update-result.json"
+    marker.write_text(
+        '{"status": "failed", "message": "no", "version": "2.3.1-beta.5"}'
+    )
+
+    result = take_update_result(str(tmp_path))
+    assert result is not None and result["status"] == "failed"
+    assert not marker.exists(), "the result is not reported twice"
+    assert take_update_result(str(tmp_path)) is None
+
+
+def test_a_wrong_shaped_settings_file_still_loads(monkeypatch, tmp_path) -> None:
+    """Valid JSON of the wrong shape must not stop the app from starting.
+
+    A hand-edited settings.json (or one written by a script) can hold a string
+    or a list where an object or a number belongs. Loading used to raise
+    before the window even opened, leaving the user with an app that would not
+    start and no way back except deleting the file.
+    """
+    import json
+
+    from src import settings as settings_mod
+
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "general": {"temperature": "hot"},
+                "active_provider": ["not", "a", "provider"],
+                "providers": {"DeepSeek": 5},
+                "local_model": "local",
+                "automation": [],
+                "live_preview": 3,
+                "license": "yes",
+                "last_run_version": 12,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings_mod, "SETTINGS_FILE", str(path))
+
+    loaded = settings_mod.load_runtime_settings()
+
+    assert loaded["general"]["temperature"] == 0.3
+    assert loaded["providers"]["DeepSeek"]["base_url"].startswith("http")
+    assert loaded["active_provider"] in settings_mod.PROVIDERS

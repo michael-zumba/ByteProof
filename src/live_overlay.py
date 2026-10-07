@@ -18,67 +18,99 @@ from PyQt6.QtWidgets import (
 )
 
 from .live_preview import UNDERLINE_COLOR_HEX, EditSpan
-from .ui_theme import diff_html, reason_color
+from .ui_theme import (
+    PANEL_ACCENT,
+    PANEL_ACCENT_FG,
+    PANEL_ACCENT_HOVER,
+    PANEL_ACCENT_PRESSED,
+    PANEL_BORDER,
+    PANEL_CARD,
+    PANEL_CARD_BORDER,
+    PANEL_CARD_BORDER_HOVER,
+    PANEL_CHIP_BG,
+    PANEL_CHIP_TEXT,
+    PANEL_DIVIDER,
+    PANEL_HOVER_TINT,
+    PANEL_HOVER_TINT_STRONG,
+    PANEL_MUTED,
+    PANEL_SCROLL_HANDLE,
+    PANEL_SCROLL_HANDLE_HOVER,
+    PANEL_SURFACE,
+    PANEL_TEXT,
+    PANEL_TONAL,
+    PANEL_TONAL_HOVER,
+    PANEL_TONAL_PRESSED,
+    PANEL_TONAL_TEXT,
+    SHELL_SUCCESS,
+    diff_html,
+    reason_color,
+)
 
-# Bright, Google-inspired surfaces and typography.
+# The panel wears ByteProof's own warm palette - cream surface, deep-green
+# actions - so it reads as part of the app rather than a web widget docked
+# beside it. The diff red/green stay meaningful and are left alone.
 SURFACE_SHEET = (
-    "QFrame { background: #FFFFFF; border: 1px solid #E3E6EB;"
-    " border-radius: 20px; }"
+    f"QFrame {{ background: {PANEL_SURFACE};"
+    f" border: 1px solid {PANEL_BORDER}; border-radius: 16px; }}"
 )
 PANEL_MIN_WIDTH = 340
 PANEL_MAX_WIDTH = 600
-TITLE_SHEET = "color: #202124; font-size: 15px; font-weight: 600;"
-DIFF_SHEET = "color: #202124; font-size: 14px;"
-REASON_SHEET = "color: #5F6368; font-size: 12px;"
-# White cards on the white surface, separated by a hairline border instead of
+TITLE_SHEET = f"color: {PANEL_TEXT}; font-size: 15px; font-weight: 600;"
+DIFF_SHEET = f"color: {PANEL_TEXT}; font-size: 14px;"
+REASON_SHEET = f"color: {PANEL_MUTED}; font-size: 12px;"
+# White cards on the warm surface, separated by a hairline border instead of
 # a grey fill; the hover tint is the only affordance the card itself needs.
 DIFF_BOX = (
-    "QFrame { background: #FFFFFF; border: 1px solid #E3E6EB;"
-    " border-radius: 12px; }"
-    "QFrame:hover { border-color: #D2D6DB; }"
+    f"QFrame {{ background: {PANEL_CARD};"
+    f" border: 1px solid {PANEL_CARD_BORDER}; border-radius: 12px; }}"
+    f"QFrame:hover {{ border-color: {PANEL_CARD_BORDER_HOVER}; }}"
 )
 PRIMARY_BUTTON = (
-    "QPushButton { background: #1A73E8; color: #FFFFFF; border: none;"
-    " border-radius: 8px; padding: 8px 18px; font-size: 13px;"
+    f"QPushButton {{ background: {PANEL_ACCENT}; color: {PANEL_ACCENT_FG};"
+    " border: none; border-radius: 8px; padding: 8px 18px; font-size: 13px;"
     " font-weight: 600; }"
-    "QPushButton:hover { background: #1765CC; }"
-    "QPushButton:pressed { background: #1256A8; }"
+    f"QPushButton:hover {{ background: {PANEL_ACCENT_HOVER}; }}"
+    f"QPushButton:pressed {{ background: {PANEL_ACCENT_PRESSED}; }}"
 )
 # The per-row action steps back so the panel has exactly one filled primary
 # ("Apply all"); the owner's screenshot had six equally loud blue buttons.
 TONAL_BUTTON = (
-    "QPushButton { background: #E8F0FE; color: #1967D2; border: none;"
-    " border-radius: 8px; padding: 8px 16px; font-size: 13px;"
+    f"QPushButton {{ background: {PANEL_TONAL}; color: {PANEL_TONAL_TEXT};"
+    " border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px;"
     " font-weight: 600; }"
-    "QPushButton:hover { background: #D2E3FC; }"
-    "QPushButton:pressed { background: #C6DAFC; }"
+    f"QPushButton:hover {{ background: {PANEL_TONAL_HOVER}; }}"
+    f"QPushButton:pressed {{ background: {PANEL_TONAL_PRESSED}; }}"
 )
 SECONDARY_BUTTON = (
-    "QPushButton { background: #FFFFFF; color: #1A73E8;"
-    " border: 1px solid #DADCE0; border-radius: 8px; padding: 8px 18px;"
+    f"QPushButton {{ background: {PANEL_CARD}; color: {PANEL_TONAL_TEXT};"
+    f" border: 1px solid {PANEL_CARD_BORDER}; border-radius: 8px;"
+    " padding: 8px 18px;"
     " font-size: 13px; font-weight: 600; }"
-    "QPushButton:hover { background: #F8F9FA; }"
-    "QPushButton:pressed { background: #EDF0F4; }"
+    f"QPushButton:hover {{ background: {PANEL_HOVER_TINT}; }}"
+    f"QPushButton:pressed {{ background: {PANEL_HOVER_TINT_STRONG}; }}"
 )
 CLOSE_BUTTON = (
-    "QPushButton { border: none; color: #5F6368; font-size: 15px;"
+    f"QPushButton {{ border: none; color: {PANEL_MUTED}; font-size: 15px;"
     " background: transparent; border-radius: 8px; }"
-    "QPushButton:hover { background: #F1F3F4; color: #202124; }"
-    "QPushButton:pressed { background: #E4E7EB; color: #202124; }"
+    f"QPushButton:hover {{ background: {PANEL_CHIP_BG};"
+    f" color: {PANEL_TEXT}; }}"
+    f"QPushButton:pressed {{ background: {PANEL_HOVER_TINT_STRONG};"
+    f" color: {PANEL_TEXT}; }}"
 )
 
-DIVIDER_SHEET = "QFrame { background: #F1F3F4; border: none; }"
+DIVIDER_SHEET = f"QFrame {{ background: {PANEL_DIVIDER}; border: none; }}"
 REASON_CHIP = (
-    "color: #5F6368; font-size: 11px; background: #F1F3F4;"
+    f"color: {PANEL_CHIP_TEXT}; font-size: 11px; background: {PANEL_CHIP_BG};"
     " border-radius: 6px; padding: 2px 8px;"
 )
 SCROLLBAR_SHEET = (
     "QScrollArea { border: none; background: transparent; }"
     "QScrollBar:vertical { background: transparent; width: 8px;"
     " margin: 2px 0px; }"
-    "QScrollBar::handle:vertical { background: #DADCE0;"
+    f"QScrollBar::handle:vertical {{ background: {PANEL_SCROLL_HANDLE};"
     " border-radius: 4px; min-height: 32px; }"
-    "QScrollBar::handle:vertical:hover { background: #BDC1C6; }"
+    f"QScrollBar::handle:vertical:hover {{"
+    f" background: {PANEL_SCROLL_HANDLE_HOVER}; }}"
     "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical"
     " { height: 0px; }"
     "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical"
@@ -370,11 +402,12 @@ def _hairline() -> QFrame:
 
 
 _PILL_BUTTON = (
-    "QPushButton { background: #202124; color: #FFFFFF; border: none;"
+    f"QPushButton {{ background: {PANEL_ACCENT}; color: {PANEL_ACCENT_FG};"
+    " border: none;"
     " border-radius: 16px; padding: 8px 16px; font-size: 13px;"
     " font-weight: 500; }"
-    "QPushButton:hover { background: #303134; }"
-    "QPushButton:pressed { background: #3C4043; }"
+    f"QPushButton:hover {{ background: {PANEL_ACCENT_HOVER}; }}"
+    f"QPushButton:pressed {{ background: {PANEL_ACCENT_PRESSED}; }}"
 )
 
 
@@ -626,7 +659,7 @@ class WordSuggestionCard(QWidget):
 
         checking = QLabel("Checking…")
         checking.setStyleSheet(
-            "color: #5F6368; font-size: 13px; padding: 4px 0px;"
+            f"color: {PANEL_MUTED}; font-size: 13px; padding: 4px 0px;"
         )
         layout.addWidget(checking)
         layout.addSpacing(4)
@@ -673,7 +706,7 @@ class WordSuggestionCard(QWidget):
         body_layout.setSpacing(12)
         for index, span in enumerate(spans):
             row = QHBoxLayout()
-            row.setSpacing(10)
+            row.setSpacing(12)
             reason_dot = QLabel()
             reason_dot.setFixedSize(8, 8)
             reason_dot.setStyleSheet(
@@ -694,7 +727,7 @@ class WordSuggestionCard(QWidget):
             diff_box.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
             diff_box.setStyleSheet(DIFF_BOX)
             diff_box_layout = QVBoxLayout(diff_box)
-            diff_box_layout.setContentsMargins(12, 9, 12, 9)
+            diff_box_layout.setContentsMargins(13, 10, 13, 10)
             diff_box_layout.setSpacing(0)
             diff_label = QLabel(
                 diff_html(span.before, span.after, panel_style=True)
@@ -819,10 +852,10 @@ class WordSuggestionCard(QWidget):
         row.setSpacing(8)
         check = QLabel("✓")
         check.setStyleSheet(
-            "color: #137333; font-size: 16px; font-weight: 700;"
+            f"color: {SHELL_SUCCESS}; font-size: 16px; font-weight: 700;"
         )
         message = QLabel("No changes needed — your writing is clean.")
-        message.setStyleSheet("color: #5F6368; font-size: 13px;")
+        message.setStyleSheet(f"color: {PANEL_MUTED}; font-size: 13px;")
         message.setWordWrap(True)
         row.addWidget(check, 0, Qt.AlignmentFlag.AlignTop)
         row.addWidget(message, 1)
