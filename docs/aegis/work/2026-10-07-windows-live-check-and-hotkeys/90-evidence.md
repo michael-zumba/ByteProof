@@ -75,7 +75,19 @@ load/order-dependent, not part of this change. The test passes in isolation.
 
 ## Release state
 
-Version bumped to `2.3.1-beta.7` in `src/settings.py` and
-`version_info.txt`; the public update feed is untouched (pre-release).
-Nothing pushed; the Windows beta is produced by the existing CI packaging
-job when the owner approves a push.
+The owner approved the push, so the beta shipped:
+
+- main: `216efe8` — "fix: Windows Live Check runs in Word, and the global
+  shortcuts work again (2.3.1-beta.7)" (also carries the local beta.6 work
+  that was waiting).
+- tag: `v2.3.1-beta.7`, which started the tagged build.
+- CI: macOS gate **success**; Windows installer job **success**; both assets
+  attached to https://github.com/michael-zumba/ByteProof/releases/tag/v2.3.1-beta.7
+  (`ByteProof_Windows.zip` 48.9 MB, `ByteProof_Installer_x64.msix` 49.6 MB).
+  The release is marked pre-release by hand, so GitHub's "latest" still
+  resolves to `v2.3.0` and the public update feed is untouched.
+- Known, pre-existing reds on the same push: the Windows informational test
+  job wedges exactly like every previous run (timers stop landing, per the
+  CI rule in AGENTS.md), and the licence-service workflow fails
+  `test_activation_recovers_when_the_database_is_empty` on main, which also
+  failed on the 2.3.0 push. Neither gates the installers.
