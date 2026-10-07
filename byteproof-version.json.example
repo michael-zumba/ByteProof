@@ -1,7 +1,7 @@
 {
-  "version": "2.3.0",
-  "release_date": "2026-10-02",
-  "release_notes": "Licensing now runs through Stripe: one key covers two computers, a licence portal moves ByteProof between them, and checkout takes card, Apple Pay, Google Pay and Alipay. Live edits that land late are put right and the hover comes back, a Word proofread no longer stops when Word refuses a redundant Track Changes write, and a refunded or revoked licence is reported clearly.",
+  "version": "2.4.0",
+  "release_date": "2026-10-07",
+  "release_notes": "Windows now has Live Check in Microsoft Word — suggestions appear as you select text, with apply, apply-all and undo — and the four global shortcuts work again. On macOS, updates install themselves: ByteProof downloads, replaces and relaunches without dragging. Also: checkout opens directly, cleaner Automation and Live Check pages, and more reliable proofreading of long selections, Word comments and tracked changes.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
   "sha256": {}
