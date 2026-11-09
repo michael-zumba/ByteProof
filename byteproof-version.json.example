@@ -1,7 +1,7 @@
 {
-  "version": "2.4.0",
-  "release_date": "2026-10-07",
-  "release_notes": "Windows now has Live Check in Microsoft Word — suggestions appear as you select text, with apply, apply-all and undo — and the four global shortcuts work again. On macOS, updates install themselves: ByteProof downloads, replaces and relaunches without dragging. Also: checkout opens directly, cleaner Automation and Live Check pages, and more reliable proofreading of long selections, Word comments and tracked changes.",
+  "version": "2.4.1",
+  "release_date": "2026-11-09",
+  "release_notes": "Updates now keep your licence and Accessibility permission, and Settings only asks about shortcuts you are actually changing. Word comment boxes are safe: typing no longer loses text, Live Check works inside comments, and Apply or Undo correct only the selected words. Proofreading no longer mistakes ordinary Word fields for an open comment, the app runs faster, and repeated update installs are reliable.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
   "sha256": {}
