@@ -3,6 +3,7 @@
   "release_date": "2026-11-09",
   "release_notes": "Updates now keep your licence and Accessibility permission, and Settings only asks about shortcuts you are actually changing. Word comment boxes are safe: typing no longer loses text, Live Check works inside comments, and Apply or Undo correct only the selected words. Proofreading no longer mistakes ordinary Word fields for an open comment, the app runs faster, and repeated update installs are reliable.",
   "macos_apple_silicon_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_AppleSilicon.dmg",
+  "macos_intel_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Installer_Intel.dmg",
   "windows_url": "https://github.com/michael-zumba/ByteProof/releases/latest/download/ByteProof_Windows.zip",
   "sha256": {}
 }
