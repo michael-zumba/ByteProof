@@ -21,8 +21,8 @@ jobs:
   # macOS is the release gate: it runs the whole suite and the tagged build
   # waits for it.
   test:
-    name: Tests (macos-14)
-    runs-on: macos-14
+    name: Tests (macos-latest)
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
