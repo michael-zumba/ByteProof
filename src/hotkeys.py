@@ -8,7 +8,7 @@ Windows uses pynput's GlobalHotKeys (no special permission required).
 import os
 import platform
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 SYSTEM = platform.system()
@@ -369,12 +369,20 @@ def _running_app_hotkeys(timeout: float = 1.5) -> list[tuple[str, str, str]]:
 
 
 def find_hotkey_conflicts(
-    hotkeys: dict[str, str], check_running_apps: bool = True
+    hotkeys: dict[str, str],
+    check_running_apps: bool = True,
+    only_labels: set[str] | None = None,
 ) -> list[str]:
     """Return gentle, human-readable conflict messages for ``hotkeys``.
 
     ``hotkeys`` maps a user-facing action name to its stored shortcut. The
     result is empty when no conflict is known; it never raises.
+
+    ``only_labels`` limits the answer to conflicts that involve one of those
+    actions. Settings passes the shortcuts the user actually changed in this
+    save, so saving an unrelated setting never nags about a key that has been
+    in use all along (owner report, 2026-10-08: every Save warned that Live
+    Check's Cmd+Shift+L is Finder's Downloads).
     """
     canonical: dict[str, list[str]] = {}
     for label, hotkey in hotkeys.items():
@@ -382,16 +390,21 @@ def find_hotkey_conflicts(
         if norm is not None:
             canonical.setdefault(norm, []).append(label)
 
+    def wanted(labels: Sequence[str]) -> bool:
+        return only_labels is None or any(
+            label in only_labels for label in labels
+        )
+
     messages: list[str] = []
     known = _known_hotkey_conflicts()
     for norm, labels in canonical.items():
-        if len(labels) > 1:
+        if len(labels) > 1 and wanted(labels):
             messages.append(
                 f"{' and '.join(labels)} are both assigned to "
                 f"{_pretty_hotkey(norm)}."
             )
         known_label = known.get(norm)
-        if known_label:
+        if known_label and wanted([labels[0]]):
             messages.append(
                 f"{labels[0]} uses {_pretty_hotkey(norm)}, which is "
                 f"{known_label}."
@@ -399,7 +412,7 @@ def find_hotkey_conflicts(
 
     if check_running_apps and SYSTEM == "Darwin":
         for norm, app_name, title in _running_app_hotkeys():
-            if norm in canonical:
+            if norm in canonical and wanted([canonical[norm][0]]):
                 messages.append(
                     f"{canonical[norm][0]} uses {_pretty_hotkey(norm)}, "
                     f"which is already {app_name} → {title}."

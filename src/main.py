@@ -57,6 +57,36 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+
+def another_instance_is_running() -> bool:
+    """Whether a second copy of ByteProof is already running (macOS).
+
+    Two instances would both watch the same selection and both paste over it,
+    so the owner could get doubled edits. LaunchServices stops a second launch
+    of the *same* bundle, but a copy somewhere else - the ``previous-versions``
+    folder the app keeps after an update is exactly that - is a different app
+    as far as macOS is concerned. Only bundled instances count: a run from
+    source is not this bundle and is left alone.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        from AppKit import NSWorkspace
+
+        mine = os.getpid()
+        for candidate in NSWorkspace.sharedWorkspace().runningApplications():
+            try:
+                bundle = str(candidate.bundleIdentifier() or "")
+                pid = int(candidate.processIdentifier())
+            except Exception:
+                continue
+            if bundle == "nz.co.bytemind.byteproof" and pid != mine:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def main() -> int:
     _install_exception_hook()
     args = parse_args()
@@ -66,6 +96,22 @@ def main() -> int:
         from .generic_editing import capture_diagnostics
         result = capture_diagnostics()
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return 0
+    if another_instance_is_running():
+        # Say so plainly instead of running a second watcher: two of them
+        # would fight over the same selection.
+        try:
+            from AppKit import NSRunningApplication
+
+            for candidate in NSRunningApplication.runningApplicationsWithBundleIdentifier_(
+                "nz.co.bytemind.byteproof"
+            ):
+                if int(candidate.processIdentifier()) != os.getpid():
+                    candidate.activateWithOptions_(0)
+                    break
+        except Exception:
+            pass
+        print("ByteProof is already running (menu bar). This copy will exit.")
         return 0
     runtime_settings = load_runtime_settings()
 

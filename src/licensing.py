@@ -447,12 +447,16 @@ def _validated_license_data() -> dict[str, Any] | None:
 
         provider = data.get("provider", "")
         machine_fp = _get_machine_fingerprint()
+        # A licence issued before the fingerprint was made stable is bound to
+        # the old mixture; accept it (and let the caller move it across)
+        # rather than locking the customer out of a licence they hold.
+        accepted_fps = {machine_fp, _legacy_machine_fingerprint()}
 
         if provider == "polar":
             if not data.get("activation_id"):
                 return None
             stored_fp = data.get("machine_fp", "")
-            if stored_fp and stored_fp != machine_fp:
+            if stored_fp and stored_fp not in accepted_fps:
                 return None
             expiry = data.get("expiry")
             if expiry is not None and expiry < time.time():
@@ -475,10 +479,10 @@ def _validated_license_data() -> dict[str, Any] | None:
             return None
 
         key_machine = result.get("machine_fp", "")
-        if key_machine and key_machine != machine_fp:
+        if key_machine and key_machine not in accepted_fps:
             return None
         stored_fp = data.get("machine_fp", "")
-        if stored_fp and stored_fp != machine_fp:
+        if stored_fp and stored_fp not in accepted_fps:
             return None
 
         expiry = data.get("expiry")
@@ -523,6 +527,7 @@ def get_license_info() -> dict[str, Any]:
         "key_display": _display_key(key) if key else "",
         "activation_id": data.get("activation_id", ""),
         "device_limit": data.get("device_limit"),
+        "machine_fp": data.get("machine_fp", ""),
     }
 
 
@@ -747,19 +752,28 @@ def ensure_trial_started() -> float:
     return now
 
 
-def _get_machine_fingerprint() -> str:
-    sources = []
-    try:
-        sources.append(str(uuid.getnode()))
-    except Exception:
-        sources.append(os.path.expanduser("~"))
-    try:
-        sources.append(platform.node() or "unknown")
-    except Exception:
-        pass
+_STABLE_MACHINE_ID_CACHE: str | None = None
+
+
+def _stable_machine_id() -> str:
+    """The operating system's hardware identity, or "" when it has none.
+
+    This is the part of a machine's identity that does not move: the hardware
+    UUID on macOS, the machine GUID on Windows, ``/etc/machine-id`` elsewhere.
+    Read once per process - it is asked for on every licence check, and the
+    macOS lookup is a subprocess.
+    """
+    global _STABLE_MACHINE_ID_CACHE
+    if _STABLE_MACHINE_ID_CACHE is not None:
+        return _STABLE_MACHINE_ID_CACHE
+    value = _read_stable_machine_id()
+    _STABLE_MACHINE_ID_CACHE = value
+    return value
+
+
+def _read_stable_machine_id() -> str:
+    """One physical read of the OS hardware identity."""
     if platform.system() == "Darwin":
-        # Stable hardware UUID; uuid.getnode() can be unstable across restarts
-        # on some macOS versions, which would invalidate machine-locked keys.
         try:
             completed = subprocess.run(
                 ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
@@ -770,7 +784,7 @@ def _get_machine_fingerprint() -> str:
             )
             match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', completed.stdout)
             if match:
-                sources.append(match.group(1))
+                return match.group(1)
         except Exception:
             pass
     if os.name == "nt":
@@ -781,16 +795,68 @@ def _get_machine_fingerprint() -> str:
                 r"SOFTWARE\Microsoft\Cryptography",
             ) as key:
                 machine_guid, _ = winreg.QueryValueEx(key, "MachineGuid")
-                sources.append(str(machine_guid))
+                return str(machine_guid)
         except Exception:
             pass
     try:
         if os.path.exists("/etc/machine-id"):
             with open("/etc/machine-id", "r") as f:
-                sources.append(f.read().strip())
+                value = f.read().strip()
+                if value:
+                    return value
     except Exception:
         pass
+    return ""
+
+
+def _legacy_machine_sources() -> list[str]:
+    """The mixture older builds hashed into the fingerprint.
+
+    It leads with the machine's *first network interface* and its hostname,
+    both of which move on their own: a VPN, a new adapter, a virtual machine's
+    regenerated MAC or a DHCP-supplied hostname changes them. The owner's
+    machine (2026-10-08) had four activations for one computer because of it.
+    Kept only so a licence issued against that value still matches and can be
+    moved to the stable identity.
+    """
+    sources: list[str] = []
+    try:
+        sources.append(str(uuid.getnode()))
+    except Exception:
+        sources.append(os.path.expanduser("~"))
+    try:
+        sources.append(platform.node() or "unknown")
+    except Exception:
+        pass
+    stable = _stable_machine_id()
+    if stable:
+        sources.append(stable)
+    return sources
+
+
+def _hash_machine_sources(sources: list[str]) -> str:
     joined = "|".join(sources)
     return base64.urlsafe_b64encode(
         hashlib.sha256(joined.encode()).digest()[:16]
     ).decode("utf-8")
+
+
+def _legacy_machine_fingerprint() -> str:
+    """The fingerprint older builds would have computed on this machine."""
+    return _hash_machine_sources(_legacy_machine_sources())
+
+
+def _get_machine_fingerprint() -> str:
+    """This computer's licence identity, built only from stable parts.
+
+    The old value hashed the machine's first network interface and hostname
+    together with the hardware UUID, so it changed whenever the network
+    identity did - which made a machine-locked licence look invalid, asked the
+    customer for the key again and consumed a fresh activation each time
+    (owner report, 2026-10-08). The hardware identity alone is stable; the old
+    mixture is only a fallback for systems that have no hardware UUID at all.
+    """
+    stable = _stable_machine_id()
+    if stable:
+        return _hash_machine_sources(["stable", stable])
+    return _legacy_machine_fingerprint()

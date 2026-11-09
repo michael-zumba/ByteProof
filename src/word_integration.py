@@ -64,6 +64,23 @@ COMMENT_POST_POLL_S = 0.3
 AX_COMMENT_SETTLE_S = 0.4
 # Time Word gets to give the comment box keyboard focus after it is pressed.
 AX_COMMENT_FOCUS_TIMEOUT_S = 2.0
+# Time the composer gets to take a select-all and then the pasted rewrite.
+COMMENT_REWRITE_TIMEOUT_S = 3.0
+
+# Word reports the document *window* as its focused Accessibility element
+# while the manuscript has the keyboard. Only Word's own text surfaces (the
+# comment composer, a search field, a dialog's field) answer with a text
+# element - and that difference is the one safe way to know whether
+# AppleScript's ``selection`` describes what the user is editing, because the
+# read itself disturbs an open comment box (see ``focused_text_field``).
+TEXT_FIELD_ROLES = ("AXTextArea", "AXTextField", "AXComboBox")
+
+# The composer walk (to the window, then to the Post comment button) is the
+# expensive part of the focused-field probe. The composer for a given keyboard
+# focus is stable, so the elements are remembered briefly and validated by
+# their own focused flag instead of being re-discovered on every poll tick.
+_focused_box_cache: dict[int, tuple[float, Any, Any]] = {}
+FOCUSED_BOX_CACHE_S = 2.0
 
 # Accessibility walk bounds for finding the comment box and the ribbon button.
 # A Word window carries a few hundred to a few thousand elements; both targets
@@ -464,6 +481,265 @@ def _comment_posted_in_pane(pid: int, comment_text: str) -> bool:
     return _ax_find(AS, window, is_posted_card) is not None
 
 
+def focused_text_field(pid: int) -> dict[str, Any] | None:
+    """Word's focused text surface, when the keyboard is not in the document.
+
+    The manuscript reports the document *window* as the focused element; only
+    Word's own text surfaces report a text element. That distinction is what
+    keeps the live check honest: AppleScript's ``selection`` always describes
+    the manuscript, never those surfaces, so reading it while the comment
+    composer holds the keyboard answers about the wrong text - and it closes
+    the draft box and swallows the keystroke being typed (owner report,
+    2026-10-08: typing in a comment box did not land, and the comment
+    disappeared whenever the app was on).
+
+    Returns None when the document itself has the keyboard, so the caller
+    keeps using the AppleScript path unchanged.
+    """
+    try:
+        import ApplicationServices as AS
+    except Exception:
+        return None
+    app = AS.AXUIElementCreateApplication(int(pid))
+    try:
+        err, focused = AS.AXUIElementCopyAttributeValue(
+            app, AS.kAXFocusedUIElementAttribute, None
+        )
+    except Exception:
+        return None
+    if err != 0 or focused is None:
+        return None
+    role = str(_ax_attribute(AS, focused, "AXRole") or "")
+    if role not in TEXT_FIELD_ROLES:
+        return None
+    box = _focused_comment_box(pid)
+    is_comment_box = bool(box is not None and box[0] == focused)
+    if not is_comment_box:
+        # A reply composer may not carry the "Post comment" button this
+        # probe looks for, but every composer lives inside a comment thread
+        # card ("N of M, Comment thread from <author>"); its own ancestors
+        # say so without any AppleScript.
+        is_comment_box = _focused_in_comment_thread(AS, focused)
+    return {
+        "element": focused,
+        "role": role,
+        "description": str(_ax_attribute(AS, focused, "AXDescription") or ""),
+        "is_comment_box": is_comment_box,
+        "value": str(_ax_attribute(AS, focused, "AXValue") or ""),
+        "focused": str(_ax_attribute(AS, focused, "AXFocused") or "") == "True",
+    }
+
+
+def _focused_in_comment_thread(AS: Any, focused: Any) -> bool:
+    """Whether the focused element sits inside a Word comment thread card.
+
+    The composer is normally recognised by Word's own "Post comment" button
+    (see :func:`_focused_comment_box`). A reply composer may label that
+    button differently, but it still lives in the thread card, whose
+    AXDescription reads "N of M, Comment thread from <author>" - and the
+    document's own text areas never do.
+    """
+    node = focused
+    for _ in range(12):
+        node = _ax_attribute(AS, node, "AXParent")
+        if node is None:
+            return False
+        role = str(_ax_attribute(AS, node, "AXRole") or "")
+        if role == "AXWindow":
+            return False
+        description = str(_ax_attribute(AS, node, "AXDescription") or "")
+        if "Comment thread" in description:
+            return True
+    return False
+
+
+def _focused_comment_box(pid: int) -> tuple[Any, Any] | None:
+    """The composer the keyboard is in, as (text area, Post comment button).
+
+    Found from the focused element upwards, with no AppleScript at all: the
+    document-name read that :func:`_comment_draft_box` needs is exactly the
+    kind of round trip that must not happen while the box holds the keyboard.
+    The window is reached through the composer's own ancestors, so the box
+    found is always the one in the window the user is typing in.
+    """
+    try:
+        import ApplicationServices as AS
+    except Exception:
+        return None
+    now = time.monotonic()
+    cached = _focused_box_cache.get(int(pid))
+    if cached is not None and now - cached[0] < FOCUSED_BOX_CACHE_S:
+        if str(_ax_attribute(AS, cached[1], "AXFocused") or "") == "True":
+            return cached[1], cached[2]
+        _focused_box_cache.pop(int(pid), None)
+    app = AS.AXUIElementCreateApplication(int(pid))
+    try:
+        err, focused = AS.AXUIElementCopyAttributeValue(
+            app, AS.kAXFocusedUIElementAttribute, None
+        )
+    except Exception:
+        return None
+    if err != 0 or focused is None:
+        return None
+    if str(_ax_attribute(AS, focused, "AXRole") or "") not in TEXT_FIELD_ROLES:
+        return None
+    window = focused
+    for _ in range(AX_WALK_MAX_DEPTH):
+        parent = _ax_attribute(AS, window, "AXParent")
+        if parent is None:
+            return None
+        window = parent
+        if str(_ax_attribute(AS, window, "AXRole") or "") == "AXWindow":
+            break
+    else:
+        return None
+    post = _ax_find(
+        AS,
+        window,
+        lambda node: str(_ax_attribute(AS, node, "AXTitle") or "")
+        == "Post comment"
+        or str(_ax_attribute(AS, node, "AXHelp") or "").startswith(
+            "Post comment"
+        ),
+    )
+    if post is None:
+        return None
+    _focused_box_cache[int(pid)] = (time.monotonic(), focused, post)
+    return focused, post
+
+
+def _utf16_length(text: str) -> int:
+    """Length in the UTF-16 units that Accessibility ranges are counted in."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _rewrite_comment_box(expected: str, new_text: str) -> str:
+    """Select the whole comment box and paste over it, in one keystroke burst.
+
+    The composer only exists as a web view: it ignores Accessibility range
+    writes, so the selection has to be made the way a reader makes it. Both
+    keystrokes live in a single System Events script with the proof between
+    them - if typing focus slipped back to the manuscript, a blind Command-A
+    would select the document and the paste that follows would replace it.
+    The proof is read from the same process that is about to type, so a box
+    whose text is not selected means the Command-V is never sent.
+
+    Returns "PASTED", "NOT_FOCUSED", "NO_SELECTION" or "FAILED".
+    """
+    # AppleScript strings are UTF-16 based, and the AX selection it reads is
+    # reported the same way; accepting either count keeps the guard honest for
+    # text with characters outside the Basic Multilingual Plane.
+    script = f'''
+        set expectedUtf16 to {_utf16_length(expected)}
+        set expectedChars to {len(expected)}
+        tell application "System Events"
+            tell process "Microsoft Word"
+                set frontmost to true
+                delay 0.15
+                set el to focused UI element
+                if (value of attribute "AXRole" of el) is not "AXTextArea" then
+                    return "NOT_FOCUSED"
+                end if
+                keystroke "a" using {{command down}}
+                delay 0.25
+                set selectedText to (value of attribute "AXSelectedText" of el)
+                set selectedLength to length of selectedText
+                if selectedLength is not expectedUtf16 and selectedLength is not expectedChars then
+                    return "NO_SELECTION"
+                end if
+                keystroke "v" using {{command down}}
+                delay 0.4
+                return "PASTED"
+            end tell
+        end tell
+    '''
+    try:
+        result = subprocess.run(
+            ["osascript", "-"],
+            input=script.encode("utf-8"),
+            capture_output=True,
+            timeout=APPLESCRIPT_READ_TIMEOUT_S,
+            check=False,
+        )
+    except Exception as exc:
+        _log_word(f"  Comment box rewrite key burst failed: {exc}")
+        return "FAILED"
+    out = result.stdout.decode("utf-8", "replace").strip()
+    if result.returncode != 0 and not out:
+        _log_word(
+            "  Comment box rewrite key burst error: "
+            f"{result.stderr.decode('utf-8', 'replace').strip()[:200]}"
+        )
+        return "FAILED"
+    return out or "FAILED"
+
+
+def replace_comment_box_text(expected: str, new_text: str) -> tuple[bool, str]:
+    """Rewrite the whole open comment box, the way a reader would.
+
+    Accessibility reports success for a value or range write into Word's
+    composer and silently ignores it, so the only write that lands is select
+    the box's text, then paste. Both halves are gated on the box: it must
+    still hold the text the suggestion was made for, it must still own the
+    keyboard, and the select-all must be visible in the box - a manuscript
+    whose text got selected instead is refused, never replaced.
+    """
+    try:
+        import ApplicationServices as AS
+    except Exception:
+        return False, "Accessibility is unavailable for the comment box."
+    from .generic_editing import (
+        _mac_clipboard_string,
+        _mac_restore_clipboard,
+        _mac_set_clipboard,
+        _redact,
+        _same_text,
+    )
+
+    pid = _word_pid()
+    if not pid:
+        return False, "Microsoft Word is not running."
+    box = _focused_comment_box(pid)
+    if box is None:
+        return False, "The comment box is no longer open — try again."
+    area, _post = box
+    current = str(_ax_attribute(AS, area, "AXValue") or "")
+    if not _same_text(current, expected):
+        return False, "The comment changed — add the suggestion again."
+    if not _focus_comment_box(area):
+        return False, "The comment box would not take keyboard focus."
+
+    saved = _mac_clipboard_string()
+    try:
+        _mac_set_clipboard(new_text)
+        status = _rewrite_comment_box(current, new_text)
+        if status == "NOT_FOCUSED":
+            _log_word("  Comment box lost the keyboard before the rewrite")
+            return False, "The comment box lost the keyboard — try again."
+        if status == "NO_SELECTION":
+            _log_word(
+                "  Comment box select-all did not cover the comment; "
+                "nothing was pasted"
+            )
+            return False, "Could not select the comment text — try again."
+        if status != "PASTED":
+            return False, "Could not write to the comment box."
+        deadline = time.monotonic() + COMMENT_REWRITE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            got = str(_ax_attribute(AS, area, "AXValue") or "")
+            if _same_text(got, new_text):
+                return True, "Applied to the comment."
+            time.sleep(0.12)
+        _log_word(
+            f"  Comment box rewrite unverified ({_redact(got)}); "
+            "left for review"
+        )
+    finally:
+        if saved is not None:
+            _mac_restore_clipboard(saved)
+    return False, "Could not confirm the comment edit — please check it."
+
+
 class WordBusyError(RuntimeError):
     """Word did not respond in time (usually a modal dialog is open)."""
 
@@ -590,9 +866,27 @@ class WordIntegration:
     def ensure_track_changes_disabled(self) -> None:
         raise NotImplementedError
 
-    def get_selection_info(self) -> tuple[str, int, int, str, str]:
+    def get_selection_info(
+        self, attempts: int = 3
+    ) -> tuple[str, int, int, str, str]:
         """Returns (text, start_index, end_index, context_before, context_after)"""
         raise NotImplementedError
+
+    def get_selection_span(self, attempts: int = 1) -> tuple[str, int, int]:
+        """The selection's text and document positions, without its context.
+
+        The live poll reads this every tick, and the two 250-character context
+        ranges are only needed when a preview is actually requested. Platforms
+        whose reads are cheap (Windows/COM) can keep answering with the full
+        read; the macOS AppleScript read overrides this to leave the context
+        out (measured 2026-10-08: 228 ms per tick with it, 162 ms without).
+        """
+        text, start, end, _before, _after = self.get_selection_info()
+        return text, start, end
+
+    def get_selection_context(self, start: int, end: int) -> tuple[str, str]:
+        """The text either side of a selection, for the preview's context."""
+        return "", ""
 
     def selection_scope(self) -> str:
         """Where the current selection lives: see the SCOPE_* constants.
@@ -815,7 +1109,11 @@ class WindowsWordIntegration(WordIntegration):
         except Exception as e:
             _log_word(f"Error restoring selection range (Windows): {e}")
 
-    def get_selection_info(self) -> tuple[str, int, int, str, str]:
+    def get_selection_info(
+        self, attempts: int = 3
+    ) -> tuple[str, int, int, str, str]:
+        # COM reads are cheap, so the retry count the macOS read needs (see
+        # MacOSWordIntegration.get_selection_info) is accepted and ignored.
         try:
             word = self._get_word()
             if not word.Documents.Count:
@@ -1442,7 +1740,9 @@ class MacOSWordIntegration(WordIntegration):
     def ensure_track_changes_disabled(self) -> None:
         self._set_track_changes(False)
 
-    def get_selection_info(self) -> tuple[str, int, int, str, str]:
+    def get_selection_info(
+        self, attempts: int = 3
+    ) -> tuple[str, int, int, str, str]:
         """Read the current selection (short timeout: this runs every poll).
 
         A Word that is busy for longer than the poll timeout is asked again
@@ -1451,16 +1751,111 @@ class MacOSWordIntegration(WordIntegration):
         a manual proofread answer "Selection is empty." and lose the request,
         which read like the app refusing to work rather than Word catching its
         breath.
+
+        ``attempts=1`` - what the live poll passes - fails on the first
+        problem instead of retrying: each attempt is a 1.5-second osascript
+        call plus a sleep, all on the UI thread, so a Word showing a dialog
+        used to freeze the app for up to five seconds per tick. The poll backs
+        off instead (see LivePreviewService._sample).
         """
-        for attempt in range(3):
+        limit = max(1, int(attempts))
+        for attempt in range(limit):
             try:
                 return self._read_selection_info()
             except WordBusyError as busy:
-                if attempt == 2:
-                    _log_word(f"Selection read failed while Word was busy: {busy}")
-                    return "", 0, 0, "", ""
+                if attempt + 1 >= limit:
+                    if limit > 1:
+                        _log_word(
+                            f"Selection read failed while Word was busy: {busy}"
+                        )
+                        return "", 0, 0, "", ""
+                    raise
                 time.sleep(0.4 + attempt * 0.3)
         return "", 0, 0, "", ""
+
+    def get_selection_span(self, attempts: int = 1) -> tuple[str, int, int]:
+        """The selection's text and positions, without the context ranges.
+
+        The poll reads this every tick. Measured on this machine 2026-10-08:
+        the full read costs 228 ms against Word, the span 162 ms, and the
+        difference is the two context ranges the preview needs and the poll
+        does not.
+        """
+        limit = max(1, int(attempts))
+        for attempt in range(limit):
+            try:
+                return self._read_selection_span()
+            except WordBusyError as busy:
+                if attempt + 1 >= limit:
+                    if limit > 1:
+                        _log_word(
+                            f"Selection read failed while Word was busy: {busy}"
+                        )
+                        return "", 0, 0
+                    raise
+                time.sleep(0.4 + attempt * 0.3)
+        return "", 0, 0
+
+    def _read_selection_span(self) -> tuple[str, int, int]:
+        """One span read against Word (raising WordBusyError when it is busy)."""
+        script = """
+        tell application "Microsoft Word"
+            if not (exists active document) then error "No active Word document is open."
+            set mySelection to selection
+            set myRange to text object of mySelection
+            set startPos to start of content of myRange
+            set myContent to content of myRange
+            set endPos to end of content of myRange
+            return (startPos as string) & "###PROOF_SEP###" & myContent & "###PROOF_SEP###" & (endPos as string)
+        end tell
+        """
+        result = self._run_applescript(script, timeout=WORD_POLL_READ_TIMEOUT_S)
+        if "###PROOF_SEP###" in result:
+            parts = result.split("###PROOF_SEP###")
+            if len(parts) >= 3:
+                text = parts[1]
+                if str(text).strip().lower() == "missing value":
+                    text = ""
+                return text, int(parts[0]), int(parts[2])
+        return "", 0, 0
+
+    def get_selection_context(self, start: int, end: int) -> tuple[str, str]:
+        """The text either side of the selection, for the preview prompt.
+
+        Called once per new selection rather than once per tick. A failure is
+        not fatal: the preview still runs, with less context.
+        """
+        script = f"""
+        tell application "Microsoft Word"
+            if not (exists active document) then error "No active Word document is open."
+            set beforeText to ""
+            if {int(start)} > 0 then
+                set beforeStart to {int(start)} - 250
+                if beforeStart < 0 then set beforeStart to 0
+                set rangeBefore to create range active document start beforeStart end {int(start)}
+                set beforeText to content of rangeBefore
+            end if
+            set afterText to ""
+            set docRange to text object of active document
+            set docEnd to end of content of docRange
+            if {int(end)} < docEnd then
+                set afterEnd to {int(end)} + 250
+                if afterEnd > docEnd then set afterEnd to docEnd
+                set rangeAfter to create range active document start {int(end)} end afterEnd
+                set afterText to content of rangeAfter
+            end if
+            return beforeText & "###PROOF_SEP###" & afterText
+        end tell
+        """
+        try:
+            result = self._run_applescript(script, timeout=WORD_POLL_READ_TIMEOUT_S)
+        except Exception as exc:
+            _log_word(f"Could not read the selection context: {exc}")
+            return "", ""
+        if "###PROOF_SEP###" in result:
+            before, _, after = result.partition("###PROOF_SEP###")
+            return before, after
+        return "", ""
 
     def _read_selection_info(self) -> tuple[str, int, int, str, str]:
         """One read of the selection, raising WordBusyError when Word is busy."""
@@ -1537,9 +1932,14 @@ class MacOSWordIntegration(WordIntegration):
             # The caller retries: Word being busy is not an empty selection.
             raise
         except Exception as e:
+            # A Word that cannot answer is not a Word with nothing selected.
+            # Re-raising lets the caller decide: the poll backs off for a few
+            # seconds (instead of spawning an osascript every 800 ms and
+            # writing a log line each time, which is what a Word window with
+            # no document open used to do), and the manual proofread reports
+            # Word's own message rather than "Selection is empty.".
             _log_word(f"Error getting text with context: {e}")
-
-        return "", 0, 0, "", ""
+            raise
 
     def selection_scope(self) -> str:
         """See WordIntegration.selection_scope.

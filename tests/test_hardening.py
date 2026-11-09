@@ -2208,6 +2208,11 @@ def test_windows_word_selection_reaches_the_live_preview(monkeypatch) -> None:
             return "teh cat sat on teh mat", 100, 124, "", ""
 
         @staticmethod
+        def get_selection_span(attempts: int = 1):
+            # The live poll reads the span and fetches the context separately.
+            return "teh cat sat on teh mat", 100, 124
+
+        @staticmethod
         def selection_scope() -> str:
             return "main"
 
@@ -2264,6 +2269,103 @@ def test_hotkey_conflicts_report_duplicates_and_system_keys(monkeypatch):
         assert any("Spotlight" in message for message in conflicts)
     else:
         assert len(conflicts) == 1
+
+
+def test_hotkey_conflicts_can_be_limited_to_the_changed_shortcut(monkeypatch):
+    """Settings asks only about the shortcut the user just changed.
+
+    Owner report, 2026-10-08: every Save warned that Live Check's Cmd+Shift+L
+    is Finder's Downloads, even when nothing about the shortcuts had changed.
+    """
+    from src import hotkeys
+
+    monkeypatch.setattr(hotkeys, "_running_app_hotkeys", lambda timeout=1.5: [])
+    all_hotkeys = {
+        "Open Window": "<cmd>+<shift>+;",
+        "Proofread Selection": "<cmd>+<shift>+;",
+        "Apply all suggestions": "<cmd>+<space>",
+    }
+
+    everything = hotkeys.find_hotkey_conflicts(all_hotkeys)
+    assert any("both assigned" in message for message in everything)
+
+    only_apply_all = hotkeys.find_hotkey_conflicts(
+        all_hotkeys, only_labels={"Apply all suggestions"}
+    )
+    assert not any("both assigned" in message for message in only_apply_all), (
+        "a duplicate between two unchanged shortcuts was reported"
+    )
+    if platform.system() == "Darwin":
+        assert any("Spotlight" in message for message in only_apply_all)
+
+
+def test_saving_settings_without_changing_a_shortcut_does_not_warn(
+    monkeypatch,
+) -> None:
+    """Save must be silent when the shortcuts are untouched."""
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+
+    from src import gui as gui_mod
+    from src import settings as settings_mod
+
+    QApplication.instance() or QApplication([])
+    dialog = gui_mod.SettingsDialog(settings_mod.load_runtime_settings())
+    checked: list[set[str] | None] = []
+    monkeypatch.setattr(
+        dialog,
+        "_hotkey_conflicts",
+        lambda only_labels=None: checked.append(only_labels)
+        or ["Turn Live Check on/off uses Cmd+Shift+L, which is already Finder → Downloads."],
+    )
+    buttons: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox, "addButton", lambda self, *args, **kwargs: buttons.append(args)
+    )
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: None)
+    try:
+        dialog.accept()
+        assert checked == [], (
+            "an unchanged form still went looking for hotkey conflicts"
+        )
+        assert buttons == [], "an unchanged form still warned about a shortcut"
+    finally:
+        dialog.close()
+
+
+def test_changing_a_shortcut_to_a_conflicting_one_still_warns(
+    monkeypatch,
+) -> None:
+    """The warning still appears the moment a taken shortcut is set."""
+    from PyQt6.QtGui import QKeySequence
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+
+    from src import gui as gui_mod
+    from src import settings as settings_mod
+
+    QApplication.instance() or QApplication([])
+    dialog = gui_mod.SettingsDialog(settings_mod.load_runtime_settings())
+    checked: list[set[str] | None] = []
+    monkeypatch.setattr(
+        dialog,
+        "_hotkey_conflicts",
+        lambda only_labels=None: checked.append(only_labels)
+        or ["Turn Live Check on/off uses Cmd+Shift+L, which is already Finder → Downloads."],
+    )
+    buttons: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox, "addButton", lambda self, *args, **kwargs: buttons.append(args)
+    )
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: None)
+    try:
+        # A different combination for a shortcut that had one: this is a change.
+        dialog.live_toggle_hotkey_edit.setKeySequence(QKeySequence("Ctrl+Shift+J"))
+        dialog.accept()
+        assert checked == [{"Turn Live Check on/off"}], checked
+        assert len(buttons) == 2, "the conflict dialog was not shown"
+    finally:
+        dialog.close()
 
 
 def test_restore_defaults_resets_preferences_but_keeps_keys_and_license():
@@ -3664,6 +3766,157 @@ def test_a_whole_table_is_skipped_but_its_text_is_proofread(monkeypatch):
     assert status == logic.COMMENT_SKIPPED_STATUS
 
 
+def test_a_manual_proofread_leaves_an_open_comment_box_alone(monkeypatch):
+    """The hotkey must not touch Word while the comment composer has focus.
+
+    Owner report, 2026-10-08: typing in a comment box lost characters and the
+    box kept disappearing. Measured on this machine: with the draft box open
+    and focused, an AppleScript selection read that lands between two
+    keystrokes closes the box and swallows the character being typed. The
+    manual proofread starts with exactly that read, so it has to stand down.
+    """
+    from src import logic
+    from src import word_integration as wi
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def ensure_ready(self) -> None:
+            self.calls += 1
+
+        def selection_scope(self) -> str:
+            self.calls += 1
+            return "main"
+
+    word = FakeWord()
+    monkeypatch.setattr(logic, "word_app", word)
+    monkeypatch.setattr(wi, "_word_pid", lambda: 4242)
+    monkeypatch.setattr(
+        wi,
+        "focused_text_field",
+        lambda pid: {"role": "AXTextArea", "is_comment_box": True},
+    )
+
+    status, *_ = logic.proofread_selection_once(
+        1024, settings={"general": {"track_changes": False}}
+    )
+
+    assert status == logic.COMMENT_BOX_SKIPPED_STATUS
+    assert word.calls == 0, "Word was touched while the comment box had focus"
+
+
+def test_a_manual_proofread_runs_with_word_keyboard_in_other_fields(monkeypatch):
+    """Only the comment composer stands the hotkey down.
+
+    Word reports several of its surfaces as focused text elements - the
+    status-bar search box, the ribbon's font boxes and, on some builds, the
+    document's own page areas. Refusing every one of them as "the comment
+    box is open" blocked ordinary proofreads and told the owner a comment he
+    could not see was open (owner log, 2026-10-14).
+    """
+    from src import logic
+    from src import word_integration as wi
+
+    class FakeWord:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def ensure_ready(self) -> None:
+            self.calls += 1
+
+        def selection_scope(self) -> str:
+            self.calls += 1
+            return "main"
+
+        def ensure_track_changes_disabled(self) -> None:
+            pass
+
+        def ensure_track_changes_enabled(self) -> None:
+            pass
+
+        def get_selection_info(self):
+            return "", 0, 0, "", ""
+
+    for surface in (
+        {"role": "AXTextField", "is_comment_box": False,
+         "description": "Search (Cmd + Ctrl + U)"},
+        {"role": "AXTextArea", "is_comment_box": False,
+         "description": "Page 1 content"},
+        {"role": "AXComboBox", "is_comment_box": False,
+         "description": "Font Size:"},
+    ):
+        word = FakeWord()
+        monkeypatch.setattr(logic, "word_app", word)
+        monkeypatch.setattr(wi, "_word_pid", lambda: 4242)
+        monkeypatch.setattr(wi, "focused_text_field", lambda pid, s=surface: s)
+
+        status, *_ = logic.proofread_selection_once(
+            1024, settings={"general": {"track_changes": False}}
+        )
+
+        assert status == "Selection is empty.", surface
+        assert word.calls > 0, (
+            f"the proofread must proceed when {surface['description']!r} "
+            "has the keyboard"
+        )
+
+
+def test_a_reply_composer_is_recognised_by_its_thread_card(monkeypatch):
+    """A composer without the measured Post button still stands the flow down.
+
+    The primary recognition is Word's own "Post comment" button. A reply
+    composer may label that button differently, but it still lives in the
+    thread card ("N of M, Comment thread from <author>"), so the focused
+    element's own ancestors keep it classified as a comment box.
+    """
+    import sys
+
+    from src import word_integration as wi
+
+    composer = {
+        "AXRole": "AXTextArea",
+        "AXDescription": "Start a conversation",
+        "AXValue": "",
+        "AXFocused": "True",
+    }
+    card = {
+        "AXRole": "AXUnknown",
+        "AXDescription": "1 of 2, Comment thread from Michael Zhang",
+    }
+    window = {"AXRole": "AXWindow"}
+    composer["AXParent"] = card
+    card["AXParent"] = window
+    app: dict[str, Any] = {}
+
+    class FakeAS:
+        kAXFocusedUIElementAttribute = "AXFocusedUIElement"
+
+        def AXUIElementCreateApplication(self, pid: int):
+            return app
+
+        def AXUIElementCopyAttributeValue(self, element, name, _):
+            if element is app and name == "AXFocusedUIElement":
+                return 0, composer
+            if isinstance(element, dict) and name in element:
+                return 0, element[name]
+            return -25212, None
+
+    fake = FakeAS()
+    monkeypatch.setitem(sys.modules, "ApplicationServices", fake)
+    monkeypatch.setattr(wi, "_focused_comment_box", lambda pid: None)
+
+    field = wi.focused_text_field(4242)
+    assert field is not None
+    assert field["is_comment_box"] is True
+
+    # The document's own text areas share no such ancestor.
+    card["AXDescription"] = "Normal margin"
+    field = wi.focused_text_field(4242)
+    assert field is not None
+    assert field["is_comment_box"] is False
+
+
 def test_a_suggestion_that_drops_a_cell_mark_is_refused():
     """Editing table text is fine; re-shaping the table is not."""
     from src.word_integration import cell_mark_mismatch
@@ -3855,6 +4108,12 @@ def test_a_whole_table_selection_never_starts_a_preview(monkeypatch):
 
         def get_selection_info(self):
             return table_text, 0, len(table_text), "", ""
+
+        def get_selection_span(self, attempts: int = 1):
+            return table_text, 0, len(table_text)
+
+        def get_selection_context(self, start: int, end: int):
+            return "", ""
 
         def selection_scope(self) -> str:
             return self.scope
@@ -4584,6 +4843,12 @@ def test_the_poll_waits_for_the_pointer_before_spending_a_request(monkeypatch):
     class FakeWord:
         def get_selection_info(self):
             return selection, 0, len(selection), "", ""
+
+        def get_selection_span(self, attempts: int = 1):
+            return selection, 0, len(selection)
+
+        def get_selection_context(self, start: int, end: int):
+            return "", ""
 
         def selection_scope(self) -> str:
             return SCOPE_MAIN
@@ -6830,10 +7095,16 @@ def test_macos_update_helper_waits_and_can_roll_back(tmp_path) -> None:
     assert "/bin/sleep 0.2" in script
     # The heavy copy happened before the quit; headless is only renames, and
     # the old bundle is kept until the new one is in place.
-    assert 'BACKUP="$DEST.update-backup"' in script
+    assert "BACKUP=" in script
     assert '/bin/mv "$DEST" "$BACKUP"' in script
     assert '/bin/mv "$STAGING" "$DEST"' in script
     assert '/bin/mv "$BACKUP" "$DEST"' in script
+    # Two install clicks must not fight: each attempt gets its own lock, and a
+    # helper whose payload was taken by a newer run reports success when the
+    # target version is already installed (owner report, 2026-10-07).
+    assert "LOCK=" in script
+    assert "installed_version" in script
+    assert "another run finished this update" in script
     # The relaunch is silent: no Gatekeeper prompt for the fresh bundle.
     assert "xattr -dr com.apple.quarantine" in script
     assert 'BYTEPROOF_UPDATE_SKIP_OPEN' in script
@@ -6911,7 +7182,7 @@ def test_macos_update_helper_swaps_the_bundle_and_keeps_it_on_failure(
     (dest / "old.txt").write_text("old build")
 
     staging = stage_macos_payload(str(volume), str(dest))
-    assert staging and staging.endswith(".update-staging")
+    assert staging and ".update-staging-" in staging
     result = run_helper(staging, dest, tmp_path / "good")
     assert result["status"] == "ok"
     assert (dest / "Contents" / "MacOS" / "ByteProof").exists()
@@ -6932,6 +7203,169 @@ def test_macos_update_helper_swaps_the_bundle_and_keeps_it_on_failure(
     result2 = run_helper(dest2 / ".update-staging", dest2, tmp_path / "bad")
     assert result2["status"] == "failed"
     assert (dest2 / "old.txt").read_text() == "still here"
+
+
+def test_two_install_clicks_each_get_their_own_payload(tmp_path) -> None:
+    """The race that popped "could not install the update" after a success.
+
+    The owner's log (2026-10-07 17:28:59 and 17:29:43) shows two install
+    attempts: the second one cleared the shared staging folder the first
+    helper was about to swap, so that helper reported failure - and opened the
+    DMG - while the update itself succeeded. Each attempt now stages its own
+    payload and never touches another attempt's.
+    """
+    from src.app_version import stage_macos_payload
+
+    def make_stub_bundle(folder) -> None:
+        (folder / "Contents").mkdir(parents=True)
+        (folder / "Contents" / "Info.plist").write_text("<plist/>")
+
+    volume = tmp_path / "volume"
+    make_stub_bundle(volume / "ByteProof.app")
+    dest = tmp_path / "Applications" / "ByteProof.app"
+    dest.mkdir(parents=True)
+
+    first = stage_macos_payload(str(volume), str(dest), attempt_id="one")
+    second = stage_macos_payload(str(volume), str(dest), attempt_id="two")
+
+    assert first and second and first != second
+    assert os.path.isdir(second)
+    assert not os.path.exists(first), (
+        "an old attempt's payload should be cleaned, not left to rot"
+    )
+
+
+def test_a_pending_install_is_detected_and_a_stale_one_is_not(
+    tmp_path,
+) -> None:
+    """The lock tells a waiting helper from a dead one."""
+    import shutil
+    import subprocess
+    import time as _time
+
+    from src.app_version import pending_update_install
+
+    support = tmp_path / "support"
+    lock = support / "update" / "install.lock"
+    lock.parent.mkdir(parents=True)
+
+    assert pending_update_install(str(support)) is None
+
+    lock.write_text(f"{os.getpid()}\n")
+    assert pending_update_install(str(support)) == os.getpid()
+
+    # A dead helper's lock is stale: removed, and the install may proceed.
+    finished = subprocess.Popen([shutil.which("true") or "true"])
+    finished.wait()
+    lock.write_text(f"{finished.pid}\n")
+    assert pending_update_install(str(support)) is None
+    assert not lock.exists()
+
+    # "starting <id>" (written before the helper has a pid) counts as pending
+    # while it is fresh, so a double click cannot race the helper's startup.
+    lock.write_text("starting 1234-5678\n")
+    _time.sleep(0.01)
+    assert pending_update_install(str(support)) == 0
+
+
+def test_the_helper_treats_an_already_installed_version_as_done(
+    tmp_path,
+) -> None:
+    """A helper that lost its payload to a newer run must not cry failure.
+
+    That is exactly what the owner saw: the update installed, and a dialog
+    said it could not. If the target version is on disk and nothing is staged,
+    the work is done - silently.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    from src.app_version import macos_update_script
+
+    dest = tmp_path / "Applications" / "ByteProof.app"
+    (dest / "Contents").mkdir(parents=True)
+    (dest / "Contents" / "Info.plist").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<plist version="1.0"><dict>'
+        "<key>CFBundleShortVersionString</key><string>2.4.1-beta.5</string>"
+        "</dict></plist>"
+    )
+    workdir = tmp_path / "update"
+    workdir.mkdir()
+    finished = subprocess.Popen([shutil.which("true") or "true"])
+    finished.wait()
+    script_path = workdir / "helper.sh"
+    script_path.write_text(
+        macos_update_script(
+            dmg_path=str(workdir / "update.dmg"),
+            staging_path=str(dest) + ".update-staging-lost",
+            dest_path=str(dest),
+            pid=finished.pid,
+            log_path=str(workdir / "update.log"),
+            result_path=str(workdir / "update-result.json"),
+            version="2.4.1-beta.5",
+            lock_path=str(workdir / "install.lock"),
+        )
+    )
+    result = subprocess.run(
+        ["/bin/bash", str(script_path)],
+        env={
+            **os.environ,
+            "BYTEPROOF_UPDATE_SKIP_OPEN": "1",
+            "BYTEPROOF_UPDATE_SKIP_NOTIFY": "1",
+        },
+        timeout=60,
+        check=False,
+    )
+    payload = json.loads((workdir / "update-result.json").read_text())
+    assert result.returncode == 0
+    assert payload["status"] == "ok", payload
+    assert not (workdir / "install.lock").exists(), "the lock outlived the run"
+
+
+def test_a_second_install_click_joins_the_waiting_helper(
+    monkeypatch, tmp_path
+) -> None:
+    """Clicking Install again must not stage a rival payload.
+
+    Owner report, 2026-10-07: two clicks 44 seconds apart started two helpers;
+    the older one then reported failure after the newer one had installed the
+    update. The second click now quits into the helper that is already
+    waiting.
+    """
+    from PyQt6.QtWidgets import QApplication
+
+    from src import app_version
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+
+    QApplication.instance() or QApplication([])
+    support = tmp_path / "support"
+    lock = support / "update" / "install.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text(f"{os.getpid()}\n")  # a helper that is alive and waiting
+
+    staged: list[str] = []
+    monkeypatch.setattr(
+        app_version,
+        "stage_macos_payload",
+        lambda *a, **k: staged.append("staged") or None,
+    )
+    loaded = settings_mod.load_runtime_settings()
+    loaded["general"]["auto_apply"] = False
+    window = ProofreaderApp(1024, loaded)
+    monkeypatch.setattr(
+        "src.gui.get_app_support_dir", lambda: str(support), raising=False
+    )
+    try:
+        quit_into_helper = window._stage_macos_update(str(tmp_path / "x.dmg"))
+        assert quit_into_helper is True, (
+            "the click must quit into the waiting installer"
+        )
+        assert staged == [], "a second payload was staged while one was waiting"
+    finally:
+        window.close()
 
 
 def test_update_result_marker_is_read_once(tmp_path) -> None:

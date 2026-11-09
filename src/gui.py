@@ -115,6 +115,7 @@ from .local_model import (
     stop_local_server,
 )
 from .logic import (
+    COMMENT_BOX_SKIPPED_STATUS,
     COMMENT_SKIPPED_STATUS,
     STORY_SKIPPED_STATUS,
     TABLE_SKIPPED_STATUS,
@@ -149,6 +150,15 @@ from .ui_theme import (
     settings_stylesheet,
 )
 from .word_integration import get_word_integration
+
+# The Live Check tab lists installed apps with their real icons. Scanning the
+# Applications folders and asking macOS for icons costs a few hundred
+# milliseconds (measured 2026-10-08) and both answers are stable while the app
+# runs, so they are cached here instead of being paid on every Settings open.
+_APP_LIST_CACHE: tuple[float, list[dict[str, Any]]] | None = None
+APP_LIST_CACHE_S = 300.0
+_APP_ICON_CACHE: dict[str, QIcon] = {}
+APP_ICON_CACHE_MAX = 256
 
 
 def _ui_font(size: int, weight: QFont.Weight | None = None) -> QFont:
@@ -1685,7 +1695,6 @@ class SettingsDialog(QDialog):
         # Hotkey conflict checks are only worth a prompt when the user has
         # actually changed a shortcut; saving an unchanged form should not nag
         # about an app that happens to use the same key.
-        self._hotkey_conflict_acknowledged = False
         self._original_hotkeys = self._hotkey_snapshot()
         
         self.setStyleSheet(settings_stylesheet(resource_path("assets")))
@@ -3357,17 +3366,19 @@ class SettingsDialog(QDialog):
         self.automation_list.setCurrentItem(item)
         self._update_automation_summary()
 
-    def _installed_apps_for_trigger(self) -> list[dict[str, Any]]:
+    def _installed_apps_for_trigger(
+        self, force: bool = False
+    ) -> list[dict[str, Any]]:
         cached = getattr(self, "_installed_apps_cache", None)
-        if cached is not None:
+        if cached is not None and not force:
             return cached
-        result = self._scan_installed_apps()
+        result = self._scan_installed_apps(force=force)
         self._installed_apps_cache = result
         return result
 
-    def _scan_installed_apps(self) -> list[dict[str, Any]]:
+    def _scan_installed_apps(self, force: bool = False) -> list[dict[str, Any]]:
         if platform.system() == "Darwin":
-            return self._mac_installed_apps()
+            return self._mac_installed_apps(force=force)
         try:
             editor = get_generic_editor()
             apps = editor.running_apps()
@@ -3376,7 +3387,19 @@ class SettingsDialog(QDialog):
         return apps or []
 
     @staticmethod
-    def _mac_installed_apps() -> list[dict[str, Any]]:
+    def _mac_installed_apps(force: bool = False) -> list[dict[str, Any]]:
+        # The scan reads and parses every app's Info.plist (~77 ms on this
+        # machine, 2026-10-08) and the answer only changes when something is
+        # installed, so it is kept for a few minutes instead of being redone
+        # every time Settings opens.
+        global _APP_LIST_CACHE
+        now = time.monotonic()
+        if (
+            not force
+            and _APP_LIST_CACHE is not None
+            and now - _APP_LIST_CACHE[0] < APP_LIST_CACHE_S
+        ):
+            return [dict(app) for app in _APP_LIST_CACHE[1]]
         apps: dict[str, dict[str, Any]] = {}
         roots = [
             os.path.expanduser("~/Applications"),
@@ -3422,9 +3445,32 @@ class SettingsDialog(QDialog):
                         "path": path,
                     },
                 )
-        return sorted(apps.values(), key=lambda app: app["name"].lower())
+        result = sorted(apps.values(), key=lambda app: app["name"].lower())
+        _APP_LIST_CACHE = (now, result)
+        return result
 
     def _app_icon(self, app: dict[str, Any]) -> QIcon:
+        # Asking macOS for an app's icon costs about 10 ms each, and the Live
+        # Check tab asks for sixteen of them every time Settings opens
+        # (measured 2026-10-08: ~310 ms to build the dialog, ~200 ms of it in
+        # this tab). An app's icon does not change while ByteProof runs.
+        cache_key = str(
+            app.get("path")
+            or app.get("bundle_id")
+            or app.get("name")
+            or app.get("exe")
+            or ""
+        )
+        cached_icon = _APP_ICON_CACHE.get(cache_key)
+        if cached_icon is not None:
+            return cached_icon
+        icon = self._lookup_app_icon(app)
+        if cache_key and len(_APP_ICON_CACHE) < APP_ICON_CACHE_MAX:
+            _APP_ICON_CACHE[cache_key] = icon
+        return icon
+
+    def _lookup_app_icon(self, app: dict[str, Any]) -> QIcon:
+        """One real lookup of an app's icon (see _app_icon for the cache)."""
         path = ""
         try:
             if app.get("path") and os.path.exists(app["path"]):
@@ -3499,7 +3545,9 @@ class SettingsDialog(QDialog):
         app_list.setIconSize(QSize(28, 28))
         layout.addWidget(app_list, 1)
 
-        apps = self._installed_apps_for_trigger()
+        # The picker is a deliberate "show me what is installed" moment, so it
+        # always rescans (the Live Check tab reads the cached list).
+        apps = self._installed_apps_for_trigger(force=True)
         if not apps:
             layout.addWidget(QLabel("No installed applications found."))
 
@@ -4721,16 +4769,30 @@ class SettingsDialog(QDialog):
             )
         }
 
-    def _hotkey_conflicts(self) -> list[str]:
-        """Check the four shortcuts for duplicates, system keys and menus."""
+    # Settings keys vs the action names the conflict messages use. Keeping one
+    # mapping stops the two from drifting (the filter in accept() needs the
+    # same names find_hotkey_conflicts reports).
+    _HOTKEY_LABELS: ClassVar[dict[str, str]] = {
+        "open_hotkey": "Open Window",
+        "proofread_hotkey": "Proofread Selection",
+        "live_toggle_hotkey": "Turn Live Check on/off",
+        "apply_all_hotkey": "Apply all suggestions",
+    }
+
+    def _hotkey_conflicts(
+        self, only_labels: set[str] | None = None
+    ) -> list[str]:
+        """Check the four shortcuts for duplicates, system keys and menus.
+
+        ``only_labels`` narrows the answer to actions whose shortcut changed
+        in this save (see accept).
+        """
         from .hotkeys import find_hotkey_conflicts
 
         general = self.get_settings().get("general", {})
         hotkeys = {
-            "Open Window": str(general.get("open_hotkey", "")),
-            "Proofread Selection": str(general.get("proofread_hotkey", "")),
-            "Turn Live Check on/off": str(general.get("live_toggle_hotkey", "")),
-            "Apply all suggestions": str(general.get("apply_all_hotkey", "")),
+            label: str(general.get(key, ""))
+            for key, label in self._HOTKEY_LABELS.items()
         }
         hotkeys = {name: value for name, value in hotkeys.items() if value}
         if not hotkeys:
@@ -4738,7 +4800,7 @@ class SettingsDialog(QDialog):
         app = QApplication.instance()
         offscreen = bool(app is not None and "offscreen" in app.platformName())
         return find_hotkey_conflicts(
-            hotkeys, check_running_apps=not offscreen
+            hotkeys, check_running_apps=not offscreen, only_labels=only_labels
         )
 
     def _focus_hotkey_editor(self) -> None:
@@ -4754,38 +4816,45 @@ class SettingsDialog(QDialog):
                 return
 
     def accept(self) -> None:
-        """Save, but gently surface a shortcut that another action owns."""
+        """Save, warning only about a shortcut the user is setting now.
+
+        Owner report, 2026-10-08: "why everytime I click save, it pop up
+        this?". The warning is meant for a *change* - the user assigning a
+        combination that another app or action already owns - but it was
+        raised for whatever the four shortcuts happened to be, however long
+        they had been in use, and it also cost a menu-bar scan of every
+        running app on every save. Now an unchanged form saves silently, a
+        shortcut that is being changed is checked (and warns once, the moment
+        it is set), and the scan only runs when there is something to check.
+        """
         current_general = self.get_settings().get("general", {})
         current_hotkeys = self._hotkey_snapshot(current_general)
-        if (
-            self._hotkey_conflict_acknowledged
-            and current_hotkeys == self._original_hotkeys
-        ):
-            # The user already chose "Save Anyway" for these exact shortcuts;
-            # do not ask again on a later save that changed something else.
-            super().accept()
-            return
-        conflicts = self._hotkey_conflicts()
-        if conflicts:
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Icon.Warning)
-            box.setWindowTitle("That shortcut is already in use")
-            box.setText(
-                "You can save it anyway, but the other action may also run "
-                "when you press it."
-            )
-            box.setInformativeText(
-                "\n".join(f"• {conflict}" for conflict in conflicts)
-            )
-            choose_button = box.addButton(
-                "Choose Another", QMessageBox.ButtonRole.RejectRole
-            )
-            box.addButton("Save Anyway", QMessageBox.ButtonRole.AcceptRole)
-            box.exec()
-            if box.clickedButton() is choose_button:
-                self._focus_hotkey_editor()
-                return
-            self._hotkey_conflict_acknowledged = True
+        changed = {
+            self._HOTKEY_LABELS.get(name, name)
+            for name, value in current_hotkeys.items()
+            if value and value != self._original_hotkeys.get(name, "")
+        }
+        if changed:
+            conflicts = self._hotkey_conflicts(changed)
+            if conflicts:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Icon.Warning)
+                box.setWindowTitle("That shortcut is already in use")
+                box.setText(
+                    "You can save it anyway, but the other action may also "
+                    "run when you press it."
+                )
+                box.setInformativeText(
+                    "\n".join(f"• {conflict}" for conflict in conflicts)
+                )
+                choose_button = box.addButton(
+                    "Choose Another", QMessageBox.ButtonRole.RejectRole
+                )
+                box.addButton("Save Anyway", QMessageBox.ButtonRole.AcceptRole)
+                box.exec()
+                if box.clickedButton() is choose_button:
+                    self._focus_hotkey_editor()
+                    return
         super().accept()
 
     def get_settings(self) -> dict[str, Any]:
@@ -5279,9 +5348,10 @@ class ProofreaderApp(QMainWindow):
                     QTimer.singleShot(
                         2000,
                         lambda: self._show_toast(
-                            "ByteProof updated — if Live Check stopped, "
-                            "toggle ByteProof off and on in System Settings > "
-                            "Privacy & Security > Accessibility.",
+                            "ByteProof updated — if Live Check stopped, open "
+                            "System Settings > Privacy & Security > "
+                            "Accessibility, remove ByteProof with −, and let "
+                            "it ask again: that entry survives updates.",
                             kind="warning",
                         ),
                     )
@@ -7168,8 +7238,110 @@ class ProofreaderApp(QMainWindow):
     def _on_live_preview_error(self, message: str) -> None:
         self._show_toast(f"Live Check: {message}", kind="warning")
 
+    def _note_permission_state(self, state: str) -> None:
+        """Track the Accessibility grant, and repair the two update-time traps.
+
+        Owner report, 2026-10-08: after updates macOS asked for the permission
+        again, and once it was granted *while the app was running* every apply
+        still failed ("could not confirm the paste") - Safari looked as if it
+        could not be edited at all. Two things fix that:
+
+        * a missing grant is asked for through the system prompt
+          (``AXIsProcessTrustedWithOptions``): an entry the prompt creates is
+          tied to ByteProof's identity, while one added by hand in System
+          Settings is tied to that single build, which is why every update
+          asked again;
+        * a grant that arrives while the app is running restarts it once:
+          macOS gives a running process its Accessibility answer for reading,
+          but posting keystrokes - the paste an apply needs - keeps being
+          refused until the app starts again.
+        """
+        if state == "no_permission":
+            self._permission_was_missing = True
+            if not getattr(self, "_permission_prompted", False):
+                self._permission_prompted = True
+                self._ask_for_accessibility()
+            return
+        if state == "ready" and getattr(
+            self, "_permission_was_missing", False
+        ):
+            self._permission_was_missing = False
+            self._restart_after_permission()
+
+    def _ask_for_accessibility(self) -> None:
+        """Ask macOS for the Accessibility grant the way that persists."""
+        if platform.system() != "Darwin":
+            return
+        try:
+            import ApplicationServices as AS
+
+            options = {AS.kAXTrustedCheckOptionPrompt: True}
+            AS.AXIsProcessTrustedWithOptions(options)
+        except Exception as exc:
+            from .generic_editing import _debug_log
+
+            _debug_log(f"APP: could not ask macOS for Accessibility: {exc}")
+        self._show_toast(
+            "Live Check needs Accessibility permission — allow ByteProof in "
+            "the macOS prompt, then ByteProof will finish by itself.",
+            kind="warning",
+        )
+
+    def _restart_after_permission(self) -> None:
+        """Restart once when Accessibility is granted mid-run (see above)."""
+        if getattr(self, "_restarting_for_permission", False):
+            return
+        self._restarting_for_permission = True
+        from .generic_editing import _debug_log
+
+        _debug_log(
+            "APP: Accessibility granted while running; restarting so applies "
+            "can post keystrokes again"
+        )
+        self._show_toast(
+            "Accessibility restored — restarting ByteProof so editing works…",
+            kind="success",
+        )
+        QTimer.singleShot(1500, self._relaunch_application)
+
+    def _relaunch_application(self) -> None:
+        """Open this app again once this process has quit."""
+        import shlex
+        import sys
+
+        try:
+            bundle = ""
+            if getattr(sys, "frozen", False):
+                bundle = os.path.abspath(
+                    os.path.join(
+                        os.path.dirname(sys.executable), os.pardir, os.pardir
+                    )
+                )
+            if bundle and os.path.isdir(bundle):
+                # Open the app only once this process is really gone: a second
+                # copy that starts while the old one is still alive would exit
+                # by itself (see main.another_instance_is_running).
+                script = (
+                    f"for _ in $(seq 1 50); do "
+                    f"/bin/kill -0 {os.getpid()} 2>/dev/null || break; "
+                    f"/bin/sleep 0.2; done; "
+                    f"/usr/bin/open -a {shlex.quote(bundle)}"
+                )
+                subprocess.Popen(
+                    ["/bin/sh", "-c", script],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception as exc:
+            from .generic_editing import _debug_log
+
+            _debug_log(f"APP: could not schedule the restart: {exc}")
+        self.request_quit()
+
     def _apply_live_status(self, state: str) -> None:
         """Update the live-suggestions readiness row (P1)."""
+        self._note_permission_state(state)
         if not hasattr(self, "live_status_label"):
             return
         self._live_status_state = state
@@ -7180,10 +7352,10 @@ class ProofreaderApp(QMainWindow):
         elif state == "no_permission":
             dot = "#D97706"
             text = (
-                "Live Check needs Accessibility permission — open "
-                "System Settings and toggle ByteProof off and on."
+                "Live Check needs Accessibility permission — click Enable, "
+                "then allow ByteProof when macOS asks."
             )
-            action = "Open System Settings"
+            action = "Enable"
         elif state == "disabled":
             dot = "#9CA3AF"
             text = "Live Check is off in Settings."
@@ -7220,6 +7392,11 @@ class ProofreaderApp(QMainWindow):
 
     def _on_live_action(self) -> None:
         if self._live_status_state == "no_permission":
+            # Ask through the system prompt first: that is the entry macOS
+            # keeps across future builds. Open the pane as well, so the user
+            # can act if the prompt was dismissed earlier.
+            self._permission_prompted = True
+            self._ask_for_accessibility()
             try:
                 from PyQt6.QtCore import QUrl
                 from PyQt6.QtGui import QDesktopServices
@@ -7233,8 +7410,9 @@ class ProofreaderApp(QMainWindow):
             except Exception:
                 pass
             self._show_toast(
-                "Toggle ByteProof off and on in the Accessibility list, "
-                "then select text again.",
+                "Allow ByteProof in Accessibility. If it is already listed "
+                "but not working, remove it with − and let ByteProof ask "
+                "again — that version of the entry survives updates.",
                 kind="warning",
             )
             return
@@ -7680,10 +7858,32 @@ class ProofreaderApp(QMainWindow):
         the headless step is only two renames and a refusal cannot leave the
         machine without a working app.
         """
-        from .app_version import stage_macos_payload, stage_macos_update
+        from .app_version import (
+            pending_update_install,
+            stage_macos_payload,
+            stage_macos_update,
+        )
 
         try:
             dest_path = installed_app_bundle_path()
+            # A helper from an earlier click may already be waiting for this
+            # process to exit. Quitting into it is the whole point of the
+            # click - staging a rival is what made two helpers race over one
+            # payload and show "could not install the update" *after* a
+            # successful install (owner report, 2026-10-07).
+            support_dir = get_app_support_dir()
+            if pending_update_install(support_dir) is not None:
+                from .generic_editing import _debug_log
+
+                _debug_log(
+                    "UPDATE: an installer is already waiting; quitting into it"
+                )
+                self._show_toast(
+                    "Installing the update — ByteProof will reopen "
+                    "automatically.",
+                    kind="success",
+                )
+                return True
             # Copy the new bundle next to the old one while the app is still
             # running: if macOS refuses the copy (App Management permission,
             # a read-only location), the fallback dialog appears with the app
@@ -7703,7 +7903,7 @@ class ProofreaderApp(QMainWindow):
                 dest_path=dest_path,
                 pid=os.getpid(),
                 version=str(self.pending_update_version or ""),
-                support_dir=get_app_support_dir(),
+                support_dir=support_dir,
             )
             subprocess.Popen(
                 ["/bin/bash", script_path],
@@ -7925,6 +8125,24 @@ class ProofreaderApp(QMainWindow):
                 QMessageBox.information(
                     self,
                     "Select text in the document body",
+                    status_text,
+                    QMessageBox.StandardButton.Ok
+                )
+            else:
+                self._show_toast(status_text, kind="warning")
+            self.status_label.setText(status_text)
+            self.diff_text.clear()
+            self.diff_word_count.setText("")
+            return
+
+        if status_text == COMMENT_BOX_SKIPPED_STATUS:
+            # A draft comment is not in the document yet. The read this flow
+            # starts with would close the open box and swallow the keystroke
+            # being typed, so the draft is left to Live Check instead.
+            if self.isVisible():
+                QMessageBox.information(
+                    self,
+                    "Word's comment box is open",
                     status_text,
                     QMessageBox.StandardButton.Ok
                 )

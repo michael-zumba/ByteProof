@@ -320,3 +320,59 @@ def test_copied_and_forged_license_files_do_not_unlock(
         assert activation.activate_with_key(purchase_key)["ok"]
         _use_machine("machine-3", monkeypatch)
         assert not activation.activate_with_key(purchase_key)["ok"]
+
+
+def test_a_licence_bound_to_the_old_fingerprint_moves_to_the_stable_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing licence survives the fingerprint change, silently.
+
+    The fingerprint used to follow the machine's network identity; licences
+    issued then are still bound to that old value. The app must keep working
+    on such a licence and move it to the stable identity - re-activating with
+    the key the customer already gave us and releasing the old seat - without
+    asking for anything (owner report, 2026-10-08).
+    """
+    from src import activation, license_api, licensing
+
+    generator = _load_license_generator()
+    purchase_key = "BYTP-CYCLE-2222-2222-2222"
+    with _StubService(generator, purchase_key, "move@example.com") as service:
+        monkeypatch.setattr(license_api, "LICENSE_API_URL", service.url)
+        _use_machine("cycle-move", monkeypatch)
+
+        legacy = "legacy-network-fingerprint"
+        stable = "stable-hardware-fingerprint"
+        monkeypatch.setattr(
+            licensing, "_legacy_machine_fingerprint", lambda: legacy
+        )
+        monkeypatch.setattr(
+            licensing, "_get_machine_fingerprint", lambda: legacy
+        )
+        monkeypatch.setattr(
+            activation, "_get_machine_fingerprint", lambda: legacy
+        )
+        monkeypatch.setattr(license_api, "machine_fingerprint", lambda: legacy)
+        assert activation.activate_with_key(purchase_key)["ok"]
+        assert service.activations.get(legacy)
+
+        # The network identity changes (VPN, adapter, hostname) and this build
+        # reports the stable hardware identity instead.
+        monkeypatch.setattr(
+            licensing, "_get_machine_fingerprint", lambda: stable
+        )
+        monkeypatch.setattr(
+            activation, "_get_machine_fingerprint", lambda: stable
+        )
+        monkeypatch.setattr(license_api, "machine_fingerprint", lambda: stable)
+
+        assert licensing.is_licensed(), (
+            "a licence bound to the old fingerprint must not lock the customer out"
+        )
+
+        result = activation.validate_license_remote()
+        assert result.get("ok") is True, result
+        assert stable in service.activations
+        assert legacy not in service.activations, "the old seat was not released"
+        assert licensing.get_license_info()["machine_fp"] == stable
+        assert service.deactivate_calls == 1

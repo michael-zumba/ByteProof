@@ -11,6 +11,7 @@ publishes a SHA-256 for the platform artifact, the payload is verified before it
 is handed to the installer.
 """
 
+import glob
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ import shlex
 import shutil
 import ssl
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -316,6 +318,8 @@ APP_PID=@PID@
 DMG=@DMG@
 DEST=@DEST@
 STAGING=@STAGING@
+BACKUP=@BACKUP@
+LOCK=@LOCK@
 LOG=@LOG@
 RESULT=@RESULT@
 APP_NAME=@APP_NAME@
@@ -324,6 +328,23 @@ VERSION=@VERSION@
 log() {
   printf '%s %s\n' "$(/bin/date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG" 2>/dev/null
 }
+
+installed_version() {
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$DEST/Contents/Info.plist" 2>/dev/null
+}
+
+release_lock() {
+  # Only our own lock is ours to remove: a newer attempt replaces the file.
+  if [ -f "$LOCK" ]; then
+    owner="$(/bin/cat "$LOCK" 2>/dev/null)"
+    if [ "$owner" = "$$" ]; then
+      /bin/rm -f "$LOCK" 2>/dev/null
+    fi
+  fi
+}
+trap release_lock EXIT
+/bin/echo "$$" > "$LOCK" 2>/dev/null
 
 write_result() {
   printf '{"status":"%s","message":"%s","version":"%s"}\n' "$1" "$2" "$VERSION" > "$RESULT" 2>/dev/null
@@ -336,6 +357,16 @@ notify() {
 }
 
 log "update to $VERSION staged"
+
+# 0. Two install clicks used to race over one staging folder: the loser found
+#    its payload gone, told the user the update had failed, and opened the DMG
+#    - while the update had just succeeded. If the target version is already
+#    installed and there is nothing staged, that is exactly that situation.
+if [ ! -d "$STAGING" ] && [ "$(installed_version)" = "$VERSION" ]; then
+  log "already on $VERSION; another run finished this update"
+  write_result "ok" "ByteProof was updated and relaunched."
+  exit 0
+fi
 
 # 1. Wait for the old app to quit; it asks itself to quit as the helper starts.
 waited=0
@@ -352,6 +383,11 @@ fi
 # 2. The new bundle was copied next to the old one while the app still ran, so
 #    the headless step is only two renames.
 if [ ! -d "$STAGING" ]; then
+  if [ "$(installed_version)" = "$VERSION" ]; then
+    log "the staged bundle is gone but $VERSION is installed; treating this run as done"
+    write_result "ok" "ByteProof was updated and relaunched."
+    exit 0
+  fi
   log "no staged bundle at $STAGING"
   write_result "failed" "The downloaded update did not contain ByteProof.app."
   notify "ByteProof could not install the update automatically. The installer has been opened - drag ByteProof to Applications to finish."
@@ -360,7 +396,6 @@ if [ ! -d "$STAGING" ]; then
 fi
 
 # 3. Swap the bundle, keeping the old one until the new one is in place.
-BACKUP="$DEST.update-backup"
 /bin/rm -rf "$BACKUP" 2>/dev/null
 moved_old=0
 if [ -e "$DEST" ]; then
@@ -422,13 +457,25 @@ def macos_update_script(
     result_path: str,
     app_name: str = "ByteProof",
     version: str = "",
+    backup_path: str = "",
+    lock_path: str = "",
 ) -> str:
-    """The detached shell script that swaps the bundle after the app exits."""
+    """The detached shell script that swaps the bundle after the app exits.
+
+    ``backup_path`` and ``lock_path`` default to the historical shared names so
+    older callers keep working; the app passes per-attempt paths, so two
+    install clicks can never fight over one staging folder or one backup.
+    """
     values = {
         "@PID@": str(int(pid)),
         "@DMG@": shlex.quote(dmg_path),
         "@DEST@": shlex.quote(dest_path),
         "@STAGING@": shlex.quote(staging_path),
+        "@BACKUP@": shlex.quote(backup_path or f"{dest_path}.update-backup"),
+        "@LOCK@": shlex.quote(
+            lock_path
+            or os.path.join(os.path.dirname(log_path), "install.lock")
+        ),
         "@LOG@": shlex.quote(log_path),
         "@RESULT@": shlex.quote(result_path),
         "@APP_NAME@": shlex.quote(app_name),
@@ -444,6 +491,7 @@ def stage_macos_payload(
     dmg_path: str,
     dest_path: str,
     app_name: str = "ByteProof",
+    attempt_id: str = "",
 ) -> str | None:
     """Copy the new app next to the installed one, while the app still runs.
 
@@ -452,10 +500,17 @@ def stage_macos_payload(
     so the caller can fall back instead of quitting into a failed install.
     The headless helper then only has to rename two bundles.
 
+    Each attempt gets its own staging folder (``.update-staging-<id>``): two
+    install clicks used to share one, and the later attempt's cleanup of it
+    left the earlier helper with nothing to swap - which is how the owner's
+    update succeeded *and* showed "could not install the update" at once
+    (2026-10-07, capture.log 17:28:59 and 17:29:43).
+
     ``dmg_path`` may be a DMG file or an already-mounted directory (tests use
     the directory form). Returns the staging path, or None on any failure.
     """
-    staging = dest_path + ".update-staging"
+    attempt = attempt_id or f"{os.getpid()}-{int(time.time())}"
+    staging = f"{dest_path}.update-staging-{attempt}"
     source_root = dmg_path
     attached = ""
     if os.path.isfile(dmg_path):
@@ -497,6 +552,12 @@ def stage_macos_payload(
         return None
 
     try:
+        # Staging folders from earlier attempts are stale by the time a new
+        # attempt is allowed to start (the caller checks that no helper is
+        # still waiting); clear them so /Applications does not fill up.
+        for leftover in glob.glob(f"{dest_path}.update-staging*"):
+            if leftover != staging:
+                shutil.rmtree(leftover, ignore_errors=True)
         if os.path.exists(staging):
             shutil.rmtree(staging, ignore_errors=True)
         try:
@@ -536,10 +597,27 @@ def stage_macos_update(
     support_dir: str,
     app_name: str = "ByteProof",
 ) -> str:
-    """Write the updater helper next to the app's support files."""
+    """Write the updater helper next to the app's support files.
+
+    The helper gets its own script name, backup folder and lock file. The
+    script name matters as much as the rest: the previous design wrote one
+    ``install-macos-update.sh`` that a second attempt overwrote *while the
+    first helper was executing it*, which is how a run can read half a script.
+    The lock file records the helper's pid so the app can tell a waiting
+    install from a stale one (see ``pending_update_install``).
+    """
     folder = os.path.join(support_dir, "update")
     os.makedirs(folder, exist_ok=True)
-    script_path = os.path.join(folder, "install-macos-update.sh")
+    attempt_id = (
+        staging_path.split(".update-staging-", 1)[1]
+        if ".update-staging-" in staging_path
+        else f"{int(pid)}-{int(time.time())}"
+    )
+    script_path = os.path.join(
+        folder, f"install-macos-update-{attempt_id}.sh"
+    )
+    lock_path = os.path.join(folder, "install.lock")
+    backup_path = f"{dest_path}.update-backup-{attempt_id}"
     script = macos_update_script(
         dmg_path=dmg_path,
         staging_path=staging_path,
@@ -549,11 +627,65 @@ def stage_macos_update(
         result_path=os.path.join(support_dir, "update-result.json"),
         app_name=app_name,
         version=version,
+        backup_path=backup_path,
+        lock_path=lock_path,
     )
     with open(script_path, "w", encoding="utf-8") as handle:
         handle.write(script)
     os.chmod(script_path, 0o700)
+    # The helper overwrites this with its own pid as soon as it starts; until
+    # then the file marks an install as in flight.
+    with open(lock_path, "w", encoding="utf-8") as handle:
+        handle.write(f"starting {attempt_id}\n")
+    # Keep only the newest script; older attempts are over by the time a new
+    # one is allowed to start.
+    for old_script in glob.glob(
+        os.path.join(folder, "install-macos-update-*.sh")
+    ):
+        if old_script != script_path:
+            try:
+                os.remove(old_script)
+            except OSError:
+                pass
     return script_path
+
+
+def pending_update_install(support_dir: str) -> int | None:
+    """The pid of a helper that is waiting to install an update, or None.
+
+    Two concurrent attempts are what produced the owner's false "could not
+    install the update" dialog (2026-10-07). The app asks this before staging:
+    a live helper means the update is already under way, so the second click
+    simply quits into it instead of starting a rival.
+    """
+    lock_path = os.path.join(support_dir, "update", "install.lock")
+    try:
+        with open(lock_path, "r", encoding="utf-8") as handle:
+            raw = handle.read().strip()
+    except OSError:
+        return None
+    if not raw.isdigit():
+        # "starting …" (or anything unreadable) means a helper is on its way;
+        # treat a fresh file as pending so a double click cannot race it.
+        try:
+            fresh = time.time() - os.path.getmtime(lock_path) < 60.0
+        except OSError:
+            return None
+        return 0 if fresh else None
+    pid = int(raw)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+        return None
+    except PermissionError:
+        return pid
+    except OSError:
+        return None
+    return pid
 
 
 def take_update_result(support_dir: str) -> dict[str, Any] | None:

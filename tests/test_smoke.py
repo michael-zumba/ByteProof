@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -2994,6 +2994,91 @@ def test_machine_fingerprint_stable() -> None:
     second = licensing._get_machine_fingerprint()
     assert first and second and first == second
     assert len(first) > 10
+
+
+def test_machine_fingerprint_ignores_the_network_identity(monkeypatch) -> None:
+    """The licence identity must not move when the network identity does.
+
+    Owner report, 2026-10-08: every update asked for the licence key again.
+    The fingerprint used to hash the machine's first network interface and
+    its hostname together with the hardware UUID, so a VPN, a new adapter, a
+    virtual machine's regenerated MAC or a DHCP-supplied hostname changed it
+    and the stored licence stopped matching (the service showed four
+    activations for one computer).
+    """
+    import platform
+    import uuid
+
+    from src import licensing
+
+    monkeypatch.setattr(licensing, "_stable_machine_id", lambda: "HW-UUID-1")
+    monkeypatch.setattr(uuid, "getnode", lambda: 111111111111)
+    monkeypatch.setattr(platform, "node", lambda: "mac-one.local")
+    first = licensing._get_machine_fingerprint()
+    legacy_first = licensing._legacy_machine_fingerprint()
+
+    monkeypatch.setattr(uuid, "getnode", lambda: 222222222222)
+    monkeypatch.setattr(platform, "node", lambda: "mac-two.local")
+    second = licensing._get_machine_fingerprint()
+    legacy_second = licensing._legacy_machine_fingerprint()
+
+    assert first == second, "the hardware identity is the licence identity"
+    assert legacy_first != legacy_second, (
+        "the old mixture moved with the network - which is the bug"
+    )
+    assert legacy_first != first
+
+
+def test_a_second_copy_of_the_app_refuses_to_run(monkeypatch) -> None:
+    """Two watchers would fight over one selection and paste twice.
+
+    LaunchServices stops a second launch of the *same* bundle, but a copy
+    somewhere else - the app's own previous-versions folder is one - is a
+    different app to macOS. Only bundled instances count.
+    """
+    import sys as sys_mod
+    import types
+
+    from src import main as main_mod
+
+    class FakeApp:
+        def __init__(self, pid: int) -> None:
+            self._pid = pid
+
+        def bundleIdentifier(self) -> str:
+            return "nz.co.bytemind.byteproof"
+
+        def processIdentifier(self) -> int:
+            return self._pid
+
+    class FakeWorkspace:
+        apps: ClassVar[list] = []
+
+        @staticmethod
+        def sharedWorkspace():
+            return FakeWorkspace()
+
+        @staticmethod
+        def runningApplications():
+            return FakeWorkspace.apps
+
+    monkeypatch.setitem(
+        sys_mod.modules,
+        "AppKit",
+        types.SimpleNamespace(NSWorkspace=FakeWorkspace),
+    )
+    monkeypatch.setattr(sys_mod, "frozen", True, raising=False)
+
+    FakeWorkspace.apps = [FakeApp(111), FakeApp(os.getpid())]
+    assert main_mod.another_instance_is_running() is True
+
+    FakeWorkspace.apps = [FakeApp(os.getpid())]
+    assert main_mod.another_instance_is_running() is False
+
+    # A run from source is not this bundle and is never treated as a copy.
+    monkeypatch.delattr(sys_mod, "frozen")
+    FakeWorkspace.apps = [FakeApp(111)]
+    assert main_mod.another_instance_is_running() is False
 
 
 def test_dock_activation_restores_window() -> None:

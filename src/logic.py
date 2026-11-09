@@ -53,6 +53,17 @@ COMMENT_SKIPPED_STATUS = (
     "and use the live suggestions."
 )
 
+# A draft comment is not part of the document yet, and the read this flow
+# starts with (AppleScript's `selection`) closes the open comment box and
+# swallows the keystroke being typed when it lands between two of them (owner
+# report, 2026-10-08). The draft is left alone; Live Check reviews comment
+# text while it is written.
+COMMENT_BOX_SKIPPED_STATUS = (
+    "Skipped: Word's comment box is open. Finish or post the comment first — "
+    "Live Check reviews comment text as you write it, and this flow would "
+    "close the box."
+)
+
 # Headers, footers and notes share the problem: their offsets are not document
 # offsets, so a range write would edit the wrong text.
 STORY_SKIPPED_STATUS = (
@@ -1648,6 +1659,33 @@ def restore_special_chars(text: str, replacements: dict[str, str]) -> str:
     text = _dedupe_citations(text)
     return text
 
+def _log_word_keyboard_surface(field: dict[str, Any]) -> None:
+    """Record which Word surface held the keyboard when a proofread started.
+
+    Word reports several of its own surfaces as focused text elements (the
+    comment composer, the status-bar search box, the ribbon's font boxes,
+    and - on some builds - the document's own page areas). Only the comment
+    composer stands this flow down; naming the surface here is what makes a
+    mis-detection visible in the support log instead of silently blocking
+    the proofread (owner log, 2026-10-14: a press was refused as "the
+    comment box is open" with no composer on screen).
+    """
+    try:
+        from .generic_editing import _debug_log
+
+        surface = (
+            "comment composer"
+            if field.get("is_comment_box")
+            else "other text field"
+        )
+        _debug_log(
+            f"MANUAL PROOFREAD: Word keyboard in {surface} "
+            f"(role={field.get('role')} "
+            f"desc={str(field.get('description') or '')[:48]!r})"
+        )
+    except Exception:
+        pass
+
 def proofread_selection_once(
     max_tokens: int,
     settings: dict[str, Any] | None = None,
@@ -1655,6 +1693,25 @@ def proofread_selection_once(
     cancel_event: threading.Event | None = None,
 ) -> tuple[str, str | None, str | None, str | None, int]:
     try:
+        # A draft comment is the one surface this flow must not touch (see
+        # COMMENT_BOX_SKIPPED_STATUS: the read it starts with closes the
+        # box). Other Word text surfaces are reported only for the log:
+        # while the keyboard is in a search box, a ribbon field or a page
+        # area, the manuscript selection is still what the hotkey should
+        # proofread. Every one of them used to be refused as "the comment
+        # box is open" (owner log, 2026-10-14).
+        try:
+            from .word_integration import _word_pid, focused_text_field
+
+            word_pid = _word_pid()
+            field = focused_text_field(word_pid) if word_pid else None
+            if field is not None:
+                _log_word_keyboard_surface(field)
+            if field is not None and field.get("is_comment_box"):
+                return COMMENT_BOX_SKIPPED_STATUS, None, None, None, 0
+        except Exception as exc:
+            print(f"Could not probe Word's keyboard focus: {exc}")
+
         word_app.ensure_ready()
 
         scope = word_app.selection_scope()

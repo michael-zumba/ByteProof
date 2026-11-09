@@ -112,6 +112,13 @@ DETACH_REVALIDATE_S = 1.5
 SUPPRESS_SELECTION_S = 15.0
 # When Word stops answering (modal dialog), stop polling it for this long.
 WORD_BUSY_BACKOFF_S = 5.0
+# How long after a plain key press the Word poll stands down. One Word
+# selection read costs ~160-230 ms and Word does that work on its own main
+# thread (measured 2026-10-08), so reading four times a second while the user
+# types is what makes Word - and ByteProof's own UI thread - feel slow. A
+# collapsed caret is all Word reports while typing, and nothing can be
+# previewed from it.
+WORD_TYPING_SKIP_S = 0.9
 # Undo re-locates the text it wrote, but only within this distance of the
 # recorded offset: further away is a different edit, not the same one reflowed.
 UNDO_RELOCATE_WINDOW = 64
@@ -190,6 +197,7 @@ class _InputWatcher(QObject):
         super().__init__()
         self.drag_selection_at = 0.0
         self.chord_at = 0.0
+        self.typed_at = 0.0
         self._dragged_at = 0.0
         self._last_click_at = 0.0
         self._monitor: Any = None
@@ -263,6 +271,9 @@ class _InputWatcher(QObject):
                 )
                 if int(event.modifierFlags()) & (shift | command):
                     self.chord_at = now
+                else:
+                    # A plain key press: the user is writing, not selecting.
+                    self.typed_at = now
         except Exception:
             pass
 
@@ -275,6 +286,12 @@ class _InputWatcher(QObject):
         if not self.chord_at:
             return None
         return time.monotonic() - self.chord_at
+
+    def typed_age(self) -> float | None:
+        """Seconds since the last plain (non-chord) key press, if any."""
+        if not self.typed_at:
+            return None
+        return time.monotonic() - self.typed_at
 
 
 class _EscapeBridge(QObject):
@@ -371,6 +388,22 @@ class LivePreviewService(QObject):
         self._selection_scope = SCOPE_MAIN
         self._word_scope_key: tuple[int, int, str] | None = None
         self._word_scope = SCOPE_MAIN
+        # True when the captured text lives in Word's open comment composer.
+        # The composer accepts no Accessibility write (it is a web view), so
+        # an apply rewrites the whole box the way a reader would - select all,
+        # paste - instead of writing a document range.
+        self._selection_is_comment_box = False
+        # The box's whole text and the selected span inside it, as captured
+        # when the preview was requested: an apply is only safe while both are
+        # still exactly what the suggestion was made for.
+        self._selection_box_value = ""
+        self._selection_box_range: tuple[int, int] | None = None
+        # One log line per box rather than one per poll tick.
+        self._word_comment_box_logged: bool | None = None
+        # The surrounding text of the selection the long Word read was made
+        # for: read once, then reused while the same selection is on screen.
+        self._word_context_key: tuple[int, int, str] | None = None
+        self._word_context: tuple[str, str] = ("", "")
         # Pointer tracking for the "only suggest while the pointer is with the
         # selection" rule, and the cached rectangle of the selection itself.
         self._pointer_at_capture: QPoint | None = None
@@ -468,6 +501,7 @@ class LivePreviewService(QObject):
             worker.wait(2000)
         self._seen_text = ""
         self._previewed_text = ""
+        self._selection_is_comment_box = False
         self._retry_not_before = None
         self._fail_streak = 0
         self._hide_undo_pill()
@@ -534,37 +568,66 @@ class LivePreviewService(QObject):
             # Word is busy (usually a modal dialog); skip the expensive read
             # until the back-off expires instead of blocking the UI thread.
             return
+        if is_word and self._word_typing_skip():
+            # The user is writing: Word would only report a collapsed caret,
+            # and the read costs Word (and this thread) a fifth of a second
+            # each time. See WORD_TYPING_SKIP_S.
+            self._log_skip_once(
+                "word_typing", str(target.get("bundle_id", "")).lower(), target
+            )
+            return
         if is_word:
             from .word_integration import get_word_integration
 
-            try:
-                text, start, end, before, after = (
-                    get_word_integration().get_selection_info()
-                )
-            except Exception as exc:
-                # A modal dialog in Word makes every AppleScript call time out.
-                # Backing off keeps the UI responsive and stops the poll from
-                # hammering a busy app; the user is told once.
-                self._word_busy_until = now + WORD_BUSY_BACKOFF_S
-                _log_word_busy_once(exc)
-                return
-            details = {
-                "text": text,
-                "range": (start, end),
-                "context_before": before,
-                "context_after": after,
-            }
-            permission_ok = True
-            if not str(text or "").strip() and target.get("pid"):
-                # A comment being written is not a story yet, so AppleScript
-                # reports nothing at all for it. The box itself is a real text
-                # area in the Accessibility tree, so read that instead - and
-                # let the apply go through Accessibility for this selection.
-                box = self._word_comment_box_details(target)
-                if box is not None:
-                    details = box
-                    text = box["text"]
-                    is_word = False
+            integration = get_word_integration()
+            field = self._word_focused_text_field(target)
+            if field is not None:
+                # The keyboard is inside one of Word's own text surfaces (the
+                # comment composer, a search field, a dialog). AppleScript's
+                # `selection` always describes the manuscript rather than the
+                # surface - and while the comment composer holds focus, making
+                # that read closes the draft box and swallows the keystroke
+                # being typed (owner report, 2026-10-08). Read the surface
+                # through Accessibility, which leaves it alone, and never ask
+                # AppleScript about a selection the user cannot see.
+                details = self._word_field_details(target, field)
+                text = details.get("text") or ""
+                start = end = 0
+                is_word = False
+                permission_ok = True
+            else:
+                try:
+                    # The span only: the 250-character context either side is
+                    # fetched once, when a new selection is committed (see
+                    # _attach_word_context). Two ranges per tick cost about a
+                    # third of the read and the tick runs four times a second.
+                    text, start, end = integration.get_selection_span(
+                        attempts=1
+                    )
+                except Exception as exc:
+                    # Word being busy (a dialog), or having no document open,
+                    # is not an empty selection. Backing off keeps the UI
+                    # responsive and stops the poll from spawning an osascript
+                    # and writing a log line every 800 ms; the user is told
+                    # once per back-off window.
+                    self._word_busy_until = now + WORD_BUSY_BACKOFF_S
+                    _log_word_busy_once(exc)
+                    return
+                details = {
+                    "text": text,
+                    "range": (start, end),
+                    "context_before": "",
+                    "context_after": "",
+                }
+                # The context was read once for this selection: reuse it for
+                # every later tick so the preview cache key stays stable (the
+                # hover-return path serves the cached panel, and a changed key
+                # would spend a second provider call for the same text).
+                if self._word_context_key == (int(start), int(end), text):
+                    details["context_before"], details["context_after"] = (
+                        self._word_context
+                    )
+                permission_ok = True
             if text and is_word:
                 bundle_id = str(target.get("bundle_id", "")).lower()
                 scope = self._word_scope_for(int(start), int(end), text)
@@ -712,6 +775,9 @@ class LivePreviewService(QObject):
                 self._retry_not_before = None
                 self._fail_streak = 0
                 self._hide_panel()
+                # Word's context ranges are read here rather than every tick:
+                # once per new selection, which is when they can change.
+                self._attach_word_context(details, is_word)
         else:
             self._candidate_text = ""
             self._candidate_count = 0
@@ -789,6 +855,10 @@ class LivePreviewService(QObject):
                 self._selection_has_range = (
                     details.get("range") is not None
                 )
+                self._selection_is_comment_box = bool(
+                    details.get("comment_box")
+                )
+                self._remember_comment_box_capture(details)
                 self._show_result(cached)
             return
         if decision != "run":
@@ -823,6 +893,8 @@ class LivePreviewService(QObject):
         self._selection_is_word = is_word
         self._word_document = ""
         self._selection_has_range = details.get("range") is not None
+        self._selection_is_comment_box = bool(details.get("comment_box"))
+        self._remember_comment_box_capture(details)
         key = preview_cache_key(
             bundle,
             text,
@@ -843,6 +915,31 @@ class LivePreviewService(QObject):
         name = str(target.get("name", "")).lower()
         bundle = str(target.get("bundle_id", "")).lower()
         return "byteproof" in name or "bytemind" in bundle
+
+    def _word_typing_skip(self) -> bool:
+        """Whether this Word tick can stand down because the user is typing.
+
+        Measured on this machine (2026-10-08): one Word selection read costs
+        Word about 160-230 ms, and Word runs its scripting on its own main
+        thread, so reading while the user writes is felt as a stutter. While
+        typing there is nothing to preview either - Word reports the caret,
+        not a selection - so the read waits for a pause. A visible panel or a
+        captured selection keeps the read running: the panel must still
+        disappear the moment the user types over the text it was made for.
+        """
+        panel = self._panel
+        if panel is not None and panel.isVisible():
+            return False
+        if self._seen_text:
+            return False
+        reader = getattr(self._watcher, "typed_age", None)
+        if not callable(reader):
+            return False
+        try:
+            age = reader()
+        except Exception:
+            return False
+        return age is not None and age <= WORD_TYPING_SKIP_S
 
     def _selection_target_changed(self, target: dict[str, Any]) -> bool:
         """Whether the frontmost app is a different one from the capture.
@@ -911,9 +1008,12 @@ class LivePreviewService(QObject):
                 return None
             return self._same_selection(state[0])
         bundle = str(self._selection_target.get("bundle_id", "")).lower()
-        clipboard_only = (not self._selection_has_range) or (
-            bundle in CLIPBOARD_FALLBACK_BUNDLE_IDS
-        )
+        # A draft comment has no document range, but it is not clipboard-only:
+        # its text is read through Accessibility, and posting a Copy keystroke
+        # into an open composer is exactly what must not happen.
+        clipboard_only = (
+            (not self._selection_has_range) or (bundle in CLIPBOARD_FALLBACK_BUNDLE_IDS)
+        ) and not self._selection_is_comment_box
         if not clipboard_only:
             state = self._read_selection_state()
             if state is not None and state[0]:
@@ -1141,37 +1241,176 @@ class LivePreviewService(QObject):
             self._log_read_only_once("com.apple.mail", "viewer")
         return self._mail_composing
 
-    def _word_comment_box_details(
+    def _word_focused_text_field(
         self, target: dict[str, Any]
     ) -> dict[str, Any] | None:
-        """Accessibility view of an open Word comment box, if there is one.
+        """Word's focused text surface, or None while the document has it.
 
-        Word's comment box only joins the document model once the comment is
-        posted, so until then AppleScript cannot see the text being written.
-        The box is an Accessibility text area that says so in its description,
-        and that proof is required: writing through Accessibility without it
-        could put the edit in the document body instead of the comment.
+        Probed before every Word selection read. Word answers with its own
+        *window* while the manuscript has the keyboard, so this is None in the
+        ordinary case and the AppleScript path is untouched; it answers with a
+        text element only when the keyboard is inside the comment composer, a
+        search field or a dialog.
         """
         try:
-            details = self._editor.selection_details(target)
+            from .word_integration import focused_text_field
+
+            pid = int(target.get("pid") or 0)
+            if not pid:
+                return None
+            field = focused_text_field(pid)
         except Exception as exc:
-            _debug_log(f"LIVE WORD COMMENT BOX: AX read failed: {exc}")
+            _debug_log(f"LIVE WORD FIELD: probe failed: {exc}")
             return None
-        description = str(details.get("description") or "").lower()
-        if "comment" not in description:
-            return None
-        if not str(details.get("text") or "").strip():
-            return None
-        details["editable"] = True
-        # The body's text around the comment's anchor is not context for what
-        # is being typed in the box.
-        details["context_before"] = ""
-        details["context_after"] = ""
-        _debug_log(
-            f"LIVE WORD COMMENT BOX: reading the open comment box through AX "
-            f"({len(details['text'])} chars)"
-        )
+        if field is None or not field.get("is_comment_box"):
+            self._word_comment_box_logged = None
+        return field
+
+    def _word_field_details(
+        self, target: dict[str, Any], field: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The Accessible view of a Word text surface that is not the document.
+
+        The comment composer is the surface worth proofreading: the draft does
+        not exist for AppleScript until it is posted, so the selection inside
+        it is read through Accessibility - and because Word ignores
+        Accessibility writes into the box, a suggestion is applied by
+        rewriting the comment the same way a posted comment is rewritten.
+        Anything else that can steal the keyboard (a search field, a dialog)
+        is read the ordinary Accessibility way - never through AppleScript,
+        whose `selection` would describe the manuscript instead of what the
+        user is typing in.
+        """
+        if field.get("is_comment_box"):
+            # The composer is the element that owns the selection now: hand it
+            # to the editor's element cache so the panel anchors at the box
+            # (its bounds are read from that same element).
+            try:
+                import ApplicationServices as AS
+
+                cache = getattr(self._editor, "_cache_ax_element", None)
+                if callable(cache) and field.get("element") is not None:
+                    cache(
+                        int(target.get("pid") or 0),
+                        AS,
+                        field.get("element"),
+                    )
+            except Exception:
+                pass
+            # A selection inside the box is the subject, exactly as it is in
+            # the manuscript, in Mail or in Pages. The whole box travels with
+            # it because that is what the write rewrites - Word offers no
+            # writable sub-range inside a draft comment.
+            details = self._editor.selection_details(target)
+            if details.get("value") is None:
+                details["value"] = str(field.get("value") or "")
+            details["comment_box"] = True
+            if (
+                str(details.get("text") or "").strip()
+                and self._word_comment_box_logged is None
+            ):
+                self._word_comment_box_logged = True
+                _debug_log(
+                    "LIVE WORD COMMENT BOX: reading the draft comment through "
+                    f"AX ({len(str(details.get('value') or ''))} chars)"
+                )
+            return details
+        details = self._editor.selection_details(target)
+        details["comment_box"] = False
         return details
+
+    def _word_keyboard_in_field(self) -> bool:
+        """Whether Word's keyboard is in a text field rather than the document.
+
+        Every Word AppleScript *read* of ``selection`` has to be gated on this:
+        while the comment composer holds the keyboard, the read describes the
+        manuscript instead of what the user is typing - and interleaving it
+        with a keystroke closes the draft box and swallows the character.
+        Answering "no evidence" is deliberately preferred over answering from
+        the wrong place.
+        """
+        if not self._selection_target:
+            return False
+        pid = int(self._selection_target.get("pid") or 0)
+        if not pid:
+            return False
+        try:
+            from .word_integration import focused_text_field
+
+            return focused_text_field(pid) is not None
+        except Exception:
+            return False
+
+    # --- Word's comment composer ------------------------------------------
+
+    def _remember_comment_box_capture(self, details: dict[str, Any]) -> None:
+        """Remember the draft comment and the span the preview was made for.
+
+        A draft comment has no document range: the write rewrites the whole
+        box, so both halves of the capture matter - a box whose text moved on,
+        and a box whose selection was cleared, are both changes the write must
+        refuse rather than guess around.
+        """
+        if not self._selection_is_comment_box:
+            self._selection_box_value = ""
+            self._selection_box_range = None
+            return
+        self._selection_box_value = str(details.get("value") or "")
+        range_value = details.get("range")
+        if isinstance(range_value, tuple) and len(range_value) == 2:
+            self._selection_box_range = (
+                int(range_value[0] or 0),
+                int(range_value[1] or 0),
+            )
+        else:
+            self._selection_box_range = None
+
+    def _sync_comment_box_selection(self) -> tuple[bool, str]:
+        """Whether the composer still shows the text this preview was made for.
+
+        The box's own text and the selected span inside it are both compared
+        against the capture: the user may have kept typing (the box moved on)
+        or clicked somewhere in the comment (the selection is gone), and
+        either way the write would land on text nobody asked about.
+        """
+        try:
+            self._word_focused_text_field(self._selection_target)
+            details = self._editor.selection_details(self._selection_target)
+        except Exception as exc:
+            _debug_log(f"LIVE COMMENT BOX SYNC: read failed: {exc}")
+            return False, "the comment box could not be read"
+        if not details.get("found"):
+            return False, "the comment box is no longer open"
+        box_value = str(details.get("value") or "")
+        if box_value != (self._selection_box_value or ""):
+            return (
+                False,
+                (
+                    "the comment changed: previewed="
+                    f"{_redact(self._selection_box_value)} "
+                    f"now={_redact(box_value)}"
+                ),
+            )
+        selected = str(details.get("text") or "")
+        if selected != self._selection_text:
+            return (
+                False,
+                (
+                    "the comment selection changed: previewed="
+                    f"{_redact(self._selection_text)} now={_redact(selected)}"
+                ),
+            )
+        range_value = details.get("range")
+        if isinstance(range_value, tuple) and len(range_value) == 2:
+            self._selection_box_range = (
+                int(range_value[0] or 0),
+                int(range_value[1] or 0),
+            )
+            self._selection_start = int(range_value[0] or 0)
+            self._selection_end = self._selection_start + int(
+                range_value[1] or 0
+            )
+        return True, "ok"
 
     def _log_read_only_once(self, bundle: str, role: str) -> None:
         key = f"{bundle}:read_only"
@@ -1213,6 +1452,40 @@ class LivePreviewService(QObject):
                 _debug_log(f"LIVE SCOPE: probe failed: {exc}")
                 self._word_scope = SCOPE_MAIN
         return self._word_scope
+
+    def _attach_word_context(
+        self, details: dict[str, Any], is_word: bool
+    ) -> None:
+        """Fetch Word's surrounding text for a newly committed selection.
+
+        The preview prompt wants about 250 characters either side, and the
+        AppleScript read that builds them costs about a third of the whole
+        selection read (measured 2026-10-08: 228 ms with the context, 162 ms
+        without). The poll runs several times a second and the context can
+        only change with the selection, so it is fetched here - once - and not
+        on every tick. A failure is not fatal: the preview still runs with
+        less context.
+        """
+        if not is_word:
+            return
+        range_value = details.get("range")
+        if not isinstance(range_value, tuple) or len(range_value) != 2:
+            return
+        start, end = int(range_value[0]), int(range_value[1])
+        text = str(details.get("text") or "")
+        try:
+            from .word_integration import get_word_integration
+
+            before, after = get_word_integration().get_selection_context(
+                start, end
+            )
+        except Exception as exc:
+            _debug_log(f"LIVE WORD CONTEXT: could not read: {exc}")
+            return
+        self._word_context_key = (start, end, text)
+        self._word_context = (before, after)
+        details["context_before"] = before
+        details["context_after"] = after
 
     def _log_pointer_far_once(self, bundle: str, target: dict[str, Any]) -> None:
         """Note (at most every few seconds) that the pointer left the text.
@@ -1409,6 +1682,12 @@ class LivePreviewService(QObject):
         _debug_log(f"LIVE PREVIEW: app={target.get('name')!r} chars={len(text)}")
         self._retry_not_before = None
         self._spawned_at = time.monotonic()
+        # A new preview starts with a fresh cancel state. The double-Escape
+        # cancel sets this event for the preview that was running at the time,
+        # and it is shared: left set, every later worker would abort the moment
+        # it started (preview_edits_once raises on a set event) - Live Check
+        # died silently until the app was restarted or the toggle was flipped.
+        self._cancel_event.clear()
         worker = PreviewWorker(
             self._settings,
             target,
@@ -1548,7 +1827,33 @@ class LivePreviewService(QObject):
         """Re-read the live selection; (text, start, end) or None on failure."""
         if not self._selection_target:
             return None
+        if self._selection_is_comment_box:
+            # A draft comment has no document range; the selected text inside
+            # it is read through Accessibility (the same way the preview read
+            # it), and the whole box is checked separately before a write.
+            try:
+                self._word_focused_text_field(self._selection_target)
+                details = self._editor.selection_details(self._selection_target)
+            except Exception:
+                return None
+            text = str(details.get("text") or "")
+            if not text:
+                return None
+            range_value = details.get("range") or (0, 0)
+            start = int(range_value[0] or 0)
+            return text, start, start + int(range_value[1] or 0)
         if self._selection_is_word:
+            if self._word_keyboard_in_field():
+                # The keyboard is in Word's comment composer (or another text
+                # field): AppleScript's `selection` would describe the
+                # manuscript, and making that read while the box is being
+                # typed in closes the box. No evidence is better than evidence
+                # from the wrong place.
+                _debug_log(
+                    "LIVE SYNC: Word keyboard is in a text field; "
+                    "AppleScript selection read skipped"
+                )
+                return None
             try:
                 from .word_integration import get_word_integration
 
@@ -1618,6 +1923,8 @@ class LivePreviewService(QObject):
         transiently glitched read, and failing the user's click because of
         it produced spurious "could not verify" toasts.
         """
+        if self._selection_is_comment_box:
+            return self._sync_comment_box_selection()
         # The read below decides where every later write goes: start from a
         # freshly discovered element instead of one cached before a focus move.
         self._invalidate_ax_element()
@@ -1632,7 +1939,11 @@ class LivePreviewService(QObject):
         # often returns nothing while the selection is perfectly intact, so
         # before refusing, ask the app itself: a real copy of the selection is
         # authoritative and the clipboard is restored straight afterwards.
-        if not read_text and not self._selection_is_word:
+        if (
+            not read_text
+            and not self._selection_is_word
+            and not self._selection_is_comment_box
+        ):
             # A web view answers nothing at all while another app is frontmost
             # (the state the user is in right after clicking the panel), so
             # bring the captured app forward first - the apply needs it for the
@@ -1672,7 +1983,11 @@ class LivePreviewService(QObject):
             # authority: when the captured range still holds the previewed
             # text, applying is safe - the write path checks that same range
             # again before it writes anything.
-            held = self._read_field_text_at_selection()
+            held = (
+                ""
+                if self._selection_is_word and self._word_keyboard_in_field()
+                else self._read_field_text_at_selection()
+            )
             if held and held == self._selection_text:
                 _debug_log("LIVE SYNC: verified by document content at the range")
                 return True, "ok"
@@ -1701,6 +2016,23 @@ class LivePreviewService(QObject):
     def _sync_failure_message(self, reason: str) -> str:
         """Explain a failed selection check in terms the user can act on."""
         app = self._selection_target.get("name") or "that app"
+        if reason == "the comment box is no longer open":
+            return "The comment box was closed — open it again to use this."
+        if reason.startswith("the comment changed"):
+            return (
+                "The comment changed before the edit was applied — select the "
+                "text again to get fresh suggestions."
+            )
+        if reason.startswith("the comment selection changed"):
+            return (
+                "The selection inside the comment changed — select the text "
+                "again to get fresh suggestions."
+            )
+        if reason == "the comment box could not be read":
+            return (
+                "Could not read the comment box. Click into the comment and "
+                "try again."
+            )
         if reason == "selection could not be read":
             return (
                 f"Could not read the selection in {app}. Click into the text, "
@@ -2221,6 +2553,37 @@ class LivePreviewService(QObject):
         self.apply_done.emit("Undone.")
         self._restore_previous_undo()
 
+    def _undo_comment_box(self, state: dict[str, Any]) -> None:
+        """Put the draft comment back the way it was before the last apply.
+
+        The box was rewritten as a whole, so the undo is the same rewrite in
+        reverse, and it is only safe while the box still holds exactly what
+        was written - the writer refuses a box that has moved on, and one that
+        is no longer open.
+        """
+        steps = state.get("steps") or []
+        if not steps:
+            return
+        step = steps[0] if isinstance(steps[0], UndoStep) else UndoStep(*steps[0])
+        from .word_integration import replace_comment_box_text
+
+        self._activate_for_undo(state.get("target") or {})
+        ok, message = replace_comment_box_text(step.applied, step.original)
+        _debug_log(f"LIVE UNDO COMMENT BOX: ok={ok} message={message!r}")
+        if not ok:
+            self.apply_done.emit(message)
+            self._restore_previous_undo()
+            return
+        self._selection_box_value = step.original
+        self._selection_box_range = None
+        self._selection_text = ""
+        self._seen_text = ""
+        self._previewed_text = ""
+        self._pending = []
+        self._hide_panel()
+        self.apply_done.emit("Undone.")
+        self._restore_previous_undo()
+
     def _undo_target(self, step: UndoStep, live: str) -> int | None:
         """Where the edit is now: the text around it first, then the offset.
 
@@ -2262,6 +2625,9 @@ class LivePreviewService(QObject):
         try:
             if state.get("mode") == "comment":
                 self._undo_comment(state)
+                return
+            if state.get("mode") == "comment_box":
+                self._undo_comment_box(state)
                 return
             if state.get("mode") == "full":
                 # The full-selection apply pasted over the current selection;
@@ -2511,7 +2877,11 @@ class LivePreviewService(QObject):
             if not self._selection_target:
                 self._resume_polling_after_apply()
                 return
-            if self._selection_has_range or self._selection_is_word:
+            if (
+                self._selection_has_range
+                or self._selection_is_word
+                or self._selection_is_comment_box
+            ):
                 # Accessibility or AppleScript read: no keystroke involved.
                 state = self._read_apply_result_state()
                 if state is not None:
@@ -3071,6 +3441,9 @@ class LivePreviewService(QObject):
             self._end_apply()
 
     def _apply_one_locked(self, index: int) -> None:
+        if self._selection_is_comment_box:
+            self._apply_comment_box_batch([self._pending[index]], keep_rest=True)
+            return
         if self._selection_is_word and self._selection_scope == SCOPE_COMMENTS:
             self._apply_comment_batch([self._pending[index]], keep_rest=True)
             return
@@ -3346,6 +3719,75 @@ class LivePreviewService(QObject):
             panel.set_spans(self._pending)
             panel.show()
 
+    def _apply_comment_box_batch(
+        self, spans: Sequence[EditSpan], keep_rest: bool
+    ) -> None:
+        """Apply suggestions to the selection inside Word's comment composer.
+
+        The box accepts no Accessibility write and offers no writable
+        sub-range, so the whole draft is rewritten: the captured comment with
+        the corrected span spliced back in. The write only happens while the
+        box still holds the previewed text *and* the previewed selection - a
+        comment that moved on (another keystroke, a cleared selection, a
+        closed box) is refused instead of clobbered. Undo is the same write in
+        reverse.
+
+        ``keep_rest`` is ignored: rewriting the box consumes the selection, so
+        the remaining suggestions no longer point at anything that exists.
+        """
+        if not spans:
+            return
+        sync_ok, sync_reason = self._sync_selection()
+        for _ in range(2):
+            if sync_ok:
+                break
+            time.sleep(0.12)
+            sync_ok, sync_reason = self._sync_selection()
+        if not sync_ok:
+            _debug_log(f"LIVE COMMENT BOX APPLY SYNC FAIL: {sync_reason}")
+            self._hide_panel()
+            self.apply_done.emit(self._sync_failure_message(sync_reason))
+            return
+        original = self._selection_text
+        corrected = apply_edits_to_text(original, spans)
+        if not corrected or corrected == original:
+            _debug_log("LIVE COMMENT BOX APPLY: nothing to change")
+            self._hide_panel()
+            return
+        box_before = self._selection_box_value or ""
+        start, length = self._selection_box_range or (0, len(original))
+        rewritten = box_before[:start] + corrected + box_before[start + length :]
+        _debug_log(
+            f"LIVE COMMENT BOX APPLY: suggestions={len(spans)} "
+            f"span={_redact(original)}->{_redact(corrected)} "
+            f"box={len(box_before)}->{len(rewritten)}"
+        )
+        from .word_integration import replace_comment_box_text
+
+        self._bring_target_forward()
+        ok, message = replace_comment_box_text(box_before, rewritten)
+        _debug_log(f"LIVE COMMENT BOX APPLY RESULT: ok={ok} message={message!r}")
+        self.apply_done.emit(message)
+        if not ok:
+            return
+        self._arm_undo(
+            {
+                "mode": "comment_box",
+                "target": dict(self._selection_target),
+                "selection_before": box_before,
+                "steps": [UndoStep(0, rewritten, box_before)],
+            }
+        )
+        # The rewrite consumed the selection: there is nothing left to apply
+        # against, so the panel goes and the next selection starts fresh.
+        self._apply_result_text = corrected
+        self._selection_box_value = rewritten
+        self._selection_text = ""
+        self._seen_text = ""
+        self._previewed_text = ""
+        self._pending = []
+        self._hide_panel()
+
     def apply_all_now(self) -> bool:
         """Apply every pending suggestion (used by the Apply All hotkey).
 
@@ -3374,6 +3816,9 @@ class LivePreviewService(QObject):
             self._end_apply()
 
     def _apply_all_locked(self) -> None:
+        if self._selection_is_comment_box:
+            self._apply_comment_box_batch(list(self._pending), keep_rest=False)
+            return
         if self._selection_is_word and self._selection_scope == SCOPE_COMMENTS:
             self._apply_comment_batch(list(self._pending), keep_rest=False)
             return

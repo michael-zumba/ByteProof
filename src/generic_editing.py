@@ -980,16 +980,12 @@ class GenericTextEditor:
         #    the focus has not moved to a different editable field.
         cached = _ax_element_cache.get(pid)
         if cached is not None:
-            stamp, cached_as, cached_el = cached
-            if time.monotonic() - stamp < AX_ELEMENT_CACHE_S:
-                try:
-                    err_role, _role = cached_as.AXUIElementCopyAttributeValue(
-                        cached_el, cached_as.kAXRoleAttribute, None
-                    )
-                    if err_role == 0:
-                        return cached_as, cached_el
-                except Exception:
-                    pass
+            _stamp, cached_as, cached_el = cached
+            if GenericTextEditor._still_owns_focus(
+                cached_as, cached_el, focused
+            ):
+                GenericTextEditor._cache_ax_element(pid, cached_as, cached_el)
+                return cached_as, cached_el
             _ax_element_cache.pop(pid, None)
 
         # 3. Full search (containers, canvases, web views).
@@ -1020,6 +1016,34 @@ class GenericTextEditor:
     @staticmethod
     def _cache_ax_element(pid: int, AS: Any, element: Any) -> None:
         _ax_element_cache[pid] = (time.monotonic(), AS, element)
+
+    @staticmethod
+    def _still_owns_focus(AS: Any, element: Any, focused: Any) -> bool:
+        """Whether the cached element is the focused one or lives inside it.
+
+        The element cache used to expire every 2.5 seconds and re-walk the
+        accessibility tree, which costs about 190 ms in a heavy app (measured
+        against an Electron window, 2026-10-08) - a visible stall every few
+        seconds, for every app, all day. Walking the parent chain instead
+        costs a millisecond or two and answers the question exactly: while the
+        keyboard focus is still inside the cached element, it is that app's
+        text surface; the moment focus moves elsewhere (Outlook switching
+        between its search box and the compose body), it is not.
+        """
+        current = element
+        for _ in range(12):
+            if current == focused:
+                return True
+            try:
+                err, parent = AS.AXUIElementCopyAttributeValue(
+                    current, "AXParent", None
+                )
+            except Exception:
+                return False
+            if err != 0 or parent is None:
+                return False
+            current = parent
+        return False
 
     @staticmethod
     def clear_ax_caches() -> None:
@@ -1319,6 +1343,7 @@ class GenericTextEditor:
             "range": None,
             "context_before": "",
             "context_after": "",
+            "value": "",
             "found": False,
             "editable": False,
             "role": "",
@@ -1387,6 +1412,10 @@ class GenericTextEditor:
                 focused, AS.kAXValueAttribute, None
             )
             full = str(value) if err == 0 and isinstance(value, str) else ""
+            # The whole field, not just the selection: a target with no
+            # document range (Word's comment composer) needs it to build the
+            # write, and it saves a second read for anyone else.
+            result["value"] = full
             if not full:
                 _log_once(
                     f"{bundle}:value",

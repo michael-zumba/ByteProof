@@ -157,6 +157,11 @@ def validate_license_remote() -> dict[str, Any]:
 
     provider = info.get("provider", "")
     if provider == "stripe":
+        # A licence bound before the fingerprint was made stable is moved to
+        # the stable identity here, silently: this is the moment the network
+        # is there and the customer is not being asked for anything.
+        migrate_to_stable_fingerprint()
+        info = get_license_info()
         key = info.get("purchase_key") or ""
         if not key:
             return {"ok": True, "provider": provider}
@@ -178,7 +183,11 @@ def validate_license_remote() -> dict[str, Any]:
                 # The server knows the key but this computer is not one of its
                 # activations: the slot was released (in the portal or on
                 # another computer), or this is a different machine now. The
-                # license must not keep working here.
+                # license must not keep working here: a released slot has to
+                # mean released, or moving a licence to a new computer could
+                # never take the old one out of use. (A licence bound to the
+                # *old* fingerprint is a different case, and is moved across
+                # above, before this check.)
                 return {
                     "ok": False,
                     "deactivated": True,
@@ -200,6 +209,66 @@ def validate_license_remote() -> dict[str, Any]:
     # Developer, legacy signed, and retired Polar records are all local-only
     # now; nothing to check online.
     return {"ok": True, "provider": provider}
+
+
+def migrate_to_stable_fingerprint() -> dict[str, Any] | None:
+    """Re-bind a stored licence to the stable machine identity.
+
+    ByteProof's licence fingerprint used to include the machine's first
+    network interface and its hostname, so a VPN, a new adapter, a virtual
+    machine's regenerated MAC or a DHCP-supplied hostname changed it: the
+    stored licence stopped matching, the app fell back to trial/free mode and
+    the customer had to enter the key again - and each re-activation took
+    another seat on the service (owner report, 2026-10-08: four activations
+    for one computer).
+
+    The licence is re-activated against the stable fingerprint and the old
+    seat is released, so nothing is used up and the customer never sees it.
+    Returns None when there is nothing to move or the service cannot be
+    reached; the licence keeps working either way.
+    """
+    from .licensing import (
+        _get_machine_fingerprint,
+        _legacy_machine_fingerprint,
+    )
+
+    info = get_license_info()
+    if info.get("status") != "licensed" or info.get("provider") != "stripe":
+        return None
+    stored = str(info.get("machine_fp") or "")
+    stable = _get_machine_fingerprint()
+    if not stored or stored == stable:
+        return None
+    if stored != _legacy_machine_fingerprint():
+        # Bound to some other identity: not ours to move.
+        return None
+    key = str(info.get("purchase_key") or "").strip()
+    if not key:
+        return None
+    try:
+        result = license_api.activate_key(key, label=_machine_label())
+    except license_api.LicenseApiError:
+        return None
+    except Exception:
+        return None
+    if not result or result.get("ok") is False:
+        return None
+    stored_result = activate_service_license(
+        result, purchase_key=str(result.get("key") or key)
+    )
+    if not stored_result.get("valid"):
+        return None
+    try:
+        # Free the seat the old value took; the customer should not pay for
+        # the machine's network identity having changed.
+        license_api.deactivate_key(key, stored)
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "migrated": True,
+        "email": stored_result.get("email", ""),
+    }
 
 
 def apply_remote_validation(result: dict[str, Any]) -> dict[str, str]:

@@ -3183,12 +3183,59 @@ def test_readiness_row_updates_per_state():
 
         window._apply_live_status("no_permission")
         assert "accessibility" in window.live_status_label.text().lower()
-        assert window.live_action_btn.text() == "Open System Settings"
+        # The action now asks macOS for the grant through the system prompt
+        # (the entry that survives updates) instead of only opening the pane.
+        assert window.live_action_btn.text() == "Enable"
         assert window.live_container.isHidden() is False
 
         window._apply_live_status("disabled")
         assert window.live_action_btn.text() == "Open Settings"
         assert window.live_container.isHidden() is False
+    finally:
+        window.close()
+
+
+def test_a_mid_run_permission_grant_restarts_the_app_once(monkeypatch):
+    """After the grant arrives, the app restarts so applies can post keys.
+
+    Owner report, 2026-10-08: after re-granting Accessibility, every apply in
+    Safari failed with "could not confirm the paste" - macOS gives a running
+    process its answer for reading, but posting keystrokes keeps being refused
+    until the app is started again. A missing grant is asked for through the
+    system prompt (the entry that survives updates), and the grant that
+    arrives mid-run restarts the app once.
+    """
+    import time
+
+    from PyQt6.QtWidgets import QApplication
+
+    from src import settings as settings_mod
+    from src.gui import ProofreaderApp
+
+    QApplication.instance() or QApplication([])
+    loaded = settings_mod.load_runtime_settings()
+    loaded["general"]["auto_apply"] = False
+    window = ProofreaderApp(1024, loaded)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        window, "_ask_for_accessibility", lambda: calls.append("prompt")
+    )
+    monkeypatch.setattr(
+        window, "_relaunch_application", lambda: calls.append("relaunch")
+    )
+    try:
+        window._note_permission_state("ready")
+        assert calls == [], "an ordinary start must not restart anything"
+
+        window._note_permission_state("no_permission")
+        assert calls == ["prompt"], "the grant must be asked for when it is gone"
+
+        window._note_permission_state("ready")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and "relaunch" not in calls:
+            QApplication.processEvents()
+            time.sleep(0.05)
+        assert "relaunch" in calls, "the app did not restart after the grant"
     finally:
         window.close()
 
@@ -5094,3 +5141,418 @@ def test_the_row_apply_is_tonal_and_apply_all_is_the_primary():
     assert row_apply and apply_all
     assert row_apply[0].styleSheet() == TONAL_BUTTON
     assert apply_all[0].styleSheet() == PRIMARY_BUTTON
+
+
+# --- Word's comment composer (the owner's "typing in a comment does nothing",
+# reported 2026-10-08) -------------------------------------------------------
+
+
+def test_the_word_poll_stands_down_while_the_user_types(monkeypatch):
+    """One Word read costs Word ~160-230 ms; do not spend it on a caret.
+
+    Measured on this machine (2026-10-08). While the user writes, Word reports
+    a collapsed caret - nothing to preview - so the poll waits for a pause
+    instead of making Word (and the app's own UI thread) stutter four times a
+    second. A captured selection or a visible panel keeps the read running.
+    """
+    from src import word_integration as wi
+    from src.live_service import LivePreviewService
+
+    reads: list[str] = []
+
+    class TypingWatcher:
+        def __init__(self) -> None:
+            self.age: float | None = 0.2
+
+        def typed_age(self) -> float | None:
+            return self.age
+
+        def drag_selection_age(self) -> float | None:
+            return None
+
+        def chord_age(self) -> float | None:
+            return None
+
+    class FakeWord:
+        def get_selection_span(self, attempts: int = 1):
+            reads.append("span")
+            return "a sentence in the manuscript", 0, 28
+
+        def get_selection_context(self, start: int, end: int):
+            return "", ""
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._editor = _WordServiceEditor()
+    service._watcher = TypingWatcher()
+    monkeypatch.setattr(wi, "focused_text_field", lambda pid: None)
+    monkeypatch.setattr(wi, "get_word_integration", lambda: FakeWord())
+
+    service._sample(now=1000.0)
+    assert reads == [], "a Word read was made while the user was typing"
+
+    # The typing stops: the next tick reads again.
+    service._watcher.age = 3.0
+    service._sample(now=2000.0)
+    assert reads == ["span"]
+
+    # A captured selection keeps the read running even while typing, so the
+    # panel can still disappear when the user types over it.
+    service._watcher.age = 0.2
+    service._seen_text = "a sentence in the manuscript"
+    service._sample(now=3000.0)
+    assert reads == ["span", "span"]
+
+
+def _word_target() -> dict:
+    return {
+        "bundle_id": "com.microsoft.Word",
+        "pid": 4242,
+        "name": "Microsoft Word",
+    }
+
+
+class _WordServiceEditor:
+    """The generic editor as the live service uses it while Word is frontmost."""
+
+    def __init__(self) -> None:
+        self.selection_reads = 0
+        self.word_text = "composer text"
+        self.word_value = "composer text"
+        self.word_range = (0, len(self.word_text))
+
+    def frontmost_app(self):
+        return _word_target()
+
+    def is_word(self, target):
+        return True
+
+    def permission_status(self):
+        return True, ""
+
+    def selection_details(self, target):
+        self.selection_reads += 1
+        return {
+            "text": self.word_text,
+            "range": self.word_range,
+            "context_before": "",
+            "context_after": "",
+            "value": self.word_value,
+            "found": True,
+            "editable": True,
+            "role": "AXTextArea",
+            "description": "",
+        }
+
+    def ax_bounds_for_range(self, target, start, length):
+        return []
+
+
+class _RecordingWord:
+    """A Word integration that counts every AppleScript round trip."""
+
+    def __init__(self, text: str = "the manuscript selection") -> None:
+        self.text = text
+        self.selection_info_calls = 0
+        self.selection_span_calls = 0
+        self.context_calls = 0
+
+    def get_selection_info(self):
+        self.selection_info_calls += 1
+        return self.text, 0, len(self.text), "", ""
+
+    def get_selection_span(self, attempts: int = 1):
+        """The poll's read: text and positions, without the context ranges."""
+        self.selection_span_calls += 1
+        return self.text, 0, len(self.text)
+
+    def get_selection_context(self, start: int, end: int):
+        self.context_calls += 1
+        return "before text", "after text"
+
+    def selection_scope(self):
+        return "main"
+
+
+def test_word_comment_box_is_read_through_ax_and_never_through_applescript(
+    monkeypatch,
+):
+    """The composer must not be polled through AppleScript.
+
+    Experiment on the owner's machine (2026-10-08): with the draft box open
+    and focused, every AppleScript `selection` read that lands between two
+    keystrokes closes the box and swallows the character being typed. The
+    Accessibility read leaves the box alone, so while the box holds the
+    keyboard the service must read it that way and never ask AppleScript.
+    """
+    from src import word_integration as wi
+    from src.live_service import LivePreviewService
+
+    monkeypatch.setattr(
+        wi,
+        "focused_text_field",
+        lambda pid: {
+            "role": "AXTextArea",
+            "is_comment_box": True,
+            "value": "this coment is being written now",
+            "focused": True,
+        },
+    )
+    word = _RecordingWord()
+    monkeypatch.setattr(wi, "get_word_integration", lambda: word)
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    editor = _WordServiceEditor()
+    editor.word_value = "this coment is being written now"
+    editor.word_text = "coment is being"
+    editor.word_range = (5, 15)
+    service._editor = editor
+    spawned: list[tuple] = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawned.append(a))
+    service._pointer_at_capture = None
+    monkeypatch.setattr(service, "_pointer_near_selection", lambda: True)
+
+    service._sample(now=1000.0)
+    service._sample(now=2000.0)
+    service._sample(now=3000.0)
+
+    assert word.selection_info_calls == 0, (
+        "AppleScript was asked about a Word selection while the comment box "
+        "held the keyboard"
+    )
+    assert spawned, "the draft comment never reached the preview provider"
+    _target, text, details, _key = spawned[0]
+    assert text == "coment is being"
+    assert details.get("comment_box") is True
+    assert service._selection_is_comment_box is True
+    assert service._selection_box_value == "this coment is being written now"
+    assert service._selection_box_range == (5, 15)
+
+
+def test_word_document_selection_still_uses_applescript(monkeypatch):
+    """With the manuscript focused, nothing about the old path changed."""
+    from src import word_integration as wi
+    from src.live_service import LivePreviewService
+
+    monkeypatch.setattr(wi, "focused_text_field", lambda pid: None)
+    word = _RecordingWord("a sentence in the manuscript")
+    monkeypatch.setattr(wi, "get_word_integration", lambda: word)
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._editor = _WordServiceEditor()
+    spawned: list[tuple] = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawned.append(a))
+    monkeypatch.setattr(service, "_pointer_near_selection", lambda: True)
+
+    service._sample(now=1000.0)
+    service._sample(now=2000.0)
+    service._sample(now=3000.0)
+
+    # The poll reads the selection through AppleScript (the span read), and
+    # the context is fetched once, when the new selection is committed.
+    assert word.selection_span_calls >= 2
+    assert spawned and spawned[0][1] == "a sentence in the manuscript"
+    assert service._selection_is_comment_box is False
+
+
+def test_word_context_is_read_once_per_selection(monkeypatch):
+    """The 250-character context is a once-per-selection read, not a per-tick one.
+
+    Measured on this machine (2026-10-08): the full Word read costs 229 ms a
+    tick, the span 187 ms, and the difference is the two context ranges. They
+    can only change with the selection, so the poll leaves them out and the
+    service fetches them when a new selection commits - and remembers them, so
+    the preview cache key stays the same on later ticks (the hover-return path
+    must serve the cached panel, not spend a second provider call).
+    """
+    from src import word_integration as wi
+    from src.live_service import LivePreviewService
+
+    monkeypatch.setattr(wi, "focused_text_field", lambda pid: None)
+    word = _RecordingWord("a sentence in the manuscript")
+    monkeypatch.setattr(wi, "get_word_integration", lambda: word)
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._editor = _WordServiceEditor()
+    spawned: list[tuple] = []
+    monkeypatch.setattr(service, "_spawn_preview", lambda *a: spawned.append(a))
+    monkeypatch.setattr(service, "_pointer_near_selection", lambda: True)
+
+    for tick in range(4):
+        service._sample(now=1000.0 + tick)
+
+    assert word.context_calls == 1, (
+        "the context was read more than once for one selection"
+    )
+    assert service._word_context == ("before text", "after text")
+    assert service._word_context_key == (0, 28, "a sentence in the manuscript")
+    assert spawned and spawned[0][2]["context_before"] == "before text"
+
+
+def test_a_cancelled_preview_does_not_kill_the_next_one(monkeypatch):
+    """Double-Escape cancels one preview, not every preview after it.
+
+    The cancel flag is shared with the worker, and ``preview_edits_once``
+    raises the moment it sees a set event. Left set, Live Check went quiet for
+    the rest of the session: no card, no error - the owner's "the app gets
+    slower/does less" shape.
+    """
+    from src import live_service as ls
+    from src.live_service import LivePreviewService
+
+    captured: list = []
+
+    class _Signal:
+        def connect(self, _callback) -> None:
+            return None
+
+    class FakeWorker:
+        def __init__(
+            self, settings, target, selected, before, after, cancel_event
+        ) -> None:
+            captured.append(cancel_event)
+            self.done = _Signal()
+            self.failed = _Signal()
+            self.cancelled = _Signal()
+            self.finished = _Signal()
+
+        def start(self) -> None:
+            return None
+
+        def deleteLater(self) -> None:
+            return None
+
+    monkeypatch.setattr(ls, "PreviewWorker", FakeWorker)
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._cancel_event.set()  # the double-Escape cancel left it set
+
+    service._spawn_preview(
+        _word_target(), "a sentence in the manuscript", {}, "key"
+    )
+
+    assert captured, "no preview worker was created"
+    assert captured[0].is_set() is False, (
+        "the new preview inherited the old cancel state"
+    )
+
+
+def test_word_comment_box_apply_rewrites_the_box_through_the_writer(monkeypatch):
+    """Apply rewrites the box around the corrected span, in one write."""
+    from src import word_integration as wi
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    rewrites: list[tuple[str, str]] = []
+
+    def write_box(expected, new):
+        rewrites.append((expected, new))
+        return True, "Applied to the comment."
+
+    monkeypatch.setattr(wi, "replace_comment_box_text", write_box)
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._selection_is_comment_box = True
+    service._selection_has_range = False
+    service._selection_is_word = False
+    service._selection_target = _word_target()
+    service._selection_text = "coment is being"
+    service._seen_text = service._selection_text
+    service._selection_box_value = "this coment is being written now"
+    service._selection_box_range = (5, 15)
+    editor = _WordServiceEditor()
+    editor.word_value = service._selection_box_value
+    editor.word_text = "coment is being"
+    editor.word_range = (5, 15)
+    service._editor = editor
+    service._pending = [
+        EditSpan("coment", "comment", "Spelling", 0, 6),
+    ]
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert rewrites == [
+        ("this coment is being written now", "this comment is being written now")
+    ]
+    assert messages == ["Applied to the comment."]
+    assert service._selection_box_value == "this comment is being written now"
+
+
+def test_word_comment_box_apply_refuses_when_the_box_moved_on(monkeypatch):
+    """A comment that changed while the provider ran is never clobbered."""
+    from src import word_integration as wi
+    from src.live_preview import EditSpan
+    from src.live_service import LivePreviewService
+
+    rewrites: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        wi,
+        "replace_comment_box_text",
+        lambda expected, new: (
+            rewrites.append((expected, new)) or (True, "Applied to the comment.")
+        ),
+    )
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._selection_is_comment_box = True
+    service._selection_target = _word_target()
+    service._selection_text = "coment is being"
+    service._seen_text = service._selection_text
+    service._selection_box_value = "this coment is being written now"
+    service._selection_box_range = (5, 15)
+    editor = _WordServiceEditor()
+    editor.word_value = "the user kept typing something else"
+    editor.word_text = "typing"
+    editor.word_range = (14, 6)
+    service._editor = editor
+    service._pending = [EditSpan("coment", "comment", "Spelling", 0, 6)]
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._apply_all()
+
+    assert rewrites == []
+    assert messages and "changed" in messages[0].lower()
+
+
+def test_word_comment_box_undo_writes_the_original_back(monkeypatch):
+    from src import word_integration as wi
+    from src.live_service import LivePreviewService, UndoStep
+
+    rewrites: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        wi,
+        "replace_comment_box_text",
+        lambda expected, new: (
+            rewrites.append((expected, new)) or (True, "Applied to the comment.")
+        ),
+    )
+
+    service = LivePreviewService()
+    service.refresh_settings(_live_settings())
+    service._selection_is_comment_box = True
+    service._selection_target = _word_target()
+    service._undo_state = {
+        "mode": "comment_box",
+        "target": _word_target(),
+        "selection_before": "this coment is being written now",
+        "steps": [
+            UndoStep(0, "this comment is being written now", "this coment is being written now")
+        ],
+    }
+    messages: list[str] = []
+    service.apply_done.connect(messages.append)
+
+    service._perform_undo()
+
+    assert rewrites == [
+        ("this comment is being written now", "this coment is being written now")
+    ]
+    assert messages == ["Undone."]

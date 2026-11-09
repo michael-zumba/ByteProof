@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -311,8 +312,11 @@ def run_mock(work: str) -> bool:
         )
         check(
             "no staging, backup, or DMG is left behind",
-            not os.path.exists(staging or "")
-            and not os.path.exists(dest + ".update-backup")
+            not glob.glob(dest + ".update-staging*")
+            and not glob.glob(dest + ".update-backup*")
+            and not os.path.exists(
+                os.path.join(support, "update", "install.lock")
+            )
             and not os.path.exists(downloaded or ""),
         )
 
@@ -360,6 +364,42 @@ def run_mock(work: str) -> bool:
         check(
             "the roll-back leaves the old bundle working",
             bundle_version(dest2) == OLD_VERSION,
+        )
+
+        # The owner's false alarm (2026-10-07): a helper whose payload was
+        # taken by a newer run found the staging gone and reported failure -
+        # after the update had already succeeded. When the target version is
+        # installed and nothing is staged, that run is done, not broken.
+        dest3 = os.path.join(work, "Applications3", f"{APP_NAME}.app")
+        stub_app(dest3, MOCK_VERSION)
+        support3 = os.path.join(work, "support3")
+        script3 = app_version.stage_macos_update(
+            dmg_path=dmg,
+            staging_path=dest3 + ".update-staging-lost-race",
+            dest_path=dest3,
+            pid=finished.pid,
+            version=MOCK_VERSION,
+            support_dir=support3,
+        )
+        subprocess.run(
+            ["/bin/bash", script3],
+            env={
+                **os.environ,
+                "BYTEPROOF_UPDATE_SKIP_OPEN": "1",
+                "BYTEPROOF_UPDATE_SKIP_NOTIFY": "1",
+            },
+            timeout=60,
+            check=False,
+        )
+        result3 = app_version.take_update_result(support3) or {}
+        check(
+            "a lost race next to an installed version reports success",
+            result3.get("status") == "ok",
+            str(result3.get("status")),
+        )
+        check(
+            "the lost race leaves no lock behind",
+            not os.path.exists(os.path.join(support3, "update", "install.lock")),
         )
     finally:
         app_version._is_allowed_url = real_allow
