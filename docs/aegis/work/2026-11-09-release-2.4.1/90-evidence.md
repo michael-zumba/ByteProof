@@ -98,11 +98,13 @@ Final run `42548396109`, tag `v2.4.1`:
 ```
 Tests (macos-latest)          success  1m37s  ← release gate
 Windows installer (x64)       success  1m55s  ← ZIP + MSIX attached
-Tests (windows-latest)        informational, cancelled after the packaging job
+Tests (windows-latest)        informational, cancellation requested
 ```
 
-The informational Windows job was cancelled after the gate and packaging jobs
-had succeeded, using the repository's normal wedge-avoidance procedure.
+The informational Windows job's cancellation was requested after the gate and
+packaging jobs had succeeded. As documented in the repository, a wedged test
+runner can ignore cancellation and timer updates; it does not gate the
+release.
 
 ## 5. Website and live update feed
 
